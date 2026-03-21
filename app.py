@@ -16,7 +16,8 @@ import sounddevice as sd
 from pynput import keyboard
 import mlx_whisper
 from AppKit import (NSApplication, NSImage, NSAttributedString, NSFont,
-                    NSFontAttributeName)
+                    NSFontAttributeName, NSMenu, NSMenuItem, NSObject)
+import objc
 
 SAMPLE_RATE = 16000
 
@@ -37,6 +38,40 @@ def make_dock_icon(emoji, size=256):
     ns_str.drawAtPoint_(((size - w) / 2, (size - h) / 2))
     image.unlockFocus()
     return image
+
+
+# Dock 右键菜单代理
+class DockDelegate(NSObject):
+    app_ref = None  # 指向 TranscriberApp 实例
+
+    def applicationDockMenu_(self, sender):
+        app = self.app_ref
+        menu = NSMenu.alloc().initWithTitle_("MacWhisper")
+
+        for label, model_key in [("Small (快速)", "Small (快速)"),
+                                  ("Medium (准确)", "Medium (准确)")]:
+            prefix = "✅ " if app.current_model == MODEL_OPTIONS[model_key] else "     "
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                prefix + label, "dockMenuAction:", ""
+            )
+            item.setTarget_(self)
+            item.setRepresentedObject_(model_key)
+            menu.addItem_(item)
+
+        menu.addItem_(NSMenuItem.separatorItem())
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "退出 MacWhisper", "terminate:", ""
+        )
+        menu.addItem_(quit_item)
+        return menu
+
+    @objc.signature(b"v@:@")
+    def dockMenuAction_(self, sender):
+        key = sender.representedObject()
+        if key == "Small (快速)":
+            self.app_ref._set_model_small(None)
+        elif key == "Medium (准确)":
+            self.app_ref._set_model_medium(None)
 
 
 class TranscriberApp(rumps.App):
@@ -66,6 +101,11 @@ class TranscriberApp(rumps.App):
         threading.Thread(target=self._transcription_worker, daemon=True).start()
         threading.Thread(target=self._start_hotkey_listener, daemon=True).start()
 
+        # 注册 Dock 右键菜单代理
+        self._dock_delegate = DockDelegate.alloc().init()
+        self._dock_delegate.app_ref = self
+        NSApplication.sharedApplication().setDelegate_(self._dock_delegate)
+
     def _set_status(self, text):
         self.status_item.title = f"状态: {text}"
 
@@ -73,13 +113,15 @@ class TranscriberApp(rumps.App):
         self.current_model      = MODEL_OPTIONS["Small (快速)"]
         self.item_small.title   = "✅ Small (快速)"
         self.item_medium.title  = "   Medium (准确)"
-        self._set_status("模型已切换: Small")
+        self._set_status("模型: Small ✓")
+        rumps.notification("MacWhisper", "模型已切换", "✅ Small (快速) — 速度优先")
 
     def _set_model_medium(self, _):
         self.current_model      = MODEL_OPTIONS["Medium (准确)"]
         self.item_small.title   = "   Small (快速)"
         self.item_medium.title  = "✅ Medium (准确)"
-        self._set_status("模型已切换: Medium (首次转录需加载)")
+        self._set_status("模型: Medium ✓")
+        rumps.notification("MacWhisper", "模型已切换", "✅ Medium (准确) — 首次转录需几秒加载")
 
     @rumps.timer(0.12)
     def _ui_updater(self, _):
