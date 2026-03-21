@@ -18,6 +18,16 @@ echo "Project directory: $SCRIPT_DIR"
 echo "App will be installed to: $APP_PATH"
 echo ""
 
+# ── Pre-flight: Apple Silicon check ───────────────────────
+
+ARCH=$(uname -m)
+if [ "$ARCH" != "arm64" ]; then
+    echo "ERROR: MacWhisper requires Apple Silicon (M1/M2/M3/M4)."
+    echo "       Detected architecture: $ARCH"
+    echo "       This Mac is not supported."
+    exit 1
+fi
+
 # ── Step 1: Python virtual environment ────────────────────
 
 if [ ! -d "$SCRIPT_DIR/venv" ]; then
@@ -84,6 +94,10 @@ cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
   <string>MacWhisper needs microphone access for voice transcription.</string>
   <key>NSAccessibilityUsageDescription</key>
   <string>MacWhisper needs Accessibility access to paste transcribed text and detect the Right Option hotkey.</string>
+  <key>LSArchitecturePriority</key>
+  <array>
+    <string>arm64</string>
+  </array>
 </dict>
 </plist>
 PLIST
