@@ -40,12 +40,22 @@ mkdir -p "${APP_PATH}/Contents/Resources"
 # App icon
 cp "${SCRIPT_DIR}/AppIcon.icns" "${APP_PATH}/Contents/Resources/AppIcon.icns"
 
-# Launcher script (logs stdout/stderr for debugging)
+# Launcher script — Python directly (no bash intermediary)
 cat > "${APP_PATH}/Contents/MacOS/${APP_NAME}" << LAUNCHER
-#!/bin/bash
-cd "${SCRIPT_DIR}"
-export SSL_CERT_FILE="\$("${SCRIPT_DIR}/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
-exec "${SCRIPT_DIR}/venv/bin/python3" app.py >> "${SCRIPT_DIR}/logs/macwhisper.log" 2>&1
+#!${SCRIPT_DIR}/venv/bin/python3
+import os, sys
+_dir = "${SCRIPT_DIR}"
+os.chdir(_dir)
+sys.path.insert(0, _dir)
+_log_dir = os.path.join(_dir, "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_lf = open(os.path.join(_log_dir, "macwhisper.log"), "a")
+sys.stdout = _lf
+sys.stderr = _lf
+import certifi
+os.environ["SSL_CERT_FILE"] = certifi.where()
+import runpy
+runpy.run_path(os.path.join(_dir, "app.py"), run_name="__main__")
 LAUNCHER
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 

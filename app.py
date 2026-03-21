@@ -11,9 +11,18 @@ import os
 import time
 import queue
 import subprocess
+import sys
 
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
+from AppKit import NSApplication, NSImage
+_app = NSApplication.sharedApplication()
+_app.setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory (menu bar app)
+
+_bundle_icon = os.path.join(os.path.dirname(sys.argv[0]), "..", "Resources", "AppIcon.icns") if ".app" in sys.argv[0] else None
+if _bundle_icon and os.path.exists(_bundle_icon):
+    _app.setApplicationIconImage_(NSImage.alloc().initByReferencingFile_(_bundle_icon))
 
 import numpy as np
 import rumps
