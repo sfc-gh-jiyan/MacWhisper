@@ -11,4 +11,5 @@ if [ ! -d "$SCRIPT_DIR/venv" ]; then
 fi
 
 cd "$SCRIPT_DIR"
+export SSL_CERT_FILE="$(venv/bin/python3 -c 'import certifi; print(certifi.where())')"
 exec venv/bin/python3 app.py

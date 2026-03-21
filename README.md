@@ -21,13 +21,11 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 
 - macOS on Apple Silicon (M1/M2/M3/M4)
 - Python 3.10+
-- Microphone permission
-- Accessibility permission (for global hotkey)
 
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/MacWhisper.git
+git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
 ./install.sh
 ```
@@ -36,6 +34,18 @@ The install script will:
 1. Create a Python virtual environment and install dependencies
 2. Build a `MacWhisper.app` in `/Applications`
 3. Verify all dependencies are working
+
+### Required Permissions
+
+MacWhisper needs **three** macOS permissions to function. Grant them in **System Settings → Privacy & Security**:
+
+| Permission | Why | What to add |
+|---|---|---|
+| **Microphone** | Record audio | `MacWhisper` |
+| **Accessibility** | Auto-paste transcribed text (Cmd+V) | `MacWhisper` |
+| **Input Monitoring** | Detect Right Option key globally | `MacWhisper` |
+
+> **Running from Terminal?** If you use `./run.sh` instead of the .app, you must also add your **terminal app** (Terminal, iTerm, etc.) to both Accessibility and Input Monitoring.
 
 ## Usage
 

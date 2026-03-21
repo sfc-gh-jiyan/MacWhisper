@@ -21,18 +21,18 @@ echo ""
 # ── Step 1: Python virtual environment ────────────────────
 
 if [ ! -d "$SCRIPT_DIR/venv" ]; then
-    echo "[1/4] Creating Python virtual environment..."
+    echo "[1/5] Creating Python virtual environment..."
     python3 -m venv "$SCRIPT_DIR/venv"
 else
-    echo "[1/4] Virtual environment already exists, skipping."
+    echo "[1/5] Virtual environment already exists, skipping."
 fi
 
-echo "[2/4] Installing dependencies..."
-"$SCRIPT_DIR/venv/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+echo "[2/5] Installing dependencies (this may take a few minutes)..."
+"$SCRIPT_DIR/venv/bin/pip" install --progress-bar on -r "$SCRIPT_DIR/requirements.txt"
 
 # ── Step 2: Create .app bundle ────────────────────────────
 
-echo "[3/4] Creating ${APP_NAME}.app bundle..."
+echo "[3/5] Creating ${APP_NAME}.app bundle..."
 
 mkdir -p "${APP_PATH}/Contents/MacOS"
 mkdir -p "${APP_PATH}/Contents/Resources"
@@ -41,6 +41,7 @@ mkdir -p "${APP_PATH}/Contents/Resources"
 cat > "${APP_PATH}/Contents/MacOS/${APP_NAME}" << LAUNCHER
 #!/bin/bash
 cd "${SCRIPT_DIR}"
+export SSL_CERT_FILE="\$("${SCRIPT_DIR}/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
 exec "${SCRIPT_DIR}/venv/bin/python3" app.py
 LAUNCHER
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
@@ -66,6 +67,8 @@ cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
   <string>APPL</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>MacWhisper needs microphone access for voice transcription.</string>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>MacWhisper needs Accessibility access to paste transcribed text and detect the Right Option hotkey.</string>
 </dict>
 </plist>
 PLIST
@@ -74,10 +77,20 @@ PLIST
 
 mkdir -p "$SCRIPT_DIR/logs"
 
-# ── Step 4: Verify ────────────────────────────────────────
+# ── Step 4: Pre-download default model ───────────────────
 
-echo "[4/4] Verifying installation..."
-"$SCRIPT_DIR/venv/bin/python3" -c "import rumps, mlx_whisper, pynput, sounddevice, pyperclip; print('All dependencies OK')"
+echo "[4/5] Pre-downloading default model (~460 MB, first time only)..."
+export SSL_CERT_FILE="$("$SCRIPT_DIR/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
+"$SCRIPT_DIR/venv/bin/python3" -c "
+from huggingface_hub import snapshot_download
+snapshot_download('mlx-community/whisper-small-mlx')
+print('Model downloaded OK')
+" 2>&1 || echo "  ⚠  Model download failed (will retry on first launch). Check your internet connection."
+
+# ── Step 5: Verify ────────────────────────────────────────
+
+echo "[5/5] Verifying installation..."
+"$SCRIPT_DIR/venv/bin/python3" -c "import rumps, mlx_whisper, pynput, sounddevice, pyperclip, certifi; print('All dependencies OK')"
 
 echo ""
 echo "=========================================="
@@ -88,10 +101,14 @@ echo "  To launch:"
 echo "    Option A: Open ${APP_NAME} from /Applications"
 echo "    Option B: Run './run.sh' from this directory"
 echo ""
-echo "  First time setup:"
-echo "    1. macOS will ask for Microphone permission — allow it"
-echo "    2. macOS will ask for Accessibility permission — allow it"
-echo "       (System Settings → Privacy & Security → Accessibility)"
+echo "  First time setup (System Settings → Privacy & Security):"
+echo "    Grant these 3 permissions to MacWhisper (or your Terminal app if using ./run.sh):"
+echo ""
+echo "    1. Microphone           — for recording audio"
+echo "    2. Accessibility        — for auto-paste (Cmd+V simulation)"
+echo "    3. Input Monitoring     — for global hotkey (Right Option key)"
+echo ""
+echo "    ⚠  If you launch via Terminal/iTerm, add BOTH the terminal app AND MacWhisper."
 echo ""
 echo "  Usage:"
 echo "    Hold Right Option key to record, release to transcribe"

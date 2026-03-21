@@ -21,13 +21,11 @@
 
 - macOS + Apple Silicon（M1/M2/M3/M4）
 - Python 3.10+
-- 麦克风权限
-- 辅助功能权限（用于全局快捷键）
 
 ## 安装
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/MacWhisper.git
+git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
 ./install.sh
 ```
@@ -36,6 +34,18 @@ cd MacWhisper
 1. 创建 Python 虚拟环境并安装依赖
 2. 在 `/Applications` 中创建 `MacWhisper.app`
 3. 验证所有依赖是否正常
+
+### 必需权限
+
+MacWhisper 需要 **三项** macOS 权限才能正常运行。在 **系统设置 → 隐私与安全性** 中授权：
+
+| 权限 | 用途 | 添加对象 |
+|---|---|---|
+| **麦克风** | 录制音频 | `MacWhisper` |
+| **辅助功能** | 自动粘贴转录文字（模拟 Cmd+V） | `MacWhisper` |
+| **输入监控** | 全局监听右 Option 键 | `MacWhisper` |
+
+> **从终端启动？** 如果你使用 `./run.sh` 而不是 .app，还需要将你的**终端应用**（Terminal、iTerm 等）也添加到"辅助功能"和"输入监控"中。
 
 ## 使用
 

@@ -12,6 +12,9 @@ import time
 import queue
 import subprocess
 
+import certifi
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
 import numpy as np
 import rumps
 import pyperclip
@@ -20,6 +23,7 @@ from pynput import keyboard
 import mlx_whisper
 from AppKit import (NSApplication, NSImage, NSAttributedString, NSFont,
                     NSFontAttributeName)
+from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
 CONFIG_PATH = os.path.expanduser("~/.macwhisper_config.json")
@@ -105,9 +109,12 @@ class TranscriberApp(rumps.App):
         self._ctrl_pressed  = False
         self._shift_pressed = False
 
+        self._key_event_received = False
+
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
         threading.Thread(target=self._start_hotkey_listener, daemon=True).start()
+        threading.Thread(target=self._check_permissions, daemon=True).start()
 
     def _set_status(self, text):
         self.status_item.title = f"Status: {text}"
@@ -153,6 +160,26 @@ class TranscriberApp(rumps.App):
                 make_dock_icon(icon)
             )
 
+    # ── Permissions ────────────────────────────────────────────
+
+    def _check_permissions(self):
+        if not AXIsProcessTrusted():
+            print("[WARN] Accessibility permission NOT granted — auto-paste will fail")
+            rumps.notification(
+                "MacWhisper — Permission Needed",
+                "Accessibility access is required",
+                "Go to System Settings → Privacy & Security → Accessibility and add this app.",
+            )
+
+        time.sleep(8)
+        if not self._key_event_received:
+            print("[WARN] No key events detected — Input Monitoring may not be granted")
+            rumps.notification(
+                "MacWhisper — Permission Needed",
+                "Input Monitoring access is required",
+                "Go to System Settings → Privacy & Security → Input Monitoring and add this app.",
+            )
+
     # ── Hotkeys ──────────────────────────────────────────────
 
     def _start_hotkey_listener(self):
@@ -162,6 +189,7 @@ class TranscriberApp(rumps.App):
             listener.join()
 
     def _on_press(self, key):
+        self._key_event_received = True
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
             self._ctrl_pressed = True
         elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
