@@ -1,6 +1,7 @@
 """
 MacWhisper - macOS Menu Bar App
 长按右 Option 录音，松开自动转录并打出文字
+Ctrl + Shift + M  弹出模型切换对话框
 """
 
 import threading
@@ -16,8 +17,7 @@ import sounddevice as sd
 from pynput import keyboard
 import mlx_whisper
 from AppKit import (NSApplication, NSImage, NSAttributedString, NSFont,
-                    NSFontAttributeName, NSMenu, NSMenuItem, NSObject)
-import objc
+                    NSFontAttributeName)
 
 SAMPLE_RATE = 16000
 
@@ -25,6 +25,7 @@ MODEL_OPTIONS = {
     "Small (快速)":  "mlx-community/whisper-small-mlx",
     "Medium (准确)": "mlx-community/whisper-medium-mlx",
 }
+MODEL_KEYS = list(MODEL_OPTIONS.keys())
 
 
 def make_dock_icon(emoji, size=256):
@@ -40,40 +41,6 @@ def make_dock_icon(emoji, size=256):
     return image
 
 
-# Dock 右键菜单代理
-class DockDelegate(NSObject):
-    app_ref = None  # 指向 TranscriberApp 实例
-
-    def applicationDockMenu_(self, sender):
-        app = self.app_ref
-        menu = NSMenu.alloc().initWithTitle_("MacWhisper")
-
-        for label, model_key in [("Small (快速)", "Small (快速)"),
-                                  ("Medium (准确)", "Medium (准确)")]:
-            prefix = "✅ " if app.current_model == MODEL_OPTIONS[model_key] else "     "
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                prefix + label, "dockMenuAction:", ""
-            )
-            item.setTarget_(self)
-            item.setRepresentedObject_(model_key)
-            menu.addItem_(item)
-
-        menu.addItem_(NSMenuItem.separatorItem())
-        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "退出 MacWhisper", "terminate:", ""
-        )
-        menu.addItem_(quit_item)
-        return menu
-
-    @objc.signature(b"v@:@")
-    def dockMenuAction_(self, sender):
-        key = sender.representedObject()
-        if key == "Small (快速)":
-            self.app_ref._set_model_small(None)
-        elif key == "Medium (准确)":
-            self.app_ref._set_model_medium(None)
-
-
 class TranscriberApp(rumps.App):
     def __init__(self):
         super().__init__("🎙", quit_button="退出")
@@ -83,12 +50,13 @@ class TranscriberApp(rumps.App):
             rumps.MenuItem("✅ Small (快速)",  callback=self._set_model_small),
             rumps.MenuItem("   Medium (准确)", callback=self._set_model_medium),
             rumps.separator,
+            rumps.MenuItem("切换模型: Ctrl+Shift+M"),
             rumps.MenuItem("长按右 Option 录音，松开转录"),
             rumps.separator,
         ]
-        self.status_item       = self.menu["状态: 就绪 ✓"]
-        self.item_small        = self.menu["✅ Small (快速)"]
-        self.item_medium       = self.menu["   Medium (准确)"]
+        self.status_item  = self.menu["状态: 就绪 ✓"]
+        self.item_small   = self.menu["✅ Small (快速)"]
+        self.item_medium  = self.menu["   Medium (准确)"]
 
         self.recording     = False
         self.frames        = []
@@ -97,31 +65,48 @@ class TranscriberApp(rumps.App):
         self._pending_icon = "🎙"
         self.current_model = MODEL_OPTIONS["Small (快速)"]
 
+        # 热键状态
+        self._ctrl_pressed  = False
+        self._shift_pressed = False
+
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
         threading.Thread(target=self._start_hotkey_listener, daemon=True).start()
-
-        # 注册 Dock 右键菜单代理
-        self._dock_delegate = DockDelegate.alloc().init()
-        self._dock_delegate.app_ref = self
-        NSApplication.sharedApplication().setDelegate_(self._dock_delegate)
 
     def _set_status(self, text):
         self.status_item.title = f"状态: {text}"
 
     def _set_model_small(self, _):
-        self.current_model      = MODEL_OPTIONS["Small (快速)"]
-        self.item_small.title   = "✅ Small (快速)"
-        self.item_medium.title  = "   Medium (准确)"
+        self.current_model     = MODEL_OPTIONS["Small (快速)"]
+        self.item_small.title  = "✅ Small (快速)"
+        self.item_medium.title = "   Medium (准确)"
         self._set_status("模型: Small ✓")
         rumps.notification("MacWhisper", "模型已切换", "✅ Small (快速) — 速度优先")
 
     def _set_model_medium(self, _):
-        self.current_model      = MODEL_OPTIONS["Medium (准确)"]
-        self.item_small.title   = "   Small (快速)"
-        self.item_medium.title  = "✅ Medium (准确)"
+        self.current_model     = MODEL_OPTIONS["Medium (准确)"]
+        self.item_small.title  = "   Small (快速)"
+        self.item_medium.title = "✅ Medium (准确)"
         self._set_status("模型: Medium ✓")
         rumps.notification("MacWhisper", "模型已切换", "✅ Medium (准确) — 首次转录需几秒加载")
+
+    def _show_model_picker(self):
+        """在主线程弹出模型选择对话框"""
+        current_label = next(
+            k for k, v in MODEL_OPTIONS.items() if v == self.current_model
+        )
+        other_label = next(k for k in MODEL_KEYS if k != current_label)
+        response = rumps.alert(
+            title="MacWhisper — 切换模型",
+            message=f"当前模型: {current_label}\n\n点击要切换到的模型：",
+            ok=other_label,
+            cancel="保持不变",
+        )
+        if response == 1:  # ok was clicked
+            if other_label == "Small (快速)":
+                self._set_model_small(None)
+            else:
+                self._set_model_medium(None)
 
     @rumps.timer(0.12)
     def _ui_updater(self, _):
@@ -136,15 +121,35 @@ class TranscriberApp(rumps.App):
     def _start_hotkey_listener(self):
         with keyboard.Listener(
             on_press=self._on_press, on_release=self._on_release
-        ) as l:
-            l.join()
+        ) as listener:
+            listener.join()
 
     def _on_press(self, key):
+        # 追踪修饰键
+        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+            self._ctrl_pressed = True
+        elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
+            self._shift_pressed = True
+
+        # Ctrl + Shift + M → 模型切换对话框
+        try:
+            if (self._ctrl_pressed and self._shift_pressed
+                    and key.char in ("m", "M", "µ")):
+                threading.Thread(target=self._show_model_picker, daemon=True).start()
+                return
+        except AttributeError:
+            pass
+
+        # 右 Option → 开始录音
         if key == keyboard.Key.alt_r and not self.recording:
             threading.Thread(target=self._start_recording, daemon=True).start()
 
     def _on_release(self, key):
-        if key == keyboard.Key.alt_r and self.recording:
+        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+            self._ctrl_pressed = False
+        elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
+            self._shift_pressed = False
+        elif key == keyboard.Key.alt_r and self.recording:
             threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
 
     # ── 录音 ─────────────────────────────────────────────────
@@ -210,6 +215,7 @@ class TranscriberApp(rumps.App):
         result = mlx_whisper.transcribe(
             audio_float,
             path_or_hf_repo=self.current_model,
+            language="zh",
             initial_prompt="以下是普通话与英语的混合对话。",
         )
         text = result["text"].strip()
