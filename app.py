@@ -275,6 +275,8 @@ class TranscriberApp(rumps.App):
 
         result = mlx_whisper.transcribe(audio_float, **kwargs)
         text = result["text"].strip()
+        if prompt and text.startswith(prompt):
+            text = text[len(prompt):].strip()
         print(f"[INFO] Result: {text}")
 
         if text:
