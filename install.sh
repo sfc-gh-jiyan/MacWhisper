@@ -70,8 +70,6 @@ cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
-  <key>LSUIElement</key>
-  <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>MacWhisper needs microphone access for voice transcription.</string>
   <key>NSAccessibilityUsageDescription</key>

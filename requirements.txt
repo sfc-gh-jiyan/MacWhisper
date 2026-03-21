@@ -1,12 +1,7 @@
 certifi>=2024.0.0
-huggingface-hub>=0.20.0
-mlx>=0.31.0
-mlx-metal>=0.31.0
 mlx-whisper>=0.4.0
 numpy>=2.0.0
 pynput>=1.8.0
-pyobjc-core>=12.0
-pyobjc-framework-Cocoa>=12.0
 pyperclip>=1.9.0
 rumps>=0.4.0
 sounddevice>=0.5.0

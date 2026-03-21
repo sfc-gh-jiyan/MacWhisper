@@ -21,8 +21,6 @@ import pyperclip
 import sounddevice as sd
 from pynput import keyboard
 import mlx_whisper
-from AppKit import (NSApplication, NSImage, NSAttributedString, NSFont,
-                    NSFontAttributeName)
 from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
@@ -34,19 +32,6 @@ MODEL_OPTIONS = {
     "Large (Best)":      "mlx-community/whisper-large-v3-mlx",
 }
 MODEL_KEYS = list(MODEL_OPTIONS.keys())
-
-
-def make_dock_icon(emoji, size=256):
-    image = NSImage.alloc().initWithSize_((size, size))
-    image.lockFocus()
-    font = NSFont.systemFontOfSize_(size * 0.72)
-    ns_str = NSAttributedString.alloc().initWithString_attributes_(
-        emoji, {NSFontAttributeName: font}
-    )
-    w, h = ns_str.size()
-    ns_str.drawAtPoint_(((size - w) / 2, (size - h) / 2))
-    image.unlockFocus()
-    return image
 
 
 class TranscriberApp(rumps.App):
@@ -104,7 +89,6 @@ class TranscriberApp(rumps.App):
         self.stream        = None
         self.model_ready   = True
         self._idle_icon    = idle_icon
-        self._pending_icon = idle_icon
 
         self._ctrl_pressed  = False
         self._shift_pressed = False
@@ -139,7 +123,6 @@ class TranscriberApp(rumps.App):
         self._idle_icon = "🌐" if self.translate_mode else "🎙"
         if not self.recording:
             self.title = self._idle_icon
-            self._pending_icon = self._idle_icon
         mode_str = "Translate ON" if self.translate_mode else "Transcribe"
         self._set_status(mode_str)
         self._save_config()
@@ -152,32 +135,32 @@ class TranscriberApp(rumps.App):
         next_idx = (current_idx + 1) % len(MODEL_KEYS)
         self._set_model(MODEL_KEYS[next_idx])
 
-    @rumps.timer(0.12)
-    def _ui_updater(self, _):
-        if self._pending_icon:
-            icon, self._pending_icon = self._pending_icon, None
-            NSApplication.sharedApplication().setApplicationIconImage_(
-                make_dock_icon(icon)
-            )
-
     # ── Permissions ────────────────────────────────────────────
+
+    def _notify(self, title, subtitle, message):
+        try:
+            rumps.notification(title, subtitle, message)
+        except RuntimeError:
+            pass
 
     def _check_permissions(self):
         if not AXIsProcessTrusted():
             print("[WARN] Accessibility permission NOT granted — auto-paste will fail")
-            rumps.notification(
+            print("       → System Settings → Privacy & Security → Accessibility")
+            self._notify(
                 "MacWhisper — Permission Needed",
                 "Accessibility access is required",
-                "Go to System Settings → Privacy & Security → Accessibility and add this app.",
+                "System Settings → Privacy & Security → Accessibility",
             )
 
         time.sleep(8)
         if not self._key_event_received:
             print("[WARN] No key events detected — Input Monitoring may not be granted")
-            rumps.notification(
+            print("       → System Settings → Privacy & Security → Input Monitoring")
+            self._notify(
                 "MacWhisper — Permission Needed",
                 "Input Monitoring access is required",
-                "Go to System Settings → Privacy & Security → Input Monitoring and add this app.",
+                "System Settings → Privacy & Security → Input Monitoring",
             )
 
     # ── Hotkeys ──────────────────────────────────────────────
@@ -221,7 +204,6 @@ class TranscriberApp(rumps.App):
         self.frames    = []
         self.recording = True
         self.title     = "🔴"
-        self._pending_icon = "🔴"
         self._set_status("Recording...")
         print("[INFO] Recording started")
 
@@ -246,12 +228,10 @@ class TranscriberApp(rumps.App):
 
         if not self.frames:
             self.title = self._idle_icon
-            self._pending_icon = self._idle_icon
             self._set_status("Ready")
             return
 
         self.title = "💬"
-        self._pending_icon = "💬"
         self._set_status("Transcribing...")
         self.transcribe_queue.put(list(self.frames))
 
@@ -267,7 +247,6 @@ class TranscriberApp(rumps.App):
             finally:
                 self.transcribe_queue.task_done()
                 self.title = self._idle_icon
-                self._pending_icon = self._idle_icon
                 self._set_status("Ready")
 
     def _do_transcribe(self, frames):
