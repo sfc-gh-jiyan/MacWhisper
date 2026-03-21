@@ -19,7 +19,11 @@ from AppKit import (NSApplication, NSImage, NSAttributedString, NSFont,
                     NSFontAttributeName)
 
 SAMPLE_RATE = 16000
-MLX_MODEL   = "mlx-community/whisper-small-mlx"
+
+MODEL_OPTIONS = {
+    "Small (快速)":  "mlx-community/whisper-small-mlx",
+    "Medium (准确)": "mlx-community/whisper-medium-mlx",
+}
 
 
 def make_dock_icon(emoji, size=256):
@@ -41,16 +45,22 @@ class TranscriberApp(rumps.App):
         self.menu = [
             rumps.MenuItem("状态: 就绪 ✓"),
             rumps.separator,
+            rumps.MenuItem("✅ Small (快速)",  callback=self._set_model_small),
+            rumps.MenuItem("   Medium (准确)", callback=self._set_model_medium),
+            rumps.separator,
             rumps.MenuItem("长按右 Option 录音，松开转录"),
             rumps.separator,
         ]
-        self.status_item = self.menu["状态: 就绪 ✓"]
+        self.status_item       = self.menu["状态: 就绪 ✓"]
+        self.item_small        = self.menu["✅ Small (快速)"]
+        self.item_medium       = self.menu["   Medium (准确)"]
 
         self.recording     = False
         self.frames        = []
         self.stream        = None
         self.model_ready   = True
         self._pending_icon = "🎙"
+        self.current_model = MODEL_OPTIONS["Small (快速)"]
 
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
@@ -58,6 +68,18 @@ class TranscriberApp(rumps.App):
 
     def _set_status(self, text):
         self.status_item.title = f"状态: {text}"
+
+    def _set_model_small(self, _):
+        self.current_model      = MODEL_OPTIONS["Small (快速)"]
+        self.item_small.title   = "✅ Small (快速)"
+        self.item_medium.title  = "   Medium (准确)"
+        self._set_status("模型已切换: Small")
+
+    def _set_model_medium(self, _):
+        self.current_model      = MODEL_OPTIONS["Medium (准确)"]
+        self.item_small.title   = "   Small (快速)"
+        self.item_medium.title  = "✅ Medium (准确)"
+        self._set_status("模型已切换: Medium (首次转录需加载)")
 
     @rumps.timer(0.12)
     def _ui_updater(self, _):
@@ -145,7 +167,7 @@ class TranscriberApp(rumps.App):
 
         result = mlx_whisper.transcribe(
             audio_float,
-            path_or_hf_repo=MLX_MODEL,
+            path_or_hf_repo=self.current_model,
             initial_prompt="以下是普通话与英语的混合对话。",
         )
         text = result["text"].strip()
