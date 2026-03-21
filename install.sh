@@ -77,13 +77,22 @@ PLIST
 
 mkdir -p "$SCRIPT_DIR/logs"
 
-# ── Step 4: Pre-download default model ───────────────────
+# ── Step 4: Pre-download model ───────────────────────────
 
-echo "[4/5] Pre-downloading default model (~460 MB, first time only)..."
 export SSL_CERT_FILE="$("$SCRIPT_DIR/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
+MODEL_REPO="$("$SCRIPT_DIR/venv/bin/python3" -c "
+import json, os
+cfg_path = os.path.expanduser('~/.macwhisper_config.json')
+try:
+    model = json.load(open(cfg_path))['current_model']
+except Exception:
+    model = 'mlx-community/whisper-small-mlx'
+print(model)
+")"
+echo "[4/5] Pre-downloading model: ${MODEL_REPO} (first time only)..."
 "$SCRIPT_DIR/venv/bin/python3" -c "
 from huggingface_hub import snapshot_download
-snapshot_download('mlx-community/whisper-small-mlx')
+snapshot_download('${MODEL_REPO}')
 print('Model downloaded OK')
 " 2>&1 || echo "  ⚠  Model download failed (will retry on first launch). Check your internet connection."
 
