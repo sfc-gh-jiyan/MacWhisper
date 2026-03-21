@@ -53,7 +53,11 @@ cp "${SCRIPT_DIR}/AppIcon.icns" "${APP_PATH}/Contents/Resources/AppIcon.icns"
 # Launcher script — Python directly (no bash intermediary)
 cat > "${APP_PATH}/Contents/MacOS/${APP_NAME}" << LAUNCHER
 #!${SCRIPT_DIR}/venv/bin/python3
-import os, sys
+import os, sys, platform
+if platform.machine() != "arm64":
+    import subprocess
+    r = subprocess.run(["/usr/bin/arch", "-arm64", sys.executable] + sys.argv)
+    sys.exit(r.returncode)
 _dir = "${SCRIPT_DIR}"
 os.chdir(_dir)
 sys.path.insert(0, _dir)
