@@ -37,12 +37,15 @@ echo "[3/5] Creating ${APP_NAME}.app bundle..."
 mkdir -p "${APP_PATH}/Contents/MacOS"
 mkdir -p "${APP_PATH}/Contents/Resources"
 
-# Launcher script
+# App icon
+cp "${SCRIPT_DIR}/AppIcon.icns" "${APP_PATH}/Contents/Resources/AppIcon.icns"
+
+# Launcher script (logs stdout/stderr for debugging)
 cat > "${APP_PATH}/Contents/MacOS/${APP_NAME}" << LAUNCHER
 #!/bin/bash
 cd "${SCRIPT_DIR}"
 export SSL_CERT_FILE="\$("${SCRIPT_DIR}/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
-exec "${SCRIPT_DIR}/venv/bin/python3" app.py
+exec "${SCRIPT_DIR}/venv/bin/python3" app.py >> "${SCRIPT_DIR}/logs/macwhisper.log" 2>&1
 LAUNCHER
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 
@@ -63,8 +66,12 @@ cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
   <string>1.0</string>
   <key>CFBundleExecutable</key>
   <string>MacWhisper</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>LSUIElement</key>
+  <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>MacWhisper needs microphone access for voice transcription.</string>
   <key>NSAccessibilityUsageDescription</key>
