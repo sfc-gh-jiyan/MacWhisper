@@ -29,17 +29,21 @@
 ```bash
 git clone https://github.com/YOUR_USERNAME/MacWhisper.git
 cd MacWhisper
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+./install.sh
 ```
+
+安装脚本会自动完成：
+1. 创建 Python 虚拟环境并安装依赖
+2. 在 `/Applications` 中创建 `MacWhisper.app`
+3. 验证所有依赖是否正常
 
 ## 使用
 
+**方式 A** — 从"应用程序"文件夹打开 `MacWhisper`（Launchpad 或 Spotlight 搜索）
+
+**方式 B** — 从终端启动：
 ```bash
-source venv/bin/activate
-python3 app.py
+./run.sh
 ```
 
 菜单栏出现麦克风图标（🎙），即可使用。
@@ -101,43 +105,6 @@ python3 app.py
   "current_model": "mlx-community/whisper-medium-mlx"
 }
 ```
-
-## 创建 .app 应用（可选）
-
-如果想从"应用程序"文件夹启动 MacWhisper：
-
-```bash
-mkdir -p /Applications/MacWhisper.app/Contents/MacOS
-
-cat > /Applications/MacWhisper.app/Contents/MacOS/MacWhisper << 'EOF'
-#!/bin/bash
-cd /你的项目路径/MacWhisper
-exec ./venv/bin/python3 app.py
-EOF
-chmod +x /Applications/MacWhisper.app/Contents/MacOS/MacWhisper
-
-cat > /Applications/MacWhisper.app/Contents/Info.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key>
-  <string>MacWhisper</string>
-  <key>CFBundleDisplayName</key>
-  <string>MacWhisper</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.macwhisper.app</string>
-  <key>CFBundleExecutable</key>
-  <string>MacWhisper</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-</dict>
-</plist>
-EOF
-```
-
-将 `/你的项目路径/MacWhisper` 替换为实际的项目路径。
 
 ## 技术栈
 

@@ -29,17 +29,21 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 ```bash
 git clone https://github.com/YOUR_USERNAME/MacWhisper.git
 cd MacWhisper
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+./install.sh
 ```
+
+The install script will:
+1. Create a Python virtual environment and install dependencies
+2. Build a `MacWhisper.app` in `/Applications`
+3. Verify all dependencies are working
 
 ## Usage
 
+**Option A** — Open `MacWhisper` from your Applications folder (Launchpad or Spotlight)
+
+**Option B** — Run from terminal:
 ```bash
-source venv/bin/activate
-python3 app.py
+./run.sh
 ```
 
 A microphone icon (🎙) appears in your menu bar. That's it — you're ready.
@@ -101,43 +105,6 @@ Settings are stored in `~/.macwhisper_config.json`:
   "current_model": "mlx-community/whisper-medium-mlx"
 }
 ```
-
-## Creating a .app Bundle (Optional)
-
-To launch MacWhisper from your Applications folder:
-
-```bash
-mkdir -p /Applications/MacWhisper.app/Contents/MacOS
-
-cat > /Applications/MacWhisper.app/Contents/MacOS/MacWhisper << 'EOF'
-#!/bin/bash
-cd /path/to/MacWhisper
-exec ./venv/bin/python3 app.py
-EOF
-chmod +x /Applications/MacWhisper.app/Contents/MacOS/MacWhisper
-
-cat > /Applications/MacWhisper.app/Contents/Info.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key>
-  <string>MacWhisper</string>
-  <key>CFBundleDisplayName</key>
-  <string>MacWhisper</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.macwhisper.app</string>
-  <key>CFBundleExecutable</key>
-  <string>MacWhisper</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-</dict>
-</plist>
-EOF
-```
-
-Replace `/path/to/MacWhisper` with the actual path to your cloned repository.
 
 ## Tech Stack
 
