@@ -13,6 +13,8 @@ import time
 import queue
 import subprocess
 import sys
+import wave
+import datetime
 
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
@@ -101,6 +103,14 @@ MODEL_OPTIONS = {
     "Large (Best)":      "mlx-community/whisper-large-v3-mlx",
 }
 MODEL_KEYS = list(MODEL_OPTIONS.keys())
+
+HISTORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history")
+AUDIO_DIR = os.path.join(HISTORY_DIR, "audio")
+TRANSCRIPT_LOG = os.path.join(HISTORY_DIR, "transcripts.jsonl")
+SUBTITLE_LOG = os.path.join(HISTORY_DIR, "subtitles.jsonl")
+
+def _ensure_history_dirs():
+    os.makedirs(AUDIO_DIR, exist_ok=True)
 
 
 class TranscriberApp(rumps.App):
@@ -374,6 +384,17 @@ class TranscriberApp(rumps.App):
         audio = np.concatenate(frames, axis=0).squeeze()
         audio_float = audio.astype(np.float32) / 32768.0
 
+        # Save audio WAV for test corpus
+        _ensure_history_dirs()
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        wav_path = os.path.join(AUDIO_DIR, f"{timestamp}.wav")
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio.tobytes())
+        print(f"[INFO] Saved audio: {wav_path}")
+
         if self.translate_mode:
             task, prompt = "translate", None
             print(f"[INFO] Translating {len(audio_float)/SAMPLE_RATE:.1f}s audio to English...")
@@ -390,6 +411,19 @@ class TranscriberApp(rumps.App):
         if prompt and text.startswith(prompt):
             text = text[len(prompt):].strip()
         print(f"[INFO] Result: {text}")
+
+        # Log transcription result
+        log_entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "audio_file": os.path.basename(wav_path),
+            "model": self.current_model,
+            "translate": self.translate_mode,
+            "duration_s": round(len(audio_float) / SAMPLE_RATE, 1),
+            "text": text,
+        }
+        with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        print(f"[INFO] Logged transcript: {TRANSCRIPT_LOG}")
 
         if text:
             self._auto_paste(text + " ")
@@ -521,8 +555,18 @@ class TranscriberApp(rumps.App):
             try:
                 with self._inference_lock:
                     text = self._do_live_transcribe(snapshot)
-                if text and self._overlay_panel:
-                    AppHelper.callAfter(lambda t=text: self._replace_overlay(t))
+                if text:
+                    # Log subtitle with timestamp
+                    _ensure_history_dirs()
+                    entry = {
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "audio_s": round(len(snapshot) * 1024 / SAMPLE_RATE, 1),
+                        "text": text,
+                    }
+                    with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    if self._overlay_panel:
+                        AppHelper.callAfter(lambda t=text: self._replace_overlay(t))
             except Exception as e:
                 print(f"[ERROR] Live transcription failed: {e}")
 

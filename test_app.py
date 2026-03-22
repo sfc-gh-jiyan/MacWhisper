@@ -335,3 +335,144 @@ def test_opencc_t2s():
     import app
     assert app._t2s.convert("機器學習") == "机器学习"
     assert app._t2s.convert("Hello") == "Hello"
+
+
+# ── Test: history constants and dirs ─────────────────────────
+
+def test_history_constants():
+    import app
+    assert hasattr(app, "HISTORY_DIR")
+    assert hasattr(app, "AUDIO_DIR")
+    assert hasattr(app, "TRANSCRIPT_LOG")
+    assert app.AUDIO_DIR.endswith(os.path.join("history", "audio"))
+    assert app.TRANSCRIPT_LOG.endswith(os.path.join("history", "transcripts.jsonl"))
+
+
+def test_ensure_history_dirs(tmp_path):
+    import app
+    audio_dir = str(tmp_path / "history" / "audio")
+    with patch("app.AUDIO_DIR", audio_dir):
+        app._ensure_history_dirs()
+    assert os.path.isdir(audio_dir)
+    # Calling again should not raise
+    with patch("app.AUDIO_DIR", audio_dir):
+        app._ensure_history_dirs()
+
+
+def test_audio_history_saves_wav(tmp_path):
+    """_do_transcribe should save a WAV file to AUDIO_DIR."""
+    import app
+    import wave
+
+    audio_dir = str(tmp_path / "history" / "audio")
+    transcript_log = str(tmp_path / "history" / "transcripts.jsonl")
+
+    frames = _make_frames(5, 1024)
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.translate_mode = False
+    inst.current_model = "mlx-community/whisper-small-mlx"
+
+    mock_result = {"text": "Hello world"}
+    with patch("app.AUDIO_DIR", audio_dir), \
+         patch("app.TRANSCRIPT_LOG", transcript_log), \
+         patch("app.mlx_whisper.transcribe", return_value=mock_result), \
+         patch.object(inst, "_auto_paste"):
+        app._ensure_history_dirs()
+        inst._do_transcribe(frames)
+
+    wav_files = [f for f in os.listdir(audio_dir) if f.endswith(".wav")]
+    assert len(wav_files) == 1
+
+    wav_path = os.path.join(audio_dir, wav_files[0])
+    with wave.open(wav_path, "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        assert wf.getframerate() == 16000
+        assert wf.getnframes() == 5 * 1024
+
+
+def test_transcript_log_appends_jsonl(tmp_path):
+    """_do_transcribe should append a JSONL entry to TRANSCRIPT_LOG."""
+    import app
+
+    audio_dir = str(tmp_path / "history" / "audio")
+    transcript_log = str(tmp_path / "history" / "transcripts.jsonl")
+
+    frames = _make_frames(5, 1024)
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.translate_mode = False
+    inst.current_model = "mlx-community/whisper-small-mlx"
+
+    mock_result = {"text": "你好世界 hello"}
+    with patch("app.AUDIO_DIR", audio_dir), \
+         patch("app.TRANSCRIPT_LOG", transcript_log), \
+         patch("app.mlx_whisper.transcribe", return_value=mock_result), \
+         patch.object(inst, "_auto_paste"):
+        app._ensure_history_dirs()
+        inst._do_transcribe(frames)
+
+    assert os.path.isfile(transcript_log)
+    with open(transcript_log, encoding="utf-8") as f:
+        lines = f.readlines()
+    assert len(lines) == 1
+
+    entry = json.loads(lines[0])
+    assert entry["text"] == "你好世界 hello"
+    assert entry["model"] == "mlx-community/whisper-small-mlx"
+    assert entry["translate"] is False
+    assert "timestamp" in entry
+    assert "audio_file" in entry
+    assert entry["audio_file"].endswith(".wav")
+    assert entry["duration_s"] == round(5 * 1024 / 16000, 1)
+
+
+# ── Test: subtitle logging ───────────────────────────────────
+
+def test_subtitle_log_constant():
+    import app
+    assert hasattr(app, "SUBTITLE_LOG")
+    assert app.SUBTITLE_LOG.endswith(os.path.join("history", "subtitles.jsonl"))
+
+
+def test_subtitle_log_appends_on_live_result(tmp_path):
+    """_live_transcription_worker should log each non-empty subtitle to SUBTITLE_LOG."""
+    import app
+
+    audio_dir = str(tmp_path / "history" / "audio")
+    subtitle_log = str(tmp_path / "history" / "subtitles.jsonl")
+
+    frames = _make_frames(10, 1024)
+
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.recording = True
+    inst.current_model = "mlx-community/whisper-small-mlx"
+    inst._overlay_panel = None
+    inst._overlay_text = None
+    inst._inference_lock = __import__("threading").Lock()
+    inst._live_queue = queue.Queue(maxsize=4)
+
+    with patch("app.AUDIO_DIR", audio_dir), \
+         patch("app.SUBTITLE_LOG", subtitle_log), \
+         patch("app.mlx_whisper.transcribe", return_value={"text": "测试字幕内容"}):
+        app._ensure_history_dirs()
+        # Simulate what _live_transcription_worker does for one snapshot
+        text = inst._do_live_transcribe(frames)
+        if text:
+            app._ensure_history_dirs()
+            entry = {
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "audio_s": round(len(frames) * 1024 / 16000, 1),
+                "text": text,
+            }
+            with open(subtitle_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    assert os.path.isfile(subtitle_log)
+    with open(subtitle_log, encoding="utf-8") as f:
+        lines = f.readlines()
+    assert len(lines) == 1
+
+    entry = json.loads(lines[0])
+    assert "timestamp" in entry
+    assert "audio_s" in entry
+    assert entry["text"] == "测试字幕内容"
