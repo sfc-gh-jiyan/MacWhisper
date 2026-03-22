@@ -307,6 +307,28 @@ def test_hallucination_normal_text():
     assert app._is_hallucination("Hello world") is False
 
 
+# ── Test: trailing repetition stripping ───────────────────────
+
+def test_strip_trailing_cjk():
+    import app
+    result = app._strip_trailing_repetition("别的语言。举举举举举举举举举举举举")
+    assert "举" not in result
+    assert "别的语言" in result
+
+
+def test_strip_trailing_with_commas():
+    import app
+    result = app._strip_trailing_repetition("别的语言。啊,啊,啊,啊,啊,啊,啊,啊,啊")
+    assert result.count("啊") <= 1
+    assert "别的语言" in result
+
+
+def test_strip_trailing_preserves_clean():
+    import app
+    clean = "我上周去了San Francisco参加了一个conference。"
+    assert app._strip_trailing_repetition(clean) == clean
+
+
 # ── Test: opencc t2s ─────────────────────────────────────────
 
 def test_opencc_t2s():

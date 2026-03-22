@@ -55,26 +55,32 @@ _HALLUCINATION_PHRASES = {
     "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
 }
 
+def _strip_trailing_repetition(text):
+    """Remove repetitive tail that Whisper appends when decoder loops."""
+    m = re.search(r'(.{1,10}?)\1{3,}\s*$', text)
+    if m:
+        cleaned = text[:m.start()].rstrip(' ,，。.!！?？')
+        if cleaned:
+            return cleaned
+    return text
+
+
 def _is_hallucination(text):
     lower = text.lower().strip(" .!,。，！")
     if lower in _HALLUCINATION_PHRASES:
         return True
-    # Repetition: same token repeated 3+ times (e.g. "Ok Ok Ok", "sto sto sto")
     tokens = text.split()
     if len(tokens) >= 3:
         if len(set(tokens)) == 1:
             return True
-        # Sliding window: any 3 consecutive identical tokens
         for i in range(len(tokens) - 2):
             if tokens[i] == tokens[i+1] == tokens[i+2]:
                 return True
-    # CJK character repetition (e.g. "技术技术技术")
     if len(text) >= 6:
         for size in range(1, len(text) // 3 + 1):
             pat = text[:size]
             if pat * (len(text) // len(pat)) == text[:len(pat) * (len(text) // len(pat))] and len(text) // len(pat) >= 3:
                 return True
-    # Non-expected scripts (Tamil, Arabic, Cyrillic, etc.)
     for ch in text:
         cat = unicodedata.category(ch)
         if cat.startswith('L'):
@@ -82,7 +88,7 @@ def _is_hallucination(text):
             is_latin = block < 0x0250
             is_cjk = 0x2E80 <= block <= 0x9FFF or 0xF900 <= block <= 0xFAFF
             is_cjk_ext = 0x20000 <= block <= 0x2FA1F
-            is_kana = 0x3040 <= block <= 0x30FF  # Japanese kana (acceptable)
+            is_kana = 0x3040 <= block <= 0x30FF
             if not (is_latin or is_cjk or is_cjk_ext or is_kana):
                 return True
     return False
@@ -543,7 +549,8 @@ class TranscriberApp(rumps.App):
         if text.startswith(prompt):
             text = text[len(prompt):].strip()
         text = _t2s.convert(text)
-        if _is_hallucination(text):
+        text = _strip_trailing_repetition(text)
+        if not text or _is_hallucination(text):
             print(f"[INFO] Live result (hallucination filtered): {text}")
             return ""
         print(f"[INFO] Live result: {text}")
