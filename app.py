@@ -3,6 +3,7 @@ MacWhisper - macOS Menu Bar App
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
+Ctrl + Shift + S  toggle live subtitles (show preview while recording)
 """
 
 import json
@@ -16,9 +17,14 @@ import sys
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
-from AppKit import NSApplication, NSImage
+from AppKit import (
+    NSApplication, NSImage, NSPanel, NSColor, NSTextField, NSFont,
+    NSScreen, NSMakeRect, NSBackingStoreBuffered,
+)
+from PyObjCTools import AppHelper
+
 _app = NSApplication.sharedApplication()
-_app.setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory (menu bar app)
+_app.setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory
 
 _bundle_icon = os.path.join(os.path.dirname(sys.argv[0]), "..", "Resources", "AppIcon.icns") if ".app" in sys.argv[0] else None
 if _bundle_icon and os.path.exists(_bundle_icon):
@@ -30,9 +36,57 @@ import pyperclip
 import sounddevice as sd
 from pynput import keyboard
 import mlx_whisper
+import opencc
 from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
+LIVE_CHUNK_SECONDS = 3
+MAX_LIVE_WINDOW = 20          # seconds – cap to keep inference within budget
+SILENCE_RMS_THRESHOLD = 800   # int16 RMS below this = silence, skip inference
+NSWindowStyleMaskBorderless = 0
+
+_t2s = opencc.OpenCC('t2s')
+
+import re
+import unicodedata
+
+_HALLUCINATION_PHRASES = {
+    "thank you for watching", "thanks for watching", "thank you",
+    "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
+}
+
+def _is_hallucination(text):
+    lower = text.lower().strip(" .!,。，！")
+    if lower in _HALLUCINATION_PHRASES:
+        return True
+    # Repetition: same token repeated 3+ times (e.g. "Ok Ok Ok", "sto sto sto")
+    tokens = text.split()
+    if len(tokens) >= 3:
+        if len(set(tokens)) == 1:
+            return True
+        # Sliding window: any 3 consecutive identical tokens
+        for i in range(len(tokens) - 2):
+            if tokens[i] == tokens[i+1] == tokens[i+2]:
+                return True
+    # CJK character repetition (e.g. "技术技术技术")
+    if len(text) >= 6:
+        for size in range(1, len(text) // 3 + 1):
+            pat = text[:size]
+            if pat * (len(text) // len(pat)) == text[:len(pat) * (len(text) // len(pat))] and len(text) // len(pat) >= 3:
+                return True
+    # Non-expected scripts (Tamil, Arabic, Cyrillic, etc.)
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat.startswith('L'):
+            block = ord(ch)
+            is_latin = block < 0x0250
+            is_cjk = 0x2E80 <= block <= 0x9FFF or 0xF900 <= block <= 0xFAFF
+            is_cjk_ext = 0x20000 <= block <= 0x2FA1F
+            is_kana = 0x3040 <= block <= 0x30FF  # Japanese kana (acceptable)
+            if not (is_latin or is_cjk or is_cjk_ext or is_kana):
+                return True
+    return False
+
 CONFIG_PATH = os.path.expanduser("~/.macwhisper_config.json")
 
 MODEL_OPTIONS = {
@@ -44,6 +98,9 @@ MODEL_KEYS = list(MODEL_OPTIONS.keys())
 
 
 class TranscriberApp(rumps.App):
+
+    # ── Config ────────────────────────────────────────────────
+
     def _load_config(self):
         try:
             with open(CONFIG_PATH) as f:
@@ -55,18 +112,23 @@ class TranscriberApp(rumps.App):
         cfg = {
             "translate_mode": self.translate_mode,
             "current_model": self.current_model,
+            "live_mode": self.live_mode,
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f)
+
+    # ── Init ──────────────────────────────────────────────────
 
     def __init__(self):
         cfg = self._load_config()
         self.translate_mode = cfg.get("translate_mode", False)
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Small (Fast)"])
+        self.live_mode      = cfg.get("live_mode", False)
 
         idle_icon = "🌐" if self.translate_mode else "🎙"
         super().__init__(idle_icon, quit_button="Quit")
 
+        # Model menu items
         self.model_items = {}
         model_menu_items = []
         for label, repo in MODEL_OPTIONS.items():
@@ -77,6 +139,10 @@ class TranscriberApp(rumps.App):
             model_menu_items.append(item)
 
         translate_prefix = "✅" if self.translate_mode else "  "
+        live_prefix = "✅" if self.live_mode else "  "
+        live_label = "On" if self.live_mode else "Off"
+
+        self.item_live = rumps.MenuItem(f"{live_prefix} Live Subtitles: {live_label}", callback=self._toggle_live_mode)
 
         self.menu = [
             rumps.MenuItem("Status: Ready"),
@@ -85,32 +151,45 @@ class TranscriberApp(rumps.App):
             rumps.separator,
             rumps.MenuItem(f"{translate_prefix} Translate to English", callback=self._toggle_translate),
             rumps.separator,
+            self.item_live,
+            rumps.separator,
             rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
             rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
+            rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
             rumps.MenuItem("Hold Right Option to record"),
             rumps.separator,
         ]
         self.status_item    = self.menu["Status: Ready"]
         self.item_translate = self.menu[f"{translate_prefix} Translate to English"]
 
+        # Hold-to-record state
         self.recording     = False
         self.frames        = []
         self.stream        = None
-        self.model_ready   = True
         self._idle_icon    = idle_icon
 
+        # Hotkey modifier tracking
         self._ctrl_pressed  = False
         self._shift_pressed = False
-
         self._key_event_received = False
 
+        # Live subtitle overlay state
+        self._overlay_panel     = None
+        self._overlay_text      = None
+        self._live_queue        = queue.Queue(maxsize=4)
+        self._inference_lock    = threading.Lock()
+
+        # Workers
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
+        threading.Thread(target=self._live_transcription_worker, daemon=True).start()
         threading.Thread(target=self._start_hotkey_listener, daemon=True).start()
         threading.Thread(target=self._check_permissions, daemon=True).start()
 
     def _set_status(self, text):
         self.status_item.title = f"Status: {text}"
+
+    # ── Model switching ───────────────────────────────────────
 
     def _make_model_callback(self, label):
         def cb(_):
@@ -136,8 +215,17 @@ class TranscriberApp(rumps.App):
         self._set_status(mode_str)
         self._save_config()
 
+    def _toggle_live_mode(self, _):
+        self.live_mode = not self.live_mode
+        if self.live_mode:
+            self.item_live.title = "✅ Live Subtitles: On"
+        else:
+            self.item_live.title = "   Live Subtitles: Off"
+        self._set_status("Subtitles ON" if self.live_mode else "Subtitles OFF")
+        self._save_config()
+        print(f"[INFO] Live subtitles {'enabled' if self.live_mode else 'disabled'}")
+
     def _cycle_model(self):
-        """Cycle to the next model: Small -> Medium -> Large -> Small"""
         current_idx = next(
             i for i, v in enumerate(MODEL_OPTIONS.values()) if v == self.current_model
         )
@@ -195,6 +283,9 @@ class TranscriberApp(rumps.App):
             if vk == 17:  # T key
                 self._toggle_translate(None)
                 return
+            if vk == 1:   # S key
+                self._toggle_live_mode(None)
+                return
 
         if key == keyboard.Key.alt_r and not self.recording:
             threading.Thread(target=self._start_recording, daemon=True).start()
@@ -207,14 +298,18 @@ class TranscriberApp(rumps.App):
         elif key == keyboard.Key.alt_r and self.recording:
             threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
 
-    # ── Recording ────────────────────────────────────────────
+    # ── Hold-to-Record ────────────────────────────────────────
 
     def _start_recording(self):
         self.frames    = []
         self.recording = True
-        self.title     = "🔴"
+        self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
+
+        if self.live_mode:
+            AppHelper.callAfter(self._create_overlay)
+            threading.Thread(target=self._live_chunk_loop, daemon=True).start()
 
         def callback(indata, frame_count, time_info, status):
             if self.recording:
@@ -235,6 +330,16 @@ class TranscriberApp(rumps.App):
             self.stream.close()
             self.stream = None
 
+        if self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
+
+        # Drain any pending live chunks
+        while not self._live_queue.empty():
+            try:
+                self._live_queue.get_nowait()
+            except queue.Empty:
+                break
+
         if not self.frames:
             self.title = self._idle_icon
             self._set_status("Ready")
@@ -244,13 +349,14 @@ class TranscriberApp(rumps.App):
         self._set_status("Transcribing...")
         self.transcribe_queue.put(list(self.frames))
 
-    # ── Transcription ────────────────────────────────────────
+    # ── Transcription (hold-to-record) ────────────────────────
 
     def _transcription_worker(self):
         while True:
             frames = self.transcribe_queue.get()
             try:
-                self._do_transcribe(frames)
+                with self._inference_lock:
+                    self._do_transcribe(frames)
             except Exception as e:
                 print(f"[ERROR] Transcription failed: {e}")
             finally:
@@ -281,6 +387,167 @@ class TranscriberApp(rumps.App):
 
         if text:
             self._auto_paste(text + " ")
+
+    # ── Live Subtitles — overlay (NSPanel) ────────────────────
+
+    def _create_overlay(self):
+        screen = NSScreen.mainScreen()
+        if not screen:
+            print("[ERROR] No main screen found, cannot create overlay")
+            return False
+        screen_frame = screen.frame()
+        panel_w = min(screen_frame.size.width * 0.8, 960)
+        panel_h = 60
+        panel_x = (screen_frame.size.width - panel_w) / 2
+        panel_y = 40
+
+        rect = NSMakeRect(panel_x, panel_y, panel_w, panel_h)
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False
+        )
+        panel.setLevel_(1000)
+        panel.setOpaque_(False)
+        panel.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.88))
+        panel.setIgnoresMouseEvents_(True)
+        panel.setHasShadow_(False)
+        panel.setHidesOnDeactivate_(False)
+        panel.setCollectionBehavior_(1 << 0 | 1 << 4)
+
+        content = panel.contentView()
+        content_frame = content.frame()
+
+        text_field = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(20, 0, content_frame.size.width - 40, content_frame.size.height)
+        )
+        text_field.setStringValue_("")
+        text_field.setEditable_(False)
+        text_field.setSelectable_(False)
+        text_field.setBordered_(False)
+        text_field.setDrawsBackground_(False)
+        text_field.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 1, 1, 0.92))
+        text_field.setFont_(NSFont.systemFontOfSize_(15))
+        text_field.setMaximumNumberOfLines_(0)
+        text_field.cell().setWraps_(True)
+
+        content.addSubview_(text_field)
+
+        panel.orderFrontRegardless()
+        self._overlay_panel = panel
+        self._overlay_text = text_field
+        print("[INFO] Overlay panel created")
+        return True
+
+    def _destroy_overlay(self):
+        if self._overlay_panel:
+            self._overlay_panel.orderOut_(None)
+            self._overlay_panel = None
+            self._overlay_text = None
+            print("[INFO] Overlay panel destroyed")
+
+    def _replace_overlay(self, full_text):
+        def _do_update():
+            if not self._overlay_text or not self._overlay_panel:
+                return
+            self._overlay_text.setStringValue_(full_text)
+
+            screen = NSScreen.mainScreen()
+            if not screen:
+                return
+            screen_frame = screen.frame()
+            panel_w = self._overlay_panel.frame().size.width
+
+            attr_str = self._overlay_text.attributedStringValue()
+            text_w = panel_w - 40
+            text_rect = attr_str.boundingRectWithSize_options_(
+                NSMakeRect(0, 0, text_w, 10000).size,
+                1 << 0 | 1 << 2,
+            )
+            needed_h = text_rect.size.height + 28
+            max_h = screen_frame.size.height * 0.5
+            panel_h = min(needed_h, max_h)
+
+            panel_x = (screen_frame.size.width - panel_w) / 2
+            panel_y = 40
+            self._overlay_panel.setFrame_display_(
+                NSMakeRect(panel_x, panel_y, panel_w, panel_h), True
+            )
+            content_frame = self._overlay_panel.contentView().frame()
+            self._overlay_text.setFrame_(
+                NSMakeRect(20, 0, content_frame.size.width - 40, content_frame.size.height)
+            )
+
+        AppHelper.callAfter(_do_update)
+
+    # ── Live Subtitles — chunk timer & worker ─────────────────
+
+    def _live_chunk_loop(self):
+        max_frames = int(MAX_LIVE_WINDOW * SAMPLE_RATE / 1024)
+
+        while self.recording:
+            n = len(self.frames)
+            audio_secs = n * 1024 / SAMPLE_RATE
+            interval = min(LIVE_CHUNK_SECONDS, max(1.0, audio_secs / 10.0))
+            time.sleep(interval)
+            if not self.recording:
+                break
+
+            n = len(self.frames)
+            if n == 0:
+                continue
+
+            snapshot = self.frames[max(0, n - max_frames):]
+
+            try:
+                self._live_queue.put_nowait(snapshot)
+            except queue.Full:
+                try:
+                    self._live_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self._live_queue.put_nowait(snapshot)
+                print("[WARN] Live queue full, dropped oldest snapshot")
+
+    def _live_transcription_worker(self):
+        while True:
+            snapshot = self._live_queue.get()
+            if not self.recording and not self._overlay_panel:
+                continue
+            try:
+                with self._inference_lock:
+                    text = self._do_live_transcribe(snapshot)
+                if text and self._overlay_panel:
+                    AppHelper.callAfter(lambda t=text: self._replace_overlay(t))
+            except Exception as e:
+                print(f"[ERROR] Live transcription failed: {e}")
+
+    def _do_live_transcribe(self, frames):
+        audio = np.concatenate(frames, axis=0).squeeze()
+        rms = np.sqrt(np.mean(audio.astype(np.float64) ** 2))
+        if rms < SILENCE_RMS_THRESHOLD:
+            print(f"[INFO] Live chunk silent (RMS={rms:.0f}), skipped")
+            return ""
+
+        audio_float = audio.astype(np.float32) / 32768.0
+        duration = len(audio_float) / SAMPLE_RATE
+        print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
+
+        prompt = "以下是普通话与英语的混合对话。"
+        result = mlx_whisper.transcribe(
+            audio_float,
+            path_or_hf_repo=self.current_model,
+            task="transcribe",
+            condition_on_previous_text=False,
+            initial_prompt=prompt,
+        )
+        text = result["text"].strip()
+        if text.startswith(prompt):
+            text = text[len(prompt):].strip()
+        text = _t2s.convert(text)
+        if _is_hallucination(text):
+            print(f"[INFO] Live result (hallucination filtered): {text}")
+            return ""
+        print(f"[INFO] Live result: {text}")
+        return text
 
     # ── Auto-paste ───────────────────────────────────────────
 
