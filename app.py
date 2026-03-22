@@ -41,7 +41,8 @@ from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
 LIVE_CHUNK_SECONDS = 3
-SILENCE_RMS_THRESHOLD = 800  # int16 RMS below this = silence, skip inference
+MAX_LIVE_WINDOW = 20          # seconds – cap to keep inference within budget
+SILENCE_RMS_THRESHOLD = 800   # int16 RMS below this = silence, skip inference
 NSWindowStyleMaskBorderless = 0
 
 _t2s = opencc.OpenCC('t2s')
@@ -175,8 +176,6 @@ class TranscriberApp(rumps.App):
         # Live subtitle overlay state
         self._overlay_panel     = None
         self._overlay_text      = None
-        self._live_lines        = []
-        self._live_chunk_idx    = 0
         self._live_queue        = queue.Queue(maxsize=4)
         self._inference_lock    = threading.Lock()
 
@@ -309,8 +308,6 @@ class TranscriberApp(rumps.App):
         print("[INFO] Recording started")
 
         if self.live_mode:
-            self._live_chunk_idx = 0
-            self._live_lines = []
             AppHelper.callAfter(self._create_overlay)
             threading.Thread(target=self._live_chunk_loop, daemon=True).start()
 
@@ -445,17 +442,13 @@ class TranscriberApp(rumps.App):
             self._overlay_panel.orderOut_(None)
             self._overlay_panel = None
             self._overlay_text = None
-            self._live_lines = []
             print("[INFO] Overlay panel destroyed")
 
-    def _update_overlay(self, new_line):
-        self._live_lines.append(new_line)
-        display_text = "\n".join(self._live_lines)
-
+    def _replace_overlay(self, full_text):
         def _do_update():
             if not self._overlay_text or not self._overlay_panel:
                 return
-            self._overlay_text.setStringValue_(display_text)
+            self._overlay_text.setStringValue_(full_text)
 
             screen = NSScreen.mainScreen()
             if not screen:
@@ -488,18 +481,18 @@ class TranscriberApp(rumps.App):
     # ── Live Subtitles — chunk timer & worker ─────────────────
 
     def _live_chunk_loop(self):
+        max_frames = int(MAX_LIVE_WINDOW * SAMPLE_RATE / 1024)
+
         while self.recording:
             time.sleep(LIVE_CHUNK_SECONDS)
             if not self.recording:
                 break
 
-            chunk_start = self._live_chunk_idx
-            chunk_end = len(self.frames)
-            if chunk_end <= chunk_start:
+            n = len(self.frames)
+            if n == 0:
                 continue
 
-            snapshot = self.frames[chunk_start:chunk_end]
-            self._live_chunk_idx = chunk_end
+            snapshot = self.frames[max(0, n - max_frames):]
 
             try:
                 self._live_queue.put_nowait(snapshot)
@@ -509,18 +502,18 @@ class TranscriberApp(rumps.App):
                 except queue.Empty:
                     pass
                 self._live_queue.put_nowait(snapshot)
-                print("[WARN] Live queue full, dropped oldest chunk")
+                print("[WARN] Live queue full, dropped oldest snapshot")
 
     def _live_transcription_worker(self):
         while True:
-            chunk_frames = self._live_queue.get()
+            snapshot = self._live_queue.get()
             if not self.recording and not self._overlay_panel:
                 continue
             try:
                 with self._inference_lock:
-                    text = self._do_live_transcribe(chunk_frames)
+                    text = self._do_live_transcribe(snapshot)
                 if text and self._overlay_panel:
-                    AppHelper.callAfter(lambda t=text: self._update_overlay(t))
+                    AppHelper.callAfter(lambda t=text: self._replace_overlay(t))
             except Exception as e:
                 print(f"[ERROR] Live transcription failed: {e}")
 
@@ -539,6 +532,7 @@ class TranscriberApp(rumps.App):
             audio_float,
             path_or_hf_repo=self.current_model,
             task="transcribe",
+            condition_on_previous_text=False,
         )
         text = result["text"].strip()
         text = _t2s.convert(text)

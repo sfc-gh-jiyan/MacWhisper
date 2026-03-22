@@ -140,41 +140,57 @@ def test_live_queue_maxsize():
     assert items == ["chunk2", "chunk3"]
 
 
-# ── Test: live chunk indexing ─────────────────────────────────
+# ── Test: growing buffer snapshot ─────────────────────────────
 
-def test_chunk_slicing():
-    """Simulate the chunk timer reading new frames from self.frames."""
+def test_growing_buffer_snapshot():
+    """Each iteration sends ALL accumulated frames, not just new ones."""
     frames = _make_frames(30, 1024)
-    chunk_idx = 0
 
-    # First 4-second chunk: frames 0..15
-    chunk_end = 16
-    snapshot = frames[chunk_idx:chunk_end]
-    chunk_idx = chunk_end
-    assert len(snapshot) == 16
+    # t=3s: 10 frames accumulated → snapshot is all 10
+    n = 10
+    snapshot = frames[:n]
+    assert len(snapshot) == 10
 
-    # Second chunk: frames 16..29
-    chunk_end = 30
-    snapshot = frames[chunk_idx:chunk_end]
-    chunk_idx = chunk_end
-    assert len(snapshot) == 14
+    # t=6s: 20 frames accumulated → snapshot is all 20
+    n = 20
+    snapshot = frames[:n]
+    assert len(snapshot) == 20
 
-    # No new frames
-    chunk_end = 30
-    assert chunk_end <= chunk_idx  # nothing to do
+    # t=9s: 30 frames accumulated → snapshot is all 30
+    n = 30
+    snapshot = frames[:n]
+    assert len(snapshot) == 30
 
 
-# ── Test: live subtitle line accumulation ─────────────────────
+def test_window_cap():
+    """When frames exceed MAX_LIVE_WINDOW, only the tail is sent."""
+    import app
+    max_frames = int(app.MAX_LIVE_WINDOW * app.SAMPLE_RATE / 1024)
+    frames = _make_frames(max_frames + 50, 1024)
+    n = len(frames)
 
-def test_line_accumulation():
-    lines = []
-    def add_line(text):
-        lines.append(text)
-        return "\n".join(lines)
+    assert n > max_frames
+    snapshot = frames[n - max_frames:]
+    assert len(snapshot) == max_frames
 
-    assert add_line("Hello world") == "Hello world"
-    assert add_line("Second line") == "Hello world\nSecond line"
-    assert add_line("Third") == "Hello world\nSecond line\nThird"
+
+def test_max_live_window_constant():
+    import app
+    assert app.MAX_LIVE_WINDOW == 20
+
+
+# ── Test: overlay full replace (not append) ───────────────────
+
+def test_overlay_replace():
+    """Display should fully replace, not accumulate lines."""
+    display = ""
+
+    display = "我上周去了San Francisco"
+    assert display == "我上周去了San Francisco"
+
+    display = "我上周去了San Francisco参加了一个conference。"
+    assert "conference" in display
+    assert display.count("San Francisco") == 1
 
 
 # ── Test: icon states ────────────────────────────────────────
@@ -259,3 +275,41 @@ def test_hotkey_vk_codes():
 def test_chunk_seconds():
     import app
     assert app.LIVE_CHUNK_SECONDS == 3
+
+
+# ── Test: hallucination filter ────────────────────────────────
+
+def test_hallucination_known_phrases():
+    import app
+    assert app._is_hallucination("Thank you for watching.") is True
+    assert app._is_hallucination("please subscribe") is True
+
+
+def test_hallucination_repetition():
+    import app
+    assert app._is_hallucination("Ok Ok Ok") is True
+    assert app._is_hallucination("sto sto sto") is True
+
+
+def test_hallucination_cjk_repetition():
+    import app
+    assert app._is_hallucination("技术技术技术") is True
+
+
+def test_hallucination_cyrillic():
+    import app
+    assert app._is_hallucination("Спасибо за внимание") is True
+
+
+def test_hallucination_normal_text():
+    import app
+    assert app._is_hallucination("我上周去了San Francisco") is False
+    assert app._is_hallucination("Hello world") is False
+
+
+# ── Test: opencc t2s ─────────────────────────────────────────
+
+def test_opencc_t2s():
+    import app
+    assert app._t2s.convert("機器學習") == "机器学习"
+    assert app._t2s.convert("Hello") == "Hello"
