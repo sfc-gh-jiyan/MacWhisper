@@ -52,6 +52,9 @@ _t2s = opencc.OpenCC('t2s')
 import re
 import unicodedata
 
+_PUNCT_NORMALIZE = str.maketrans('，。！？、', ',.!?,')
+_OVERLAP_STRIP_CHARS = set(' \t\n，。！？、,.!?-\u3000')
+
 _HALLUCINATION_PHRASES = {
     "thank you for watching", "thanks for watching", "thank you",
     "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
@@ -60,26 +63,40 @@ _HALLUCINATION_PHRASES = {
 def _strip_trailing_repetition(text):
     """Remove repetitive tail that Whisper appends when decoder loops.
 
-    Uses a linear-time scan instead of regex backreferences to avoid
-    catastrophic backtracking on long or adversarial inputs.
+    Uses normalized matching (lowercase, strip punctuation/whitespace) so
+    that repetitions with slightly different punctuation are still caught.
+    A position map translates the cut point back to the original string.
     """
     stripped = text.rstrip()
     if len(stripped) < 4:
         return text
 
-    tail = stripped[-150:] if len(stripped) > 150 else stripped
-    tail_offset = len(stripped) - len(tail)
+    raw_tail = stripped[-300:] if len(stripped) > 300 else stripped
+    raw_tail_offset = len(stripped) - len(raw_tail)
+
+    # Build normalized tail with position mapping
+    norm_chars = []
+    positions = []  # norm_index -> index in stripped
+    for i, ch in enumerate(raw_tail):
+        if ch not in _OVERLAP_STRIP_CHARS:
+            norm_chars.append(ch.lower())
+            positions.append(raw_tail_offset + i)
+    norm_tail = ''.join(norm_chars)
+
+    if len(norm_tail) < 4:
+        return text
 
     best_cut = None
-    for unit_len in range(1, min(31, len(tail) // 3 + 1)):
-        unit = tail[-unit_len:]
+    for unit_len in range(1, min(81, len(norm_tail) // 2 + 1)):
+        unit = norm_tail[-unit_len:]
         count = 0
-        pos = len(tail)
-        while pos >= unit_len and tail[pos - unit_len:pos] == unit:
+        pos = len(norm_tail)
+        while pos >= unit_len and norm_tail[pos - unit_len:pos] == unit:
             count += 1
             pos -= unit_len
-        if count >= 3:
-            candidate = tail_offset + pos
+        min_repeats = 2 if unit_len > 10 else 3
+        if count >= min_repeats:
+            candidate = positions[pos] if pos < len(positions) else len(stripped)
             if best_cut is None or candidate < best_cut:
                 best_cut = candidate
 
@@ -88,6 +105,114 @@ def _strip_trailing_repetition(text):
         return cleaned if cleaned else ""
 
     return text
+
+
+def _common_prefix_len(a, b):
+    """Return the length of the longest common prefix, tolerating case/punctuation."""
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] == b[i]:
+            continue
+        ca = a[i].lower().translate(_PUNCT_NORMALIZE)
+        cb = b[i].lower().translate(_PUNCT_NORMALIZE)
+        if ca != cb:
+            return i
+    return n
+
+
+def _snap_to_boundary(text, pos):
+    """Snap a position back to the nearest sentence-ending punctuation."""
+    if pos <= 0:
+        return 0
+    end = min(pos, len(text))
+    for i in range(end - 1, max(0, end - 40) - 1, -1):
+        if text[i] in '。！？.!?\n':
+            return i + 1
+    return end
+
+
+def _find_after_overlap(committed, raw, min_match=6):
+    """Find genuinely new content in *raw* that comes after *committed*.
+
+    Uses aggressive normalization (lowercase, strip all punctuation and
+    whitespace) so that Whisper's per-cycle wording variations (case,
+    punctuation style) don't break the overlap search.  A position map
+    translates the match back to the original *raw* string.
+    """
+    if not committed or not raw:
+        return raw
+
+    # Build normalized raw with position map back to original indices
+    norm_raw_chars = []
+    raw_positions = []
+    for i, ch in enumerate(raw):
+        if ch not in _OVERLAP_STRIP_CHARS:
+            norm_raw_chars.append(ch.lower())
+            raw_positions.append(i)
+    norm_raw = ''.join(norm_raw_chars)
+
+    # Normalize committed tail
+    norm_committed = ''.join(
+        ch.lower() for ch in committed if ch not in _OVERLAP_STRIP_CHARS
+    )
+
+    max_search = min(60, len(norm_committed))
+    for tail_len in range(max_search, min_match - 1, -1):
+        tail = norm_committed[-tail_len:]
+        idx = norm_raw.find(tail)
+        if idx >= 0:
+            norm_end = idx + tail_len
+            if norm_end >= len(raw_positions):
+                return ""
+            raw_end = raw_positions[norm_end]
+            # Strip leading punctuation/space at the seam
+            result = raw[raw_end:].lstrip(' ,，.。!！?？、')
+            return result
+    return raw
+
+
+def _find_after_sentence_overlap(committed, raw, min_sent_len=6):
+    """Fallback overlap using individual sentence anchors from committed tail.
+
+    When ``_find_after_overlap`` fails (committed tail is paraphrased),
+    this splits committed into sentences and searches for each one in *raw*.
+    If any sentence from committed's tail is found, everything in *raw*
+    after that anchor is returned as new content.
+    """
+    if not committed or not raw:
+        return None
+
+    # Split committed into sentences (keep delimiters attached to preceding text)
+    sentences = re.split(r'(?<=[。！？.!?\n])', committed)
+    sentences = [s.strip() for s in sentences if len(s.strip()) >= min_sent_len]
+    if not sentences:
+        return None
+
+    # Normalize raw once (same pattern as _find_after_overlap)
+    norm_raw_chars = []
+    raw_positions = []
+    for i, ch in enumerate(raw):
+        if ch not in _OVERLAP_STRIP_CHARS:
+            norm_raw_chars.append(ch.lower())
+            raw_positions.append(i)
+    norm_raw = ''.join(norm_raw_chars)
+
+    # Try each sentence from committed's tail, last to first (max 5)
+    for sent in reversed(sentences[-5:]):
+        norm_sent = ''.join(
+            ch.lower() for ch in sent if ch not in _OVERLAP_STRIP_CHARS
+        )
+        if len(norm_sent) < min_sent_len:
+            continue
+        idx = norm_raw.find(norm_sent)
+        if idx >= 0:
+            norm_end = idx + len(norm_sent)
+            if norm_end >= len(raw_positions):
+                return ""
+            raw_end = raw_positions[norm_end]
+            return raw[raw_end:].lstrip(' ,，.。!！?？、')
+
+    return None
 
 
 def _is_hallucination(text):
@@ -219,6 +344,12 @@ class TranscriberApp(rumps.App):
         self._inference_lock    = threading.Lock()
         self._last_live_result  = ""
 
+        # Committed text state (stability-based commit)
+        self._committed_text    = ""
+        self._prev_raw_text     = ""
+        self._stable_prefix_len = 0
+        self._stable_cycles     = 0
+
         # Workers
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
@@ -344,6 +475,10 @@ class TranscriberApp(rumps.App):
         self.frames    = []
         self.recording = True
         self._last_live_result = ""
+        self._committed_text    = ""
+        self._prev_raw_text     = ""
+        self._stable_prefix_len = 0
+        self._stable_cycles     = 0
         self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
@@ -371,15 +506,16 @@ class TranscriberApp(rumps.App):
             self.stream.close()
             self.stream = None
 
-        if self._overlay_panel:
-            AppHelper.callAfter(self._destroy_overlay)
-
-        # Drain any pending live chunks
+        # Drain any pending live chunks BEFORE destroying overlay
+        # so the worker won't schedule more _replace_overlay calls
         while not self._live_queue.empty():
             try:
                 self._live_queue.get_nowait()
             except queue.Empty:
                 break
+
+        if self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
 
         if not self.frames:
             self.title = self._idle_icon
@@ -576,23 +712,25 @@ class TranscriberApp(rumps.App):
     def _live_transcription_worker(self):
         while True:
             snapshot = self._live_queue.get()
-            if not self.recording and not self._overlay_panel:
+            if not self.recording:
                 continue
             try:
                 with self._inference_lock:
-                    text = self._do_live_transcribe(snapshot)
-                if text:
-                    self._last_live_result = text
+                    raw = self._do_live_transcribe(snapshot)
+                if raw and self.recording:
+                    display = self._build_display_text(raw)
+                    self._last_live_result = display
                     _ensure_history_dirs()
                     entry = {
                         "timestamp": datetime.datetime.now().isoformat(),
                         "audio_s": round(len(snapshot) * 1024 / SAMPLE_RATE, 1),
-                        "text": text,
+                        "raw": raw,
+                        "display": display,
                     }
                     with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                    if self._overlay_panel:
-                        AppHelper.callAfter(lambda t=text: self._replace_overlay(t))
+                    if self._overlay_panel and self.recording:
+                        AppHelper.callAfter(lambda t=display: self._replace_overlay(t))
             except Exception as e:
                 print(f"[ERROR] Live transcription failed: {e}")
 
@@ -636,6 +774,63 @@ class TranscriberApp(rumps.App):
             return ""
         print(f"[INFO] Live result: {text}")
         return text
+
+    def _build_display_text(self, raw_text):
+        """Build stable display text using committed-prefix tracking.
+
+        Compares consecutive raw transcriptions to find a stable prefix.
+        Once stable for 2+ cycles the prefix is committed and preserved
+        even when the sliding window causes Whisper to reinterpret audio.
+        """
+        if not self._prev_raw_text:
+            self._prev_raw_text = raw_text
+            return raw_text
+
+        # Find common prefix snapped to sentence boundary
+        prefix_len = _common_prefix_len(raw_text, self._prev_raw_text)
+        snapped = _snap_to_boundary(raw_text, prefix_len)
+
+        # Track stability
+        if snapped >= self._stable_prefix_len and snapped > 0:
+            self._stable_cycles += 1
+        else:
+            self._stable_cycles = 1
+        self._stable_prefix_len = snapped
+
+        # Commit prefix after 2 stable cycles
+        if self._stable_cycles >= 2 and snapped > len(self._committed_text):
+            self._committed_text = raw_text[:snapped]
+
+        # Build display — 4-level matching cascade
+        if self._committed_text:
+            prefix_match = _common_prefix_len(raw_text, self._committed_text)
+            committed_check = min(20, len(self._committed_text))
+
+            if prefix_match >= committed_check:
+                # Level 1: No drift — raw naturally extends committed
+                display = raw_text
+            elif prefix_match >= len(self._committed_text) * 0.4:
+                # Level 2: Same audio position, Whisper paraphrased — trust raw
+                display = raw_text
+            else:
+                # Level 3: Window slid — tail-substring overlap search
+                new_part = _find_after_overlap(self._committed_text, raw_text)
+                if new_part and new_part != raw_text:
+                    display = self._committed_text + new_part
+                else:
+                    # Level 4: Sentence-anchor overlap search
+                    sent_part = _find_after_sentence_overlap(
+                        self._committed_text, raw_text
+                    )
+                    if sent_part is not None:
+                        display = self._committed_text + sent_part
+                    else:
+                        display = self._committed_text
+        else:
+            display = raw_text
+
+        self._prev_raw_text = raw_text
+        return display
 
     # ── Auto-paste ───────────────────────────────────────────
 

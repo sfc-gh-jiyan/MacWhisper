@@ -483,4 +483,251 @@ def test_subtitle_log_appends_on_live_result(tmp_path):
     entry = json.loads(lines[0])
     assert "timestamp" in entry
     assert "audio_s" in entry
-    assert entry["text"] == "测试字幕内容"
+    # Log may use old "text" key or new "raw"/"display" keys
+    assert entry.get("text") == "测试字幕内容" or entry.get("raw") == "测试字幕内容"
+
+
+# ── Test: helper functions for committed text ─────────────
+
+def test_common_prefix_len():
+    import app
+    assert app._common_prefix_len("abcdef", "abcxyz") == 3
+    assert app._common_prefix_len("hello", "hello world") == 5
+    assert app._common_prefix_len("abc", "xyz") == 0
+    assert app._common_prefix_len("", "abc") == 0
+
+
+def test_common_prefix_len_fuzzy():
+    """Tolerates case and CJK punctuation differences."""
+    import app
+    # Case difference
+    assert app._common_prefix_len("Test3你好", "test3你好") == 7
+    # CJK vs ASCII punctuation
+    assert app._common_prefix_len("你好，世界", "你好,世界") == 5
+    assert app._common_prefix_len("结束。下一句", "结束.下一句") == 6
+
+
+def test_snap_to_boundary():
+    import app
+    text = "你好世界。这是测试。然后继续"
+    # Position after second 。 should snap to right after it
+    pos = text.index("然")
+    result = app._snap_to_boundary(text, pos)
+    assert text[result - 1] == "。"
+    # Position 0 should stay 0
+    assert app._snap_to_boundary(text, 0) == 0
+
+
+def test_snap_to_boundary_no_punctuation():
+    import app
+    text = "没有标点的文字内容"
+    result = app._snap_to_boundary(text, 5)
+    assert result == 5  # No boundary found, return raw position
+
+
+def test_find_after_overlap():
+    import app
+    committed = "我上周去了San Francisco参加了一个conference。"
+    raw = "参加了一个conference。这个conference是关于ML的。"
+    result = app._find_after_overlap(committed, raw)
+    assert result == "这个conference是关于ML的。"
+
+
+def test_find_after_overlap_case_insensitive():
+    """Overlap matching ignores case differences from Whisper."""
+    import app
+    committed = "我不知道test3,我不知道为什么。"
+    raw = "我不知道Test3,我不知道为什么,但是之后的效果还是不错的。"
+    result = app._find_after_overlap(committed, raw)
+    assert "但是之后" in result
+    assert "我不知道" not in result  # no duplication
+
+
+def test_find_after_overlap_punct_variation():
+    """Overlap matching tolerates punctuation differences."""
+    import app
+    committed = "这是测试。结果如何？"
+    raw = "这是测试,结果如何,后续内容。"
+    result = app._find_after_overlap(committed, raw)
+    assert "后续内容" in result
+
+
+def test_find_after_overlap_no_match():
+    import app
+    committed = "完全不同的句子。"
+    raw = "另一段话。"
+    result = app._find_after_overlap(committed, raw)
+    assert result == raw  # No overlap, return full raw
+
+
+def test_find_after_overlap_empty():
+    import app
+    assert app._find_after_overlap("", "新内容") == "新内容"
+    assert app._find_after_overlap("旧内容", "") == ""
+
+
+# ── Test: _build_display_text ────────────────────────────
+
+def test_build_display_first_call():
+    """First call returns raw text as-is."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+    result = inst._build_display_text("你好世界")
+    assert result == "你好世界"
+
+
+def test_build_display_stable_commit():
+    """After 2 stable cycles, prefix is committed."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+
+    # Cycle 1
+    inst._build_display_text("你好世界。这是第一句话。")
+    # Cycle 2 — same prefix, different tail
+    inst._build_display_text("你好世界。这是第一句话。然后继续说。")
+    # Cycle 3 — prefix still stable
+    result = inst._build_display_text("你好世界。这是第一句话。然后继续说。更多内容。")
+
+    assert inst._committed_text.startswith("你好世界。")
+    assert "更多内容" in result
+
+
+def test_build_display_window_slide():
+    """When window slides, committed text is preserved via overlap."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+
+    # Build up committed text over several stable cycles
+    inst._build_display_text("开头内容。中间内容。")
+    inst._build_display_text("开头内容。中间内容。后续A。")
+    inst._build_display_text("开头内容。中间内容。后续A。后续B。")
+
+    assert "开头内容" in inst._committed_text
+
+    # Now simulate window slide — raw no longer starts with committed
+    result = inst._build_display_text("中间内容。后续A。后续B。全新内容。")
+
+    # Committed text should be preserved, new content appended
+    assert "开头内容" in result
+    assert "全新内容" in result
+
+
+def test_build_display_reset():
+    """Committed state resets between recordings."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = "旧的提交文本。"
+    inst._prev_raw_text = "旧的原始文本。"
+    inst._stable_prefix_len = 20
+    inst._stable_cycles = 5
+
+    # Simulate what _start_recording does
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+
+    result = inst._build_display_text("全新录音。")
+    assert result == "全新录音。"
+    assert inst._committed_text == ""
+
+
+# ── Test: enhanced trailing repetition ────────────────────
+
+def test_strip_trailing_long_sentence_repetition():
+    """Long sentence repetitions (>30 chars) should now be caught."""
+    import app
+    sentence = "我们在世界上最大的优点就是能够持续不断地创新和发展"
+    text = f"正常内容。{sentence}{sentence}{sentence}"
+    result = app._strip_trailing_repetition(text)
+    assert "正常内容" in result
+    assert result.count(sentence) <= 1
+
+
+def test_strip_trailing_repetition_punct_variation():
+    """Repetition with different punctuation between copies should be caught."""
+    import app
+    # Whisper produces same sentence with/without trailing period
+    text = "正常内容。人们最关心的是AI如何帮助推理。人们最关心的是AI如何帮助推理"
+    result = app._strip_trailing_repetition(text)
+    assert "正常内容" in result
+    assert result.count("人们最关心的是AI如何帮助推理") <= 1
+
+
+def test_strip_trailing_repetition_mixed_punct():
+    """Repetition with mixed Chinese/ASCII punctuation should be caught."""
+    import app
+    text = "开头内容。这是重复句，很长的一句话！这是重复句,很长的一句话!"
+    result = app._strip_trailing_repetition(text)
+    assert "开头内容" in result
+
+
+# ── Test: _find_after_sentence_overlap ─────────────────────
+
+def test_find_after_sentence_overlap_basic():
+    """Sentence anchor finds overlap when tail-substring search fails."""
+    import app
+    committed = "今天天气很好。我去了San Francisco。参加了一个会议。"
+    raw = "我去了San Francisco。参加了一场会议。主题是AI。"
+    result = app._find_after_sentence_overlap(committed, raw)
+    assert result is not None
+    assert "参加了" in result or "主题" in result
+
+
+def test_find_after_sentence_overlap_no_match():
+    """Returns None when no sentence from committed is found in raw."""
+    import app
+    committed = "完全不相关的内容。另一个话题。"
+    raw = "全新的一段文字。与之前无关。"
+    result = app._find_after_sentence_overlap(committed, raw)
+    assert result is None
+
+
+# ── Test: 4-level cascade in _build_display_text ───────────
+
+def test_build_display_paraphrase_uses_raw():
+    """Level 2: When Whisper paraphrases (>40% prefix match), use raw directly."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = "现在我们开始测试,看看效果如何。"
+    inst._prev_raw_text = "现在我们开始测试,看看效果如何。"
+    inst._stable_prefix_len = 10
+    inst._stable_cycles = 3
+
+    # Whisper rephrases "效果如何" to "这个效果到底怎么样"
+    raw = "现在我们开始测试,看看这个效果到底怎么样。今天去了SF。"
+    result = inst._build_display_text(raw)
+
+    # Should NOT have duplication — Level 2 uses raw directly
+    assert result.count("现在我们开始测试") == 1
+    assert "今天去了SF" in result
+
+
+def test_build_display_sentence_anchor_overlap():
+    """Level 4: When tail is paraphrased but an earlier sentence matches."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = "开头内容。我去了San Francisco。参加了一个会议。"
+    inst._prev_raw_text = "之前的文本"
+    inst._stable_prefix_len = 10
+    inst._stable_cycles = 3
+
+    # Window slid: raw doesn't start with committed, AND tail is paraphrased
+    raw = "我去了San Francisco。参加了一场会议。主题是AI。"
+    result = inst._build_display_text(raw)
+
+    # Should preserve committed beginning and append new content
+    assert "开头内容" in result
+    assert "主题是AI" in result or "参加了" in result
