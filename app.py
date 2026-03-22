@@ -531,13 +531,17 @@ class TranscriberApp(rumps.App):
         duration = len(audio_float) / SAMPLE_RATE
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
+        prompt = "以下是普通话与英语的混合对话。"
         result = mlx_whisper.transcribe(
             audio_float,
             path_or_hf_repo=self.current_model,
             task="transcribe",
             condition_on_previous_text=False,
+            initial_prompt=prompt,
         )
         text = result["text"].strip()
+        if text.startswith(prompt):
+            text = text[len(prompt):].strip()
         text = _t2s.convert(text)
         if _is_hallucination(text):
             print(f"[INFO] Live result (hallucination filtered): {text}")
