@@ -484,7 +484,10 @@ class TranscriberApp(rumps.App):
         max_frames = int(MAX_LIVE_WINDOW * SAMPLE_RATE / 1024)
 
         while self.recording:
-            time.sleep(LIVE_CHUNK_SECONDS)
+            n = len(self.frames)
+            audio_secs = n * 1024 / SAMPLE_RATE
+            interval = min(LIVE_CHUNK_SECONDS, max(1.0, audio_secs / 10.0))
+            time.sleep(interval)
             if not self.recording:
                 break
 
