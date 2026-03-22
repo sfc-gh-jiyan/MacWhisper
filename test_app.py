@@ -43,7 +43,7 @@ def test_imports():
 def test_constants():
     import app
     assert app.SAMPLE_RATE == 16000
-    assert app.LIVE_CHUNK_SECONDS == 4
+    assert app.LIVE_CHUNK_SECONDS == 3
     assert len(app.MODEL_OPTIONS) == 3
     assert "Small (Fast)" in app.MODEL_OPTIONS
 
@@ -258,4 +258,4 @@ def test_hotkey_vk_codes():
 
 def test_chunk_seconds():
     import app
-    assert app.LIVE_CHUNK_SECONDS == 4
+    assert app.LIVE_CHUNK_SECONDS == 3

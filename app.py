@@ -36,12 +36,55 @@ import pyperclip
 import sounddevice as sd
 from pynput import keyboard
 import mlx_whisper
+import opencc
 from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
-LIVE_CHUNK_SECONDS = 2
+LIVE_CHUNK_SECONDS = 3
 SILENCE_RMS_THRESHOLD = 800  # int16 RMS below this = silence, skip inference
 NSWindowStyleMaskBorderless = 0
+
+_t2s = opencc.OpenCC('t2s')
+
+import re
+import unicodedata
+
+_HALLUCINATION_PHRASES = {
+    "thank you for watching", "thanks for watching", "thank you",
+    "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
+}
+
+def _is_hallucination(text):
+    lower = text.lower().strip(" .!,。，！")
+    if lower in _HALLUCINATION_PHRASES:
+        return True
+    # Repetition: same token repeated 3+ times (e.g. "Ok Ok Ok", "sto sto sto")
+    tokens = text.split()
+    if len(tokens) >= 3:
+        if len(set(tokens)) == 1:
+            return True
+        # Sliding window: any 3 consecutive identical tokens
+        for i in range(len(tokens) - 2):
+            if tokens[i] == tokens[i+1] == tokens[i+2]:
+                return True
+    # CJK character repetition (e.g. "技术技术技术")
+    if len(text) >= 6:
+        for size in range(1, len(text) // 3 + 1):
+            pat = text[:size]
+            if pat * (len(text) // len(pat)) == text[:len(pat) * (len(text) // len(pat))] and len(text) // len(pat) >= 3:
+                return True
+    # Non-expected scripts (Tamil, Arabic, Cyrillic, etc.)
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat.startswith('L'):
+            block = ord(ch)
+            is_latin = block < 0x0250
+            is_cjk = 0x2E80 <= block <= 0x9FFF or 0xF900 <= block <= 0xFAFF
+            is_cjk_ext = 0x20000 <= block <= 0x2FA1F
+            is_kana = 0x3040 <= block <= 0x30FF  # Japanese kana (acceptable)
+            if not (is_latin or is_cjk or is_cjk_ext or is_kana):
+                return True
+    return False
 
 CONFIG_PATH = os.path.expanduser("~/.macwhisper_config.json")
 
@@ -134,7 +177,7 @@ class TranscriberApp(rumps.App):
         self._overlay_text      = None
         self._live_lines        = []
         self._live_chunk_idx    = 0
-        self._live_queue        = queue.Queue(maxsize=2)
+        self._live_queue        = queue.Queue(maxsize=4)
         self._inference_lock    = threading.Lock()
 
         # Workers
@@ -492,17 +535,16 @@ class TranscriberApp(rumps.App):
         duration = len(audio_float) / SAMPLE_RATE
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
-        short_prompt = "简体中文，"
         result = mlx_whisper.transcribe(
             audio_float,
             path_or_hf_repo=self.current_model,
             task="transcribe",
-            language="zh",
-            initial_prompt=short_prompt,
         )
         text = result["text"].strip()
-        if text.startswith(short_prompt):
-            text = text[len(short_prompt):].strip()
+        text = _t2s.convert(text)
+        if _is_hallucination(text):
+            print(f"[INFO] Live result (hallucination filtered): {text}")
+            return ""
         print(f"[INFO] Live result: {text}")
         return text
 
