@@ -43,8 +43,8 @@ from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
 LIVE_CHUNK_SECONDS = 3
-MAX_LIVE_WINDOW = 20          # seconds – cap to keep inference within budget
-SILENCE_RMS_THRESHOLD = 800   # int16 RMS below this = silence, skip inference
+MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
+SILENCE_RMS_THRESHOLD = 300   # int16 RMS below this = silence, skip inference
 NSWindowStyleMaskBorderless = 0
 
 _t2s = opencc.OpenCC('t2s')
@@ -58,12 +58,35 @@ _HALLUCINATION_PHRASES = {
 }
 
 def _strip_trailing_repetition(text):
-    """Remove repetitive tail that Whisper appends when decoder loops."""
-    m = re.search(r'(.{1,10}?)\1{3,}\s*$', text)
-    if m:
-        cleaned = text[:m.start()].rstrip(' ,，。.!！?？')
-        if cleaned:
-            return cleaned
+    """Remove repetitive tail that Whisper appends when decoder loops.
+
+    Uses a linear-time scan instead of regex backreferences to avoid
+    catastrophic backtracking on long or adversarial inputs.
+    """
+    stripped = text.rstrip()
+    if len(stripped) < 4:
+        return text
+
+    tail = stripped[-150:] if len(stripped) > 150 else stripped
+    tail_offset = len(stripped) - len(tail)
+
+    best_cut = None
+    for unit_len in range(1, min(31, len(tail) // 3 + 1)):
+        unit = tail[-unit_len:]
+        count = 0
+        pos = len(tail)
+        while pos >= unit_len and tail[pos - unit_len:pos] == unit:
+            count += 1
+            pos -= unit_len
+        if count >= 3:
+            candidate = tail_offset + pos
+            if best_cut is None or candidate < best_cut:
+                best_cut = candidate
+
+    if best_cut is not None:
+        cleaned = text[:best_cut].rstrip(' ,，。.!！?？')
+        return cleaned if cleaned else ""
+
     return text
 
 
@@ -192,8 +215,9 @@ class TranscriberApp(rumps.App):
         # Live subtitle overlay state
         self._overlay_panel     = None
         self._overlay_text      = None
-        self._live_queue        = queue.Queue(maxsize=4)
+        self._live_queue        = queue.Queue(maxsize=2)
         self._inference_lock    = threading.Lock()
+        self._last_live_result  = ""
 
         # Workers
         self.transcribe_queue = queue.Queue()
@@ -319,6 +343,7 @@ class TranscriberApp(rumps.App):
     def _start_recording(self):
         self.frames    = []
         self.recording = True
+        self._last_live_result = ""
         self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
@@ -410,6 +435,7 @@ class TranscriberApp(rumps.App):
         text = result["text"].strip()
         if prompt and text.startswith(prompt):
             text = text[len(prompt):].strip()
+        text = _strip_trailing_repetition(text)
         print(f"[INFO] Result: {text}")
 
         # Log transcription result
@@ -485,10 +511,12 @@ class TranscriberApp(rumps.App):
             print("[INFO] Overlay panel destroyed")
 
     def _replace_overlay(self, full_text):
+        display_text = re.sub(r'([。！？])\s*', r'\1\n', full_text).rstrip('\n')
+
         def _do_update():
             if not self._overlay_text or not self._overlay_panel:
                 return
-            self._overlay_text.setStringValue_(full_text)
+            self._overlay_text.setStringValue_(display_text)
 
             screen = NSScreen.mainScreen()
             if not screen:
@@ -526,7 +554,7 @@ class TranscriberApp(rumps.App):
         while self.recording:
             n = len(self.frames)
             audio_secs = n * 1024 / SAMPLE_RATE
-            interval = min(LIVE_CHUNK_SECONDS, max(1.0, audio_secs / 10.0))
+            interval = min(LIVE_CHUNK_SECONDS, max(1.0, audio_secs / 5.0))
             time.sleep(interval)
             if not self.recording:
                 break
@@ -537,15 +565,13 @@ class TranscriberApp(rumps.App):
 
             snapshot = self.frames[max(0, n - max_frames):]
 
+            if not self._live_queue.empty():
+                continue
+
             try:
                 self._live_queue.put_nowait(snapshot)
             except queue.Full:
-                try:
-                    self._live_queue.get_nowait()
-                except queue.Empty:
-                    pass
-                self._live_queue.put_nowait(snapshot)
-                print("[WARN] Live queue full, dropped oldest snapshot")
+                pass
 
     def _live_transcription_worker(self):
         while True:
@@ -556,7 +582,7 @@ class TranscriberApp(rumps.App):
                 with self._inference_lock:
                     text = self._do_live_transcribe(snapshot)
                 if text:
-                    # Log subtitle with timestamp
+                    self._last_live_result = text
                     _ensure_history_dirs()
                     entry = {
                         "timestamp": datetime.datetime.now().isoformat(),
@@ -572,7 +598,9 @@ class TranscriberApp(rumps.App):
 
     def _do_live_transcribe(self, frames):
         audio = np.concatenate(frames, axis=0).squeeze()
-        rms = np.sqrt(np.mean(audio.astype(np.float64) ** 2))
+
+        tail_samples = min(len(audio), int(3 * SAMPLE_RATE))
+        rms = np.sqrt(np.mean(audio[-tail_samples:].astype(np.float64) ** 2))
         if rms < SILENCE_RMS_THRESHOLD:
             print(f"[INFO] Live chunk silent (RMS={rms:.0f}), skipped")
             return ""
@@ -582,6 +610,8 @@ class TranscriberApp(rumps.App):
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
         prompt = "以下是普通话与英语的混合对话。"
+
+        t0 = time.time()
         result = mlx_whisper.transcribe(
             audio_float,
             path_or_hf_repo=self.current_model,
@@ -589,10 +619,17 @@ class TranscriberApp(rumps.App):
             condition_on_previous_text=False,
             initial_prompt=prompt,
         )
+        elapsed = time.time() - t0
         text = result["text"].strip()
+        print(f"[INFO] Live inference took {elapsed:.1f}s for {duration:.1f}s audio")
+
         if text.startswith(prompt):
             text = text[len(prompt):].strip()
+
         text = _t2s.convert(text)
+        if text in prompt or text.rstrip("。.") in prompt:
+            print(f"[INFO] Live result (prompt echo filtered): {text}")
+            return ""
         text = _strip_trailing_repetition(text)
         if not text or _is_hallucination(text):
             print(f"[INFO] Live result (hallucination filtered): {text}")

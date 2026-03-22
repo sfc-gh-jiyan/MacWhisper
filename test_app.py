@@ -176,7 +176,7 @@ def test_window_cap():
 
 def test_max_live_window_constant():
     import app
-    assert app.MAX_LIVE_WINDOW == 20
+    assert app.MAX_LIVE_WINDOW == 30
 
 
 # ── Test: overlay full replace (not append) ───────────────────
@@ -321,6 +321,14 @@ def test_strip_trailing_with_commas():
     result = app._strip_trailing_repetition("别的语言。啊,啊,啊,啊,啊,啊,啊,啊,啊")
     assert result.count("啊") <= 1
     assert "别的语言" in result
+
+
+def test_strip_trailing_sentence_repetition():
+    import app
+    text = "正常内容。我们在世界上最大的优点。我们在世界上最大的优点。我们在世界上最大的优点。我们在世界上最大的优点。"
+    result = app._strip_trailing_repetition(text)
+    assert "正常内容" in result
+    assert result.count("我们在世界上最大的优点") <= 1
 
 
 def test_strip_trailing_preserves_clean():
