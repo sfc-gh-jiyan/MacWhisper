@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Automated replay test for live subtitle quality.
+"""Replay test for live subtitles — uses the REAL code path.
 
-Replays saved WAV files through the live subtitle pipeline (streaming
-simulation) and compares final display text against the ground-truth
-full transcript. No microphone or GUI needed.
+Feeds a saved WAV file into the actual _live_chunk_loop and
+_live_transcription_worker threads (same as a real recording),
+just with frames injected from a file instead of a microphone.
 
 Usage:
-    venv/bin/python test_replay.py                          # longest WAV only (fast)
-    venv/bin/python test_replay.py --all                    # all WAVs with transcripts
-    venv/bin/python test_replay.py --wav 20260322_183047.wav  # single file
-    venv/bin/python test_replay.py --min-duration 60        # only recordings > 60s
+    venv/bin/python test_replay.py                            # latest >31s WAV
+    venv/bin/python test_replay.py --wav 20260322_212421.wav  # specific file
 """
 
 import argparse
+import io
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import wave
 
@@ -26,7 +27,6 @@ import numpy as np
 
 from unittest.mock import MagicMock
 
-# rumps.App must be a real class so TranscriberApp can subclass it
 class _FakeRumpsApp:
     def __init__(self, *args, **kwargs):
         self.title = ""
@@ -54,14 +54,13 @@ import app  # noqa: E402 — must come after mocks
 
 # ── Constants ─────────────────────────────────────────────────
 
-SAMPLE_RATE = app.SAMPLE_RATE          # 16000
+SAMPLE_RATE = app.SAMPLE_RATE
 BLOCKSIZE = 1024
-CHUNK_SECONDS = app.LIVE_CHUNK_SECONDS  # 3
-MAX_WINDOW = app.MAX_LIVE_WINDOW        # 30
-
 AUDIO_DIR = app.AUDIO_DIR
 TRANSCRIPT_LOG = app.TRANSCRIPT_LOG
 REPLAY_RESULTS = os.path.join(os.path.dirname(TRANSCRIPT_LOG), "replay_results.jsonl")
+
+FRAME_DURATION = BLOCKSIZE / SAMPLE_RATE  # 0.064s per frame
 
 
 # ── WAV loader ────────────────────────────────────────────────
@@ -77,7 +76,6 @@ def load_wav_as_frames(wav_path):
     for i in range(0, len(audio), BLOCKSIZE):
         chunk = audio[i:i + BLOCKSIZE]
         if len(chunk) < BLOCKSIZE:
-            # Pad last frame with silence
             padded = np.zeros((BLOCKSIZE, 1), dtype=np.int16)
             padded[:len(chunk)] = chunk
             chunk = padded
@@ -85,12 +83,70 @@ def load_wav_as_frames(wav_path):
     return frames
 
 
-# ── Stream simulator ──────────────────────────────────────────
+# ── Headless instance ─────────────────────────────────────────
 
 def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
-    """Create a minimal TranscriberApp with just the state needed for replay."""
+    """Create a TranscriberApp with real threads but no GUI/microphone."""
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
+
+    # Model
     inst.current_model = model
+
+    # Recording state (mirrors _start_recording)
+    inst.frames = []
+    inst.recording = False
+    inst.stream = None
+
+    # Live subtitle state
+    inst._live_queue = queue.Queue(maxsize=2)
+    inst._inference_lock = threading.Lock()
+    inst._last_live_result = ""
+    inst._best_raw = ""
+    inst._prev_raw = ""
+    inst._frozen_prefix = ""
+
+    # Pause/segment state
+    inst._segment_start_frame = 0
+    inst._pause_silence_frames = 0
+    inst._pause_detected = False
+    inst._segment_committed_text = ""
+
+    # GUI stubs
+    inst._overlay_panel = None
+    inst._overlay_text = None
+    inst.live_mode = True
+
+    # Start the real transcription worker thread
+    threading.Thread(target=inst._live_transcription_worker, daemon=True).start()
+
+    return inst
+
+
+# ── Replay engine ─────────────────────────────────────────────
+
+def replay_wav(inst, wav_frames):
+    """Feed WAV frames through the real _live_chunk_loop at real-time pace.
+
+    This exercises the exact same code path as a real recording:
+    - Frames are appended to inst.frames (simulating audio callback)
+    - Pause detection runs per-frame (same logic as audio callback)
+    - _live_chunk_loop runs on its own thread (real code, real timing)
+    - _live_transcription_worker processes chunks (real Whisper inference)
+
+    Returns list of subtitle entries collected from the subtitle log.
+    """
+    pause_threshold = int(app.PAUSE_MIN_DURATION * SAMPLE_RATE / BLOCKSIZE)
+
+    # Mark the subtitle log position so we can read only our entries
+    app._ensure_history_dirs()
+    log_pos = 0
+    if os.path.exists(app.SUBTITLE_LOG):
+        log_pos = os.path.getsize(app.SUBTITLE_LOG)
+
+    # Init recording state (same as _start_recording, minus GUI/stream)
+    inst.frames = []
+    inst.recording = True
+    inst._last_live_result = ""
     inst._best_raw = ""
     inst._prev_raw = ""
     inst._frozen_prefix = ""
@@ -98,87 +154,53 @@ def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
     inst._pause_silence_frames = 0
     inst._pause_detected = False
     inst._segment_committed_text = ""
-    inst._last_live_result = ""
-    return inst
 
+    # Start the real _live_chunk_loop thread
+    chunk_thread = threading.Thread(target=inst._live_chunk_loop, daemon=True)
+    chunk_thread.start()
 
-def simulate_stream(frames, inst):
-    """Simulate live subtitle streaming through a WAV's frames.
+    # Feed frames at real-time pace (simulating the audio callback)
+    for frame in wav_frames:
+        if not inst.recording:
+            break
+        inst.frames.append(frame)
 
-    Includes pause detection and segment commit logic matching _live_chunk_loop.
-    Returns a list of dicts: [{cycle, audio_s, raw, display, elapsed_s}, ...]
-    """
-    max_frames_count = int(MAX_WINDOW * SAMPLE_RATE / BLOCKSIZE)
-    frames_per_chunk = int(CHUNK_SECONDS * SAMPLE_RATE / BLOCKSIZE)
-    pause_silence_threshold = int(app.PAUSE_MIN_DURATION * SAMPLE_RATE / BLOCKSIZE)
-
-    entries = []
-    accumulated = []
-    cycle = 0
-
-    for i, frame in enumerate(frames):
-        accumulated.append(frame)
-
-        # Pause detection per frame (mirrors audio callback)
+        # Pause detection per frame — exact same logic as audio callback
         rms = np.sqrt(np.mean(frame.astype(np.float64) ** 2))
         if rms < app.PAUSE_RMS_THRESHOLD:
             inst._pause_silence_frames += 1
         else:
             inst._pause_silence_frames = 0
-
-        seg_frames = len(accumulated) - inst._segment_start_frame
+        seg_frames = len(inst.frames) - inst._segment_start_frame
         seg_secs = seg_frames * BLOCKSIZE / SAMPLE_RATE
-        if (inst._pause_silence_frames >= pause_silence_threshold
+        if (inst._pause_silence_frames >= pause_threshold
                 and seg_secs >= app.PAUSE_MIN_SEGMENT
                 and not inst._pause_detected):
             inst._pause_detected = True
 
-        is_chunk_boundary = (i + 1) % frames_per_chunk == 0
-        is_last_frame = i == len(frames) - 1
+        time.sleep(FRAME_DURATION)
 
-        if is_chunk_boundary or is_last_frame:
-            seg_start = inst._segment_start_frame
-            n = len(accumulated)
-            seg_secs = (n - seg_start) * BLOCKSIZE / SAMPLE_RATE
+    # WAV finished — let pending inference complete
+    time.sleep(5)
+    inst.recording = False
+    chunk_thread.join(timeout=3)
 
-            # Check for pause commit or safety fallback
-            needs_commit = inst._pause_detected or seg_secs >= app.PAUSE_SAFETY_FALLBACK
+    # Drain queue
+    while not inst._live_queue.empty():
+        try:
+            inst._live_queue.get_nowait()
+        except queue.Empty:
+            break
 
-            if needs_commit and inst._last_live_result:
-                # Direct assignment: _last_live_result already includes history prefix
-                inst._segment_committed_text = inst._last_live_result
-                reason = "pause" if inst._pause_detected else f"safety@{seg_secs:.0f}s"
-                print(f"  [SEGMENT COMMIT ({reason})]: "
-                      f"{len(inst._segment_committed_text)} chars total")
-                inst._segment_start_frame = n
-                inst._best_raw = ""
-                inst._prev_raw = ""
-                inst._frozen_prefix = ""
-                inst._last_live_result = ""
-                inst._pause_detected = False
-                inst._pause_silence_frames = 0
-                continue
-
-            # Take snapshot from current segment only, capped at max_frames
-            seg_begin = max(seg_start, n - max_frames_count)
-            snapshot = accumulated[seg_begin:n]
-            audio_s = round(len(snapshot) * BLOCKSIZE / SAMPLE_RATE, 1)
-
-            t0 = time.time()
-            raw = inst._do_live_transcribe(snapshot)
-            elapsed = round(time.time() - t0, 2)
-
-            if raw:
-                cycle += 1
-                display = inst._build_display_text(raw)
-                inst._last_live_result = display
-                entries.append({
-                    "cycle": cycle,
-                    "audio_s": audio_s,
-                    "raw": raw,
-                    "display": display,
-                    "elapsed_s": elapsed,
-                })
+    # Read subtitle entries written during this replay
+    entries = []
+    if os.path.exists(app.SUBTITLE_LOG):
+        with open(app.SUBTITLE_LOG, "r", encoding="utf-8") as f:
+            f.seek(log_pos)
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
 
     return entries
 
@@ -191,7 +213,7 @@ def _split_sentences(text):
     return [s.strip() for s in parts if len(s.strip()) > 2]
 
 
-def _normalize_for_compare(text):
+def _normalize(text):
     """Lowercase, strip punctuation/space for fuzzy comparison."""
     return ''.join(
         ch.lower() for ch in text
@@ -200,64 +222,48 @@ def _normalize_for_compare(text):
 
 
 def evaluate(entries, ground_truth):
-    """Evaluate replay quality against ground truth transcript."""
+    """Evaluate replay quality against ground truth."""
     if not entries:
-        return {
-            "total_cycles": 0,
-            "completeness": 0.0,
-            "duplications": 0,
-            "stability_jumps": 0,
-            "pass": False,
-            "notes": "No transcription cycles produced",
-        }
+        return {"total_cycles": 0, "completeness": 0.0, "duplications": 0,
+                "stability_jumps": 0, "pass": False}
 
     final_display = entries[-1]["display"]
-    norm_display = _normalize_for_compare(final_display)
+    norm_display = _normalize(final_display)
 
-    # ── Completeness: how many ground truth sentences appear in final display
-    gt_sentences = _split_sentences(ground_truth)
-    found = 0
-    for s in gt_sentences:
-        norm_s = _normalize_for_compare(s)
-        if len(norm_s) < 4:
-            found += 1  # skip very short segments
-            continue
-        if norm_s in norm_display:
-            found += 1
-    completeness = round(found / len(gt_sentences), 2) if gt_sentences else 1.0
+    # Completeness: how many GT sentences appear in final display
+    gt_sents = _split_sentences(ground_truth)
+    found = sum(1 for s in gt_sents
+                if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
+    completeness = round(found / len(gt_sents), 2) if gt_sents else 1.0
 
-    # ── Duplication: count repeated sentences in final display
-    display_sentences = _split_sentences(final_display)
+    # Duplication: repeated sentences in final display
+    display_sents = _split_sentences(final_display)
     seen = set()
     dup_count = 0
-    for s in display_sentences:
-        norm_s = _normalize_for_compare(s)
-        if len(norm_s) < 4:
+    for s in display_sents:
+        ns = _normalize(s)
+        if len(ns) < 4:
             continue
-        if norm_s in seen:
+        if ns in seen:
             dup_count += 1
-        seen.add(norm_s)
+        seen.add(ns)
 
-    # ── Stability: count large display jumps between consecutive cycles
+    # Stability: large display jumps between consecutive cycles
     jumps = 0
     for i in range(1, len(entries)):
         prev_d = entries[i - 1]["display"]
         curr_d = entries[i]["display"]
-        # A "jump" is when current display doesn't start with previous display's first 20 chars
-        check_len = min(20, len(prev_d))
-        if check_len > 0 and not curr_d.startswith(prev_d[:check_len]):
+        check = min(20, len(prev_d))
+        if check > 0 and not curr_d.startswith(prev_d[:check]):
             jumps += 1
 
     passed = completeness >= 0.6 and dup_count == 0
-
     return {
         "total_cycles": len(entries),
         "completeness": completeness,
         "duplications": dup_count,
         "stability_jumps": jumps,
         "pass": passed,
-        "final_display_tail": final_display[-120:] if len(final_display) > 120 else final_display,
-        "ground_truth_tail": ground_truth[-120:] if len(ground_truth) > 120 else ground_truth,
     }
 
 
@@ -301,90 +307,124 @@ def load_transcript_pairs(filter_wav=None, min_duration=0):
     return pairs
 
 
+# ── Pretty printer ────────────────────────────────────────────
+
+def print_report(entries, ground_truth, scores, audio_file, duration, elapsed):
+    """Print a clean, readable report of the replay results."""
+    print(f"\n{'=' * 70}")
+    print(f"  Replay: {audio_file} ({duration:.1f}s audio, {elapsed:.0f}s real)")
+    print(f"{'=' * 70}")
+
+    if not entries:
+        print("  No subtitle entries produced.")
+        return
+
+    # Per-cycle table
+    print(f"\n  {'#':>3}  {'Time':>10}  {'Audio':>6}  {'Disp':>5}  Display text")
+    print(f"  {'─'*3}  {'─'*10}  {'─'*6}  {'─'*5}  {'─'*44}")
+
+    t0 = entries[0]["timestamp"] if "timestamp" in entries[0] else None
+    prev_len = 0
+    for i, e in enumerate(entries):
+        ts = e.get("timestamp", "")
+        if ts:
+            ts_short = ts.split("T")[1][:8] if "T" in ts else ts[:8]
+        else:
+            ts_short = "?"
+        disp = e.get("display", "")
+        dlen = len(disp)
+
+        # Show indicator
+        if dlen < prev_len:
+            mark = " <"
+        elif dlen == prev_len:
+            mark = " ="
+        else:
+            mark = ""
+
+        # Truncate display for readability
+        audio_s = e.get("audio_s", 0)
+        if len(disp) > 50:
+            show = disp[:20] + "..." + disp[-25:]
+        else:
+            show = disp
+        print(f"  {i+1:3d}  {ts_short:>10}  {audio_s:5.1f}s  {dlen:4d}c{mark}  {show}")
+        prev_len = dlen
+
+    # Final display vs ground truth
+    final = entries[-1].get("display", "")
+    print(f"\n  Final display ({len(final)} chars):")
+    # Print wrapped
+    for j in range(0, len(final), 70):
+        print(f"    {final[j:j+70]}")
+
+    print(f"\n  Ground truth ({len(ground_truth)} chars):")
+    for j in range(0, len(ground_truth), 70):
+        print(f"    {ground_truth[j:j+70]}")
+
+    # Scores
+    status = "PASS" if scores["pass"] else "WARN"
+    gt_sents = _split_sentences(ground_truth)
+    norm_display = _normalize(final)
+    found_count = sum(1 for s in gt_sents
+                      if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
+
+    print(f"\n  Completeness: {scores['completeness']} ({found_count}/{len(gt_sents)} sentences)")
+    print(f"  Duplications: {scores['duplications']}")
+    print(f"  Stability:    {scores['stability_jumps']} jump(s)")
+    print(f"  Result:       {status}")
+    print(f"{'=' * 70}")
+
+
 # ── Main ──────────────────────────────────────────────────────
 
-def run_replay(pair, verbose=True):
-    """Run a single replay test and return results."""
+def main():
+    parser = argparse.ArgumentParser(description="Replay test for live subtitles (real code path)")
+    parser.add_argument("--wav", help="Test a specific WAV file (filename only)")
+    args = parser.parse_args()
+
+    # Load pairs, filter to >31s
+    pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=31 if not args.wav else 0)
+
+    if not pairs:
+        print("[WARN] No matching WAV + transcript pairs found.")
+        print(f"       Audio dir:    {AUDIO_DIR}")
+        print(f"       Transcripts:  {TRANSCRIPT_LOG}")
+        if args.wav:
+            print(f"       Filter: --wav {args.wav}")
+        return
+
+    # Default: pick the latest >31s recording (by filename = timestamp)
+    if not args.wav:
+        pair = max(pairs, key=lambda p: p["audio_file"])
+    else:
+        pair = pairs[0]
+
     audio_file = pair["audio_file"]
     duration = pair["duration_s"]
 
-    if verbose:
-        print(f"\n{'=' * 60}")
-        print(f"Replay: {audio_file} ({duration:.1f}s)")
-        print(f"{'=' * 60}")
-
-    frames = load_wav_as_frames(pair["wav_path"])
+    print(f"Loading {audio_file} ({duration:.1f}s)...")
+    wav_frames = load_wav_as_frames(pair["wav_path"])
     inst = create_headless_instance()
 
+    print(f"Replaying at real-time pace ({duration:.0f}s)...")
+    print(f"(Whisper inference logs below are from the REAL code path)\n")
+
     t0 = time.time()
-    entries = simulate_stream(frames, inst)
-    total_time = round(time.time() - t0, 1)
+    entries = replay_wav(inst, wav_frames)
+    elapsed = time.time() - t0
 
     scores = evaluate(entries, pair["ground_truth"])
     scores["audio_file"] = audio_file
     scores["duration_s"] = duration
-    scores["replay_time_s"] = total_time
+    scores["replay_time_s"] = round(elapsed, 1)
 
-    if verbose:
-        status = "PASS" if scores["pass"] else "WARN"
-        print(f"  Cycles:       {scores['total_cycles']}")
-        print(f"  Completeness: {scores['completeness']}")
-        print(f"  Duplications: {scores['duplications']}")
-        print(f"  Stability:    {scores['stability_jumps']} jump(s)")
-        print(f"  Replay time:  {total_time}s")
-        print(f"  Final display: ...{scores.get('final_display_tail', '')}")
-        print(f"  Ground truth:  ...{scores.get('ground_truth_tail', '')}")
-        print(f"  Result: {status}")
+    print_report(entries, pair["ground_truth"], scores, audio_file, duration, elapsed)
 
-    return scores, entries
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Replay test for live subtitles")
-    parser.add_argument("--wav", help="Test a specific WAV file (filename only)")
-    parser.add_argument("--all", action="store_true", help="Test all recordings (default: longest only)")
-    parser.add_argument("--min-duration", type=float, default=0, help="Minimum duration filter (seconds)")
-    parser.add_argument("--save", action="store_true", default=True, help="Save results to replay_results.jsonl")
-    parser.add_argument("--verbose", action="store_true", default=True, help="Print detailed output")
-    args = parser.parse_args()
-
-    pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=args.min_duration)
-    if not args.wav and not args.all and pairs:
-        # Default: only test the longest recording
-        pairs = [max(pairs, key=lambda p: p["duration_s"])]
-
-    if not pairs:
-        print("[WARN] No matching WAV + transcript pairs found.")
-        print(f"       Looked in: {AUDIO_DIR}")
-        print(f"       Transcripts: {TRANSCRIPT_LOG}")
-        if args.wav:
-            print(f"       Filter: --wav {args.wav}")
-        if args.min_duration > 0:
-            print(f"       Min duration: {args.min_duration}s")
-        return
-
-    print(f"Found {len(pairs)} test pair(s)")
-
-    all_results = []
-    pass_count = 0
-
-    for pair in pairs:
-        scores, entries = run_replay(pair, verbose=args.verbose)
-        all_results.append(scores)
-        if scores["pass"]:
-            pass_count += 1
-
-    # Summary
-    total = len(all_results)
-    print(f"\n{'=' * 60}")
-    print(f"Summary: {pass_count}/{total} PASS, {total - pass_count}/{total} WARN")
-    print(f"{'=' * 60}")
-
-    if args.save:
-        with open(REPLAY_RESULTS, "w", encoding="utf-8") as f:
-            for r in all_results:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        print(f"Results saved to {REPLAY_RESULTS}")
+    # Save
+    with open(REPLAY_RESULTS, "w", encoding="utf-8") as f:
+        f.write(json.dumps(scores, ensure_ascii=False) + "\n")
+    print(f"\nResults saved to {REPLAY_RESULTS}")
 
 
 if __name__ == "__main__":

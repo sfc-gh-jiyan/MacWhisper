@@ -732,6 +732,32 @@ def test_build_display_oscillation_not_stuck():
     assert len(r5) == 40  # must keep best, NOT stuck at 8
 
 
+def test_build_display_rejects_content_rewrite():
+    """Longer raw is rejected if it doesn't preserve the frozen prefix (content rewrite)."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._best_raw = ""
+    inst._prev_raw = ""
+    inst._frozen_prefix = ""
+    inst._segment_committed_text = ""
+
+    # Build up a stable frozen prefix (real data from 83.5s recording 212421)
+    inst._build_display_text("来,我们再录一段有意思的事儿。")
+    inst._build_display_text("来,我们再录一段有意思的事儿。今天我去了San Francisco。")
+    r3 = inst._build_display_text("来,我们再录一段有意思的事儿。今天我去了San Francisco,看大家在哪里。")
+    assert "来,我们再录一段有意思的事儿。" in r3
+    assert len(inst._frozen_prefix) >= 4  # frozen prefix is established
+
+    # Whisper rewrites from scratch — longer (50ch > 41ch) but drops the beginning
+    rewrite = "今天我去了San Francisco参加了一个conference。这个conference是有关于"
+    assert len(rewrite) > len(inst._best_raw)  # it IS longer
+    r4 = inst._build_display_text(rewrite)
+
+    # Must reject: display should still contain the opening text
+    assert "来,我们再录一段有意思的事儿。" in r4
+    assert r4 == r3  # display unchanged — rewrite was rejected
+
+
 # ── Test: Pause-based segmentation ──────────────────────────
 
 def test_pause_constants():

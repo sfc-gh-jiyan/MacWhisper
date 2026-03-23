@@ -834,8 +834,26 @@ class TranscriberApp(rumps.App):
         are ignored (ratchet).  The frozen prefix tracks the longest
         common sentence-boundary-aligned prefix between consecutive
         accepted raws — it only grows, providing visual stability.
+
+        Prefix continuity guard: even if the new raw is longer, reject it
+        when it doesn't preserve the frozen prefix — that means Whisper
+        rewrote the beginning (content rewrite), which would silently
+        drop already-displayed text.
         """
+        accept = False
         if len(raw_text) >= len(self._best_raw):
+            # Prefix continuity: reject content rewrites that drop the beginning
+            if len(self._frozen_prefix) >= 4:
+                overlap = _common_prefix_len(raw_text, self._frozen_prefix)
+                if overlap < len(self._frozen_prefix) * 0.5:
+                    accept = False  # content rewrite — reject
+                else:
+                    accept = True
+            else:
+                accept = True
+        # else: shorter raw = regression, keep _best_raw
+
+        if accept:
             # Grow frozen prefix from common prefix with previous accepted raw
             if self._prev_raw:
                 pfx = _common_prefix_len(raw_text, self._prev_raw)
@@ -845,7 +863,6 @@ class TranscriberApp(rumps.App):
             # Ratchet: accept longer/equal raw
             self._prev_raw = raw_text
             self._best_raw = raw_text
-        # else: shorter raw = regression, keep _best_raw
 
         display = self._best_raw
         # Prepend text from previously committed segments
