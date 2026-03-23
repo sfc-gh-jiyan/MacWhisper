@@ -62,7 +62,13 @@ _OVERLAP_STRIP_CHARS = set(' \t\n，。！？、,.!?-\u3000')
 _HALLUCINATION_PHRASES = {
     "thank you for watching", "thanks for watching", "thank you",
     "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
+    "请不吝点赞", "订阅转发", "打赏支持", "明镜与点点栏目",
+    "感谢观看", "欢迎订阅", "点赞关注", "支持明镜",
 }
+
+_HALLUCINATION_SUBSTRINGS = [
+    "请不吝点赞", "打赏支持明镜", "字幕由amara", "字幕提供",
+]
 
 def _strip_trailing_repetition(text):
     """Remove repetitive tail that Whisper appends when decoder loops.
@@ -244,6 +250,9 @@ def _is_hallucination(text):
     lower = text.lower().strip(" .!,。，！")
     if lower in _HALLUCINATION_PHRASES:
         return True
+    for sub in _HALLUCINATION_SUBSTRINGS:
+        if sub in text:
+            return True
     tokens = text.split()
     if len(tokens) >= 3:
         if len(set(tokens)) == 1:
@@ -503,6 +512,7 @@ class TranscriberApp(rumps.App):
         self._best_raw          = ""
         self._prev_raw          = ""
         self._frozen_prefix     = ""
+        self._stale_count       = 0
         # Pause-based segmentation state
         self._segment_start_frame    = 0      # index into self.frames where current segment starts
         self._pause_silence_frames   = 0      # consecutive silent frames counter
@@ -763,6 +773,7 @@ class TranscriberApp(rumps.App):
                 self._best_raw = ""
                 self._prev_raw = ""
                 self._frozen_prefix = ""
+                self._stale_count = 0
                 self._last_live_result = ""
                 self._pause_detected = False
                 self._pause_silence_frames = 0
@@ -862,19 +873,25 @@ class TranscriberApp(rumps.App):
         drop already-displayed text.
         """
         accept = False
+        stale_override = self._stale_count >= 5
         if len(raw_text) >= len(self._best_raw):
             accept = True
-            # Guard 1: reject if new raw rewrites substantial best_raw
-            if accept and len(self._best_raw) >= 15:
-                if _prefix_overlap_ratio(raw_text, self._best_raw) < 0.5:
-                    accept = False
-            # Guard 2: reject if new raw rewrites frozen prefix
-            if accept and len(self._frozen_prefix) >= 4:
-                if _prefix_overlap_ratio(raw_text, self._frozen_prefix) < 0.5:
-                    accept = False
+            if not stale_override:
+                # Guard 1: reject if new raw rewrites substantial best_raw
+                if accept and len(self._best_raw) >= 15:
+                    if _prefix_overlap_ratio(raw_text, self._best_raw) < 0.5:
+                        accept = False
+                # Guard 2: reject if new raw rewrites frozen prefix
+                if accept and len(self._frozen_prefix) >= 4:
+                    if _prefix_overlap_ratio(raw_text, self._frozen_prefix) < 0.5:
+                        accept = False
         # else: shorter raw = regression, keep _best_raw
 
         if accept:
+            if stale_override:
+                # Reset frozen prefix on stale recovery so new content
+                # isn't immediately blocked by the old frozen state
+                self._frozen_prefix = ""
             # Grow frozen prefix from common prefix with previous accepted raw
             if self._prev_raw:
                 pfx = _common_prefix_len(raw_text, self._prev_raw)
@@ -884,6 +901,9 @@ class TranscriberApp(rumps.App):
             # Ratchet: accept longer/equal raw
             self._prev_raw = raw_text
             self._best_raw = raw_text
+            self._stale_count = 0
+        else:
+            self._stale_count += 1
 
         display = self._best_raw
         # Prepend text from previously committed segments
