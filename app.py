@@ -44,7 +44,7 @@ from ApplicationServices import AXIsProcessTrusted
 SAMPLE_RATE = 16000
 LIVE_CHUNK_SECONDS = 3
 MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
-SILENCE_RMS_THRESHOLD = 300   # int16 RMS below this = silence, skip inference
+SILENCE_RMS_THRESHOLD = 120   # int16 RMS below this = silence, skip inference
 PAUSE_RMS_THRESHOLD   = 100   # RMS below this = silence (for pause detection, stricter than inference skip)
 PAUSE_MIN_DURATION    = 0.8   # seconds of continuous silence to trigger pause commit
 PAUSE_MIN_SEGMENT     = 10.0  # minimum segment length before allowing pause commit
@@ -68,6 +68,7 @@ _HALLUCINATION_PHRASES = {
 
 _HALLUCINATION_SUBSTRINGS = [
     "请不吝点赞", "打赏支持明镜", "字幕由amara", "字幕提供",
+    "普通话与英语的混合",
 ]
 
 def _strip_trailing_repetition(text):
@@ -277,6 +278,14 @@ def _is_hallucination(text):
             pat = text[:size]
             if pat * (len(text) // len(pat)) == text[:len(pat) * (len(text) // len(pat))] and len(text) // len(pat) >= 3:
                 return True
+    # Dominant single-character repetition (catches 辉辉辉..., 不同不同...)
+    clean = ''.join(c for c in text if not c.isspace())
+    if len(clean) >= 10:
+        freq = {}
+        for c in clean:
+            freq[c] = freq.get(c, 0) + 1
+        if max(freq.values()) / len(clean) > 0.4:
+            return True
     for ch in text:
         cat = unicodedata.category(ch)
         if cat.startswith('L'):
