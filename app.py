@@ -282,7 +282,7 @@ def _hallucination_reason(text):
             freq[c] = freq.get(c, 0) + 1
         if max(freq.values()) / len(clean) > 0.4:
             return "dominant_char"
-    if len(clean) >= 5:
+    if 5 <= len(clean) < 30:
         has_cjk = any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
                        or 0x20000 <= ord(c) <= 0x2FA1F or 0x3040 <= ord(c) <= 0x30FF
                        for c in clean)
