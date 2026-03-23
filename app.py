@@ -842,15 +842,17 @@ class TranscriberApp(rumps.App):
         """
         accept = False
         if len(raw_text) >= len(self._best_raw):
-            # Prefix continuity: reject content rewrites that drop the beginning
-            if len(self._frozen_prefix) >= 4:
+            accept = True
+            # Guard 1: reject if new raw rewrites substantial best_raw
+            if accept and len(self._best_raw) >= 15:
+                overlap = _common_prefix_len(raw_text, self._best_raw)
+                if overlap < len(self._best_raw) * 0.5:
+                    accept = False
+            # Guard 2: reject if new raw rewrites frozen prefix
+            if accept and len(self._frozen_prefix) >= 4:
                 overlap = _common_prefix_len(raw_text, self._frozen_prefix)
                 if overlap < len(self._frozen_prefix) * 0.5:
-                    accept = False  # content rewrite — reject
-                else:
-                    accept = True
-            else:
-                accept = True
+                    accept = False
         # else: shorter raw = regression, keep _best_raw
 
         if accept:

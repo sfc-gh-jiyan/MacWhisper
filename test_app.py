@@ -725,11 +725,17 @@ def test_build_display_oscillation_not_stuck():
     r3 = inst._build_display_text("现在来看看效果。")       # 8ch - regression
     assert len(r3) == 21  # must keep best, NOT stuck at 8
 
-    r4 = inst._build_display_text("来我们现在看看效果,我刚才又commit了一下,然后呢,我觉得可能还是有些问题。")  # 40ch
-    assert len(r4) == 40  # must accept even longer
+    # "来我们" prepended = content rewrite of the displayed beginning
+    # Guard correctly rejects: display stays stable at 21ch
+    r4 = inst._build_display_text("来我们现在看看效果,我刚才又commit了一下,然后呢,我觉得可能还是有些问题。")
+    assert len(r4) == 21  # guard rejects beginning rewrite
 
     r5 = inst._build_display_text("现在来看看效果。")       # 8ch - regression again
-    assert len(r5) == 40  # must keep best, NOT stuck at 8
+    assert len(r5) == 21  # must keep best
+
+    # Legitimate extension that preserves the beginning → accepted
+    r6 = inst._build_display_text("现在看看效果,我刚才又commit了一下,然后呢,我觉得可能还是有些问题。")
+    assert len(r6) == 37  # accepted: starts with best_raw prefix
 
 
 def test_build_display_rejects_content_rewrite():
