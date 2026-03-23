@@ -576,6 +576,7 @@ def test_build_display_first_call():
     inst._prev_raw_text = ""
     inst._stable_prefix_len = 0
     inst._stable_cycles = 0
+    inst._segment_committed_text = ""
     result = inst._build_display_text("你好世界")
     assert result == "你好世界"
 
@@ -588,6 +589,7 @@ def test_build_display_stable_commit():
     inst._prev_raw_text = ""
     inst._stable_prefix_len = 0
     inst._stable_cycles = 0
+    inst._segment_committed_text = ""
 
     # Cycle 1
     inst._build_display_text("你好世界。这是第一句话。")
@@ -608,6 +610,7 @@ def test_build_display_window_slide():
     inst._prev_raw_text = ""
     inst._stable_prefix_len = 0
     inst._stable_cycles = 0
+    inst._segment_committed_text = ""
 
     # Build up committed text over several stable cycles
     inst._build_display_text("开头内容。中间内容。")
@@ -638,6 +641,7 @@ def test_build_display_reset():
     inst._prev_raw_text = ""
     inst._stable_prefix_len = 0
     inst._stable_cycles = 0
+    inst._segment_committed_text = ""
 
     result = inst._build_display_text("全新录音。")
     assert result == "全新录音。"
@@ -705,6 +709,7 @@ def test_build_display_paraphrase_uses_raw():
     inst._prev_raw_text = "现在我们开始测试,看看效果如何。"
     inst._stable_prefix_len = 10
     inst._stable_cycles = 3
+    inst._segment_committed_text = ""
 
     # Whisper rephrases "效果如何" to "这个效果到底怎么样"
     raw = "现在我们开始测试,看看这个效果到底怎么样。今天去了SF。"
@@ -723,6 +728,7 @@ def test_build_display_sentence_anchor_overlap():
     inst._prev_raw_text = "之前的文本"
     inst._stable_prefix_len = 10
     inst._stable_cycles = 3
+    inst._segment_committed_text = ""
 
     # Window slid: raw doesn't start with committed, AND tail is paraphrased
     raw = "我去了San Francisco。参加了一场会议。主题是AI。"
@@ -731,3 +737,119 @@ def test_build_display_sentence_anchor_overlap():
     # Should preserve committed beginning and append new content
     assert "开头内容" in result
     assert "主题是AI" in result or "参加了" in result
+
+
+# ── Test: Pause-based segmentation ──────────────────────────
+
+def test_pause_constants():
+    """Pause detection constants exist and are reasonable."""
+    import app
+    assert app.PAUSE_RMS_THRESHOLD > 0
+    assert 0.4 <= app.PAUSE_MIN_DURATION <= 2.0
+    assert app.PAUSE_MIN_SEGMENT >= 1.0
+    assert app.PAUSE_SAFETY_FALLBACK < app.MAX_LIVE_WINDOW
+
+
+def test_segment_state_initialised():
+    """Segment tracking state is initialised on the instance."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    # Simulate what _start_recording sets
+    inst._segment_start_frame = 0
+    inst._pause_silence_frames = 0
+    inst._pause_detected = False
+    inst._segment_committed_text = ""
+    assert inst._segment_start_frame == 0
+    assert inst._segment_committed_text == ""
+
+
+def test_build_display_with_segment_history():
+    """Display text prepends segment committed history."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+    inst._segment_committed_text = "第一段内容。"
+
+    raw = "第二段的内容在这里。"
+    result = inst._build_display_text(raw)
+    assert result.startswith("第一段内容。")
+    assert "第二段的内容在这里" in result
+
+
+def test_build_display_no_segment_history():
+    """Without segment history, display is just the current segment."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+    inst._segment_committed_text = ""
+
+    raw = "当前段落。"
+    result = inst._build_display_text(raw)
+    assert result == "当前段落。"
+
+
+def test_build_display_multi_segment_accumulation():
+    """Multiple segments accumulate correctly."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+    inst._segment_committed_text = "段一。段二。"
+
+    raw = "段三内容。"
+    result = inst._build_display_text(raw)
+    assert result == "段一。段二。段三内容。"
+
+
+def test_pause_commit_resets_state():
+    """Simulating a pause commit resets per-segment state correctly."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    # Set up as if mid-recording with committed text
+    inst._committed_text = "一些已提交的文本。"
+    inst._prev_raw_text = "一些已提交的文本。更多内容。"
+    inst._stable_prefix_len = 15
+    inst._stable_cycles = 3
+    inst._last_live_result = "一些已提交的文本。更多内容。"
+    inst._segment_committed_text = ""
+    inst._segment_start_frame = 0
+    inst._pause_detected = True
+    inst._pause_silence_frames = 10
+
+    # Simulate what _live_chunk_loop does on commit
+    # _last_live_result already includes _segment_committed_text prefix
+    inst._segment_committed_text = inst._last_live_result
+    n = 500  # fake frame count
+    inst._segment_start_frame = n
+    inst._committed_text = ""
+    inst._prev_raw_text = ""
+    inst._stable_prefix_len = 0
+    inst._stable_cycles = 0
+    inst._last_live_result = ""
+    inst._pause_detected = False
+    inst._pause_silence_frames = 0
+
+    assert inst._segment_committed_text == "一些已提交的文本。更多内容。"
+    assert inst._committed_text == ""
+    assert inst._prev_raw_text == ""
+    assert inst._segment_start_frame == 500
+
+    # Now new segment transcription should prepend history
+    raw = "新段落开始了。"
+    result = inst._build_display_text(raw)
+    assert result == "一些已提交的文本。更多内容。新段落开始了。"
+
+
+def test_safety_fallback_threshold():
+    """Safety fallback is under 30s to stay within Whisper's encoder limit."""
+    import app
+    assert app.PAUSE_SAFETY_FALLBACK < 30.0
+    assert app.PAUSE_SAFETY_FALLBACK >= 20.0

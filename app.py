@@ -45,6 +45,10 @@ SAMPLE_RATE = 16000
 LIVE_CHUNK_SECONDS = 3
 MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
 SILENCE_RMS_THRESHOLD = 300   # int16 RMS below this = silence, skip inference
+PAUSE_RMS_THRESHOLD   = 100   # RMS below this = silence (for pause detection, stricter than inference skip)
+PAUSE_MIN_DURATION    = 0.8   # seconds of continuous silence to trigger pause commit
+PAUSE_MIN_SEGMENT     = 2.0   # minimum segment length before allowing pause commit
+PAUSE_SAFETY_FALLBACK = 28.0  # force commit at 28s even without pause (under 30s limit)
 NSWindowStyleMaskBorderless = 0
 
 _t2s = opencc.OpenCC('t2s')
@@ -479,6 +483,11 @@ class TranscriberApp(rumps.App):
         self._prev_raw_text     = ""
         self._stable_prefix_len = 0
         self._stable_cycles     = 0
+        # Pause-based segmentation state
+        self._segment_start_frame    = 0      # index into self.frames where current segment starts
+        self._pause_silence_frames   = 0      # consecutive silent frames counter
+        self._pause_detected         = False  # flag for chunk loop to commit
+        self._segment_committed_text = ""     # accumulated text from completed segments
         self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
@@ -487,9 +496,24 @@ class TranscriberApp(rumps.App):
             AppHelper.callAfter(self._create_overlay)
             threading.Thread(target=self._live_chunk_loop, daemon=True).start()
 
+        _pause_silence_threshold = int(PAUSE_MIN_DURATION * SAMPLE_RATE / 1024)
+
         def callback(indata, frame_count, time_info, status):
             if self.recording:
                 self.frames.append(indata.copy())
+                # Pause detection: track consecutive silent frames
+                rms = np.sqrt(np.mean(indata.astype(np.float64) ** 2))
+                if rms < PAUSE_RMS_THRESHOLD:
+                    self._pause_silence_frames += 1
+                else:
+                    self._pause_silence_frames = 0
+                seg_frames = len(self.frames) - self._segment_start_frame
+                seg_secs = seg_frames * 1024 / SAMPLE_RATE
+                if (self._pause_silence_frames >= _pause_silence_threshold
+                        and seg_secs >= PAUSE_MIN_SEGMENT
+                        and not self._pause_detected):
+                    self._pause_detected = True
+                    print(f"[INFO] Pause detected at {seg_secs:.1f}s into segment")
 
         self.stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16",
@@ -689,17 +713,46 @@ class TranscriberApp(rumps.App):
 
         while self.recording:
             n = len(self.frames)
-            audio_secs = n * 1024 / SAMPLE_RATE
-            interval = min(LIVE_CHUNK_SECONDS, max(1.0, audio_secs / 5.0))
+            seg_start = self._segment_start_frame
+            seg_frames = n - seg_start
+            seg_secs = seg_frames * 1024 / SAMPLE_RATE
+            interval = min(LIVE_CHUNK_SECONDS, max(1.0, seg_secs / 5.0))
             time.sleep(interval)
             if not self.recording:
                 break
 
             n = len(self.frames)
-            if n == 0:
+            seg_start = self._segment_start_frame
+            if n <= seg_start:
                 continue
 
-            snapshot = self.frames[max(0, n - max_frames):]
+            # Check for pause commit or safety fallback
+            seg_secs = (n - seg_start) * 1024 / SAMPLE_RATE
+            needs_commit = self._pause_detected or seg_secs >= PAUSE_SAFETY_FALLBACK
+
+            if needs_commit and self._last_live_result:
+                # Commit: _last_live_result already includes _segment_committed_text
+                # as prefix (from _build_display_text), so direct assignment avoids
+                # double-counting.
+                self._segment_committed_text = self._last_live_result
+                reason = "pause" if self._pause_detected else f"safety@{seg_secs:.0f}s"
+                print(f"[INFO] Segment committed ({reason}): "
+                      f"{len(self._segment_committed_text)} chars total")
+                # Reset per-segment state
+                self._segment_start_frame = n
+                self._committed_text = ""
+                self._prev_raw_text = ""
+                self._stable_prefix_len = 0
+                self._stable_cycles = 0
+                self._last_live_result = ""
+                self._pause_detected = False
+                self._pause_silence_frames = 0
+                continue  # skip this cycle, next cycle starts fresh segment
+
+            # Take snapshot from current segment only, capped at max_frames
+            seg_end = n
+            seg_begin = max(seg_start, seg_end - max_frames)
+            snapshot = self.frames[seg_begin:seg_end]
 
             if not self._live_queue.empty():
                 continue
@@ -784,6 +837,8 @@ class TranscriberApp(rumps.App):
         """
         if not self._prev_raw_text:
             self._prev_raw_text = raw_text
+            if self._segment_committed_text:
+                return self._segment_committed_text + raw_text
             return raw_text
 
         # Find common prefix snapped to sentence boundary
@@ -830,6 +885,9 @@ class TranscriberApp(rumps.App):
             display = raw_text
 
         self._prev_raw_text = raw_text
+        # Prepend text from previously committed segments
+        if self._segment_committed_text:
+            display = self._segment_committed_text + display
         return display
 
     # ── Auto-paste ───────────────────────────────────────────
