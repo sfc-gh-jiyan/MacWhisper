@@ -107,6 +107,8 @@ def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
     inst._stale_count = 0
     inst._accept_count = 0
     inst._last_debug = {}
+    inst._last_committed_raw = ""
+    inst._segment_gen = 0
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
     inst._pause_detected = False
@@ -154,6 +156,8 @@ def replay_wav(inst, wav_frames):
     inst._stale_count = 0
     inst._accept_count = 0
     inst._last_debug = {}
+    inst._last_committed_raw = ""
+    inst._segment_gen = 0
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
     inst._pause_detected = False
@@ -356,6 +360,8 @@ def print_report(entries, ground_truth, scores, audio_file, duration, elapsed):
             reason_str = f"REJ guard1 g1={dbg.get('g1','?')}"
         elif action == "REJECT" and reason == "guard2":
             reason_str = f"REJ guard2 g2={dbg.get('g2','?')} f={dbg.get('frozen_len','')}"
+        elif action == "REJECT" and reason == "post_commit_echo":
+            reason_str = f"REJ echo e={dbg.get('echo','?')}"
         elif action == "ACCEPT" and reason == "stale_override":
             reason_str = f"OK  stale s={dbg.get('accept_n','')}"
         elif action == "ACCEPT":

@@ -282,6 +282,20 @@ def _hallucination_reason(text):
             freq[c] = freq.get(c, 0) + 1
         if max(freq.values()) / len(clean) > 0.4:
             return "dominant_char"
+    # Phrase-level repetition (catches CJK repeated phrases without spaces,
+    # e.g. "香港言言学学院的" × 11).  For any 4/6/8-gram that covers >40%
+    # of the text AND appears ≥4 times, flag as hallucination.
+    if len(clean) >= 20:
+        for n in (4, 6, 8):
+            if len(clean) < n * 3:
+                continue
+            grams = {}
+            for i in range(len(clean) - n + 1):
+                gram = clean[i:i+n]
+                grams[gram] = grams.get(gram, 0) + 1
+            mx = max(grams.values())
+            if mx >= 4 and mx * n > len(clean) * 0.4:
+                return "phrase_repeat"
     if 5 <= len(clean) < 30:
         has_cjk = any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
                        or 0x20000 <= ord(c) <= 0x2FA1F or 0x3040 <= ord(c) <= 0x30FF
@@ -541,6 +555,8 @@ class TranscriberApp(rumps.App):
         self._frozen_prefix     = ""
         self._stale_count       = 0
         self._accept_count      = 0
+        self._last_committed_raw = ""
+        self._segment_gen       = 0       # generation counter for stale-result detection
         # Pause-based segmentation state
         self._segment_start_frame    = 0      # index into self.frames where current segment starts
         self._pause_silence_frames   = 0      # consecutive silent frames counter
@@ -796,8 +812,11 @@ class TranscriberApp(rumps.App):
                 reason = "pause" if self._pause_detected else f"safety@{seg_secs:.0f}s"
                 print(f"[INFO] Segment committed ({reason}): "
                       f"{len(self._segment_committed_text)} chars total")
+                # Save last raw for post-commit echo detection
+                self._last_committed_raw = self._best_raw
                 # Reset per-segment state
                 self._segment_start_frame = n
+                self._segment_gen += 1  # invalidate in-flight results
                 self._best_raw = ""
                 self._prev_raw = ""
                 self._frozen_prefix = ""
@@ -817,18 +836,28 @@ class TranscriberApp(rumps.App):
                 continue
 
             try:
-                self._live_queue.put_nowait(snapshot)
+                self._live_queue.put_nowait((snapshot, self._segment_gen))
             except queue.Full:
                 pass
 
     def _live_transcription_worker(self):
         while True:
-            snapshot = self._live_queue.get()
+            item = self._live_queue.get()
             if not self.recording:
                 continue
+            # Unpack snapshot and generation tag
+            if isinstance(item, tuple):
+                snapshot, gen = item
+            else:
+                snapshot, gen = item, self._segment_gen  # legacy compat
             try:
                 with self._inference_lock:
                     raw = self._do_live_transcribe(snapshot)
+                # Discard result if segment committed during inference
+                if gen != self._segment_gen:
+                    if raw:
+                        print(f"[INFO] Discarded stale result (gen {gen}→{self._segment_gen}): {raw[:40]}...")
+                    continue
                 if raw and self.recording:
                     display = self._build_display_text(raw)
                     self._last_live_result = display
@@ -929,6 +958,15 @@ class TranscriberApp(rumps.App):
             reject_reason = "ratchet"
         # else: shorter raw = regression, keep _best_raw
 
+        # Post-commit echo detection: reject stale in-flight results that
+        # arrive after segment commit and duplicate the committed content.
+        echo_ratio = None
+        if accept and self._last_committed_raw:
+            echo_ratio = _prefix_overlap_ratio(self._last_committed_raw, raw_text)
+            if echo_ratio > 0.5:
+                accept = False
+                reject_reason = "post_commit_echo"
+
         if accept:
             accept_reason = "stale_override" if stale_override else "ok"
             if stale_override:
@@ -946,6 +984,7 @@ class TranscriberApp(rumps.App):
             self._best_raw = raw_text
             self._stale_count = 0
             self._accept_count += 1
+            self._last_committed_raw = ""  # echo guard done for this segment
         else:
             self._stale_count += 1
 
@@ -963,6 +1002,8 @@ class TranscriberApp(rumps.App):
             debug["g1"] = round(g1_ratio, 2)
         if g2_ratio is not None:
             debug["g2"] = round(g2_ratio, 2)
+        if echo_ratio is not None:
+            debug["echo"] = round(echo_ratio, 2)
         self._last_debug = debug
 
         display = self._best_raw
