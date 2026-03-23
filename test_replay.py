@@ -106,6 +106,7 @@ def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
     inst._pause_detected = False
@@ -152,6 +153,7 @@ def replay_wav(inst, wav_frames):
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
     inst._pause_detected = False
@@ -322,8 +324,8 @@ def print_report(entries, ground_truth, scores, audio_file, duration, elapsed):
         return
 
     # Per-cycle table
-    print(f"\n  {'#':>3}  {'Time':>10}  {'Audio':>6}  {'Disp':>5}  Display text")
-    print(f"  {'─'*3}  {'─'*10}  {'─'*6}  {'─'*5}  {'─'*44}")
+    print(f"\n  {'#':>3}  {'Time':>10}  {'Audio':>6}  {'Disp':>5}  {'Reason':<20}  Display text")
+    print(f"  {'─'*3}  {'─'*10}  {'─'*6}  {'─'*5}  {'─'*20}  {'─'*30}")
 
     t0 = entries[0]["timestamp"] if "timestamp" in entries[0] else None
     prev_len = 0
@@ -344,13 +346,31 @@ def print_report(entries, ground_truth, scores, audio_file, duration, elapsed):
         else:
             mark = ""
 
+        # Build reason string from debug info
+        dbg = e.get("debug", {})
+        action = dbg.get("action", "?")
+        reason = dbg.get("reason", "?")
+        if action == "REJECT" and reason == "ratchet":
+            reason_str = f"REJ ratchet {dbg.get('raw_len','')}< {dbg.get('best_len','')}"
+        elif action == "REJECT" and reason == "guard1":
+            reason_str = f"REJ guard1 g1={dbg.get('g1','?')}"
+        elif action == "REJECT" and reason == "guard2":
+            reason_str = f"REJ guard2 g2={dbg.get('g2','?')} f={dbg.get('frozen_len','')}"
+        elif action == "ACCEPT" and reason == "stale_override":
+            reason_str = f"OK  stale s={dbg.get('accept_n','')}"
+        elif action == "ACCEPT":
+            g1_str = f" g1={dbg['g1']}" if 'g1' in dbg else ""
+            reason_str = f"OK {g1_str}"
+        else:
+            reason_str = f"{action} {reason}"
+
         # Truncate display for readability
         audio_s = e.get("audio_s", 0)
-        if len(disp) > 50:
-            show = disp[:20] + "..." + disp[-25:]
+        if len(disp) > 40:
+            show = disp[:15] + "..." + disp[-20:]
         else:
             show = disp
-        print(f"  {i+1:3d}  {ts_short:>10}  {audio_s:5.1f}s  {dlen:4d}c{mark}  {show}")
+        print(f"  {i+1:3d}  {ts_short:>10}  {audio_s:5.1f}s  {dlen:4d}c{mark}  {reason_str:<20}  {show}")
         prev_len = dlen
 
     # Final display vs ground truth

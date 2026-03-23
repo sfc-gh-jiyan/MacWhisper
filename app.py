@@ -253,44 +253,41 @@ def _find_after_sentence_overlap(committed, raw, min_sent_len=6):
     return None
 
 
-def _is_hallucination(text):
+def _hallucination_reason(text):
+    """Return reason string if text is hallucination, else None."""
     lower = text.lower().strip(" .!,。，！")
     if lower in _HALLUCINATION_PHRASES:
-        return True
-    # Garbled prefix (incomplete decoder output)
+        return "phrase"
     if text.lstrip().startswith('..'):
-        return True
+        return "garbled_prefix"
     for sub in _HALLUCINATION_SUBSTRINGS:
         if sub in text:
-            return True
+            return "substring"
     tokens = text.split()
     if len(tokens) >= 3:
         if len(set(tokens)) == 1:
-            return True
+            return "word_repeat"
         for i in range(len(tokens) - 2):
             if tokens[i] == tokens[i+1] == tokens[i+2]:
-                return True
+                return "word_repeat"
     if len(text) >= 6:
         for size in range(1, len(text) // 3 + 1):
             pat = text[:size]
             if pat * (len(text) // len(pat)) == text[:len(pat) * (len(text) // len(pat))] and len(text) // len(pat) >= 3:
-                return True
-    # Dominant single-character repetition (catches 辉辉辉..., 不同不同...)
+                return "prefix_repeat"
     clean = ''.join(c for c in text if not c.isspace())
     if len(clean) >= 10:
         freq = {}
         for c in clean:
             freq[c] = freq.get(c, 0) + 1
         if max(freq.values()) / len(clean) > 0.4:
-            return True
-    # No CJK at all in bilingual context → likely wrong-language hallucination
-    # (e.g. "Det tror jeg, du er." from Whisper confusing the language)
+            return "dominant_char"
     if len(clean) >= 5:
         has_cjk = any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
                        or 0x20000 <= ord(c) <= 0x2FA1F or 0x3040 <= ord(c) <= 0x30FF
                        for c in clean)
         if not has_cjk:
-            return True
+            return "no_cjk"
     for ch in text:
         cat = unicodedata.category(ch)
         if cat.startswith('L'):
@@ -300,8 +297,12 @@ def _is_hallucination(text):
             is_cjk_ext = 0x20000 <= block <= 0x2FA1F
             is_kana = 0x3040 <= block <= 0x30FF
             if not (is_latin or is_cjk or is_cjk_ext or is_kana):
-                return True
-    return False
+                return "non_script"
+    return None
+
+
+def _is_hallucination(text):
+    return _hallucination_reason(text) is not None
 
 CONFIG_PATH = os.path.expanduser("~/.macwhisper_config.json")
 
@@ -837,6 +838,7 @@ class TranscriberApp(rumps.App):
                         "audio_s": round(len(snapshot) * 1024 / SAMPLE_RATE, 1),
                         "raw": raw,
                         "display": display,
+                        "debug": getattr(self, '_last_debug', {}),
                     }
                     with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -880,8 +882,9 @@ class TranscriberApp(rumps.App):
             print(f"[INFO] Live result (prompt echo filtered): {text}")
             return ""
         text = _strip_trailing_repetition(text)
-        if not text or _is_hallucination(text):
-            print(f"[INFO] Live result (hallucination filtered): {text}")
+        hall_reason = _hallucination_reason(text) if text else "empty"
+        if not text or hall_reason:
+            print(f"[INFO] Live result (hallucination:{hall_reason}): {text}")
             return ""
         print(f"[INFO] Live result: {text}")
         return text
@@ -901,23 +904,33 @@ class TranscriberApp(rumps.App):
         drop already-displayed text.
         """
         accept = False
+        reject_reason = ""
+        g1_ratio = None
+        g2_ratio = None
         stale_override = self._stale_count >= 3
         if len(raw_text) >= len(self._best_raw):
             accept = True
             if not stale_override:
                 # Guard 1: reject if new raw rewrites substantial best_raw
                 if accept and len(self._best_raw) >= 15:
-                    if _prefix_overlap_ratio(raw_text, self._best_raw) < 0.5:
+                    g1_ratio = _prefix_overlap_ratio(raw_text, self._best_raw)
+                    if g1_ratio < 0.5:
                         accept = False
+                        reject_reason = "guard1"
                 # Guard 2: reject if new raw rewrites frozen prefix
                 # Only apply after 3+ acceptances so early unstable content
                 # doesn't lock the frozen prefix prematurely
                 if accept and self._accept_count >= 3 and len(self._frozen_prefix) >= 4:
-                    if _prefix_overlap_ratio(raw_text, self._frozen_prefix) < 0.5:
+                    g2_ratio = _prefix_overlap_ratio(raw_text, self._frozen_prefix)
+                    if g2_ratio < 0.5:
                         accept = False
+                        reject_reason = "guard2"
+        else:
+            reject_reason = "ratchet"
         # else: shorter raw = regression, keep _best_raw
 
         if accept:
+            accept_reason = "stale_override" if stale_override else "ok"
             if stale_override:
                 # Reset frozen prefix on stale recovery so new content
                 # isn't immediately blocked by the old frozen state
@@ -935,6 +948,22 @@ class TranscriberApp(rumps.App):
             self._accept_count += 1
         else:
             self._stale_count += 1
+
+        # Debug trace for replay analysis
+        debug = {
+            "action": "ACCEPT" if accept else "REJECT",
+            "reason": accept_reason if accept else reject_reason,
+            "raw_len": len(raw_text),
+            "best_len": len(self._best_raw),
+            "frozen_len": len(self._frozen_prefix),
+            "stale": self._stale_count,
+            "accept_n": self._accept_count,
+        }
+        if g1_ratio is not None:
+            debug["g1"] = round(g1_ratio, 2)
+        if g2_ratio is not None:
+            debug["g2"] = round(g2_ratio, 2)
+        self._last_debug = debug
 
         display = self._best_raw
         # Prepend text from previously committed segments

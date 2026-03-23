@@ -580,6 +580,7 @@ def test_build_display_first_call():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
     result = inst._build_display_text("你好世界")
     assert result == "你好世界"
@@ -595,6 +596,7 @@ def test_build_display_ratchet_grows():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     r1 = inst._build_display_text("你好世界。")
@@ -617,6 +619,7 @@ def test_build_display_ratchet_ignores_regression():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     inst._build_display_text("开头内容。中间内容。后续内容。")
@@ -635,6 +638,7 @@ def test_build_display_reset():
     inst._frozen_prefix = "旧的"
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
 
     # Simulate what _start_recording does
     inst._best_raw = ""
@@ -642,6 +646,7 @@ def test_build_display_reset():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     result = inst._build_display_text("全新录音。")
@@ -711,6 +716,7 @@ def test_build_display_frozen_prefix_grows():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     inst._build_display_text("你好世界。这是测试。")
@@ -732,6 +738,7 @@ def test_build_display_oscillation_not_stuck():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     # Simulate Whisper oscillation (real data from 68s recording)
@@ -765,6 +772,7 @@ def test_build_display_rejects_content_rewrite():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     # Build up a stable frozen prefix (real data from 83.5s recording 212421)
@@ -817,6 +825,7 @@ def test_build_display_with_segment_history():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = "第一段内容。"
 
     raw = "第二段的内容在这里。"
@@ -834,6 +843,7 @@ def test_build_display_no_segment_history():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = ""
 
     raw = "当前段落。"
@@ -850,6 +860,7 @@ def test_build_display_multi_segment_accumulation():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._segment_committed_text = "段一。段二。"
 
     raw = "段三内容。"
@@ -867,6 +878,7 @@ def test_pause_commit_resets_state():
     inst._frozen_prefix = "一些已提交的文本。"
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._last_live_result = "一些已提交的文本。更多内容。"
     inst._segment_committed_text = ""
     inst._segment_start_frame = 0
@@ -883,6 +895,7 @@ def test_pause_commit_resets_state():
     inst._frozen_prefix = ""
     inst._stale_count = 0
     inst._accept_count = 0
+    inst._last_debug = {}
     inst._last_live_result = ""
     inst._pause_detected = False
     inst._pause_silence_frames = 0
