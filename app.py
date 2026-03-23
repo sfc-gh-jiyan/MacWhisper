@@ -132,36 +132,30 @@ def _common_prefix_len(a, b):
 
 
 def _prefix_overlap_ratio(a, b):
-    """Ratio of position-aligned matching chars after stripping punctuation.
+    """Character-bigram containment ratio after stripping punctuation.
 
-    Used by continuity guards to tolerate Whisper's punctuation, whitespace,
-    and minor wording changes (e.g. 这个→这种, 非常好→非常的好) while still
-    catching true content rewrites.  Returns matches / len(stripped_b).
-
-    Also tries up to 2-character shifts at the beginning to handle Whisper
-    adding/dropping leading filler characters (来, 好, 那, etc.).
+    Used by continuity guards to check whether text *a* preserves the content
+    of reference text *b*.  Computes |bigrams(a) ∩ bigrams(b)| / |bigrams(b)|,
+    i.e. the fraction of b's bigrams that appear in a.  This handles mid-text
+    insertions/deletions that position-aligned matching cannot (e.g.
+    "问题出来了你看" vs "问题你看").
     """
     def _strip(s):
         return ''.join(c.lower() for c in s if c not in _OVERLAP_STRIP_CHARS)
 
-    def _match_ratio(x, y):
-        """Ratio of matching chars at aligned positions."""
-        n = min(len(x), len(y))
-        if n == 0:
-            return 0.0
-        matches = sum(1 for i in range(n) if x[i] == y[i])
-        return matches / len(y)
-
     sa, sb = _strip(a), _strip(b)
     if not sb:
         return 1.0
-    best = _match_ratio(sa, sb)
-    # Tolerate Whisper adding/dropping up to 2 leading characters
-    for shift in range(1, min(3, len(sa))):
-        best = max(best, _match_ratio(sa[shift:], sb))
-    for shift in range(1, min(3, len(sb))):
-        best = max(best, _match_ratio(sa, sb[shift:]))
-    return best
+    if len(sb) < 2:
+        return 1.0 if sb in sa else 0.0
+
+    def _bigrams(s):
+        return set(s[i:i+2] for i in range(len(s) - 1))
+
+    ba, bb = _bigrams(sa), _bigrams(sb)
+    if not bb:
+        return 1.0
+    return len(ba & bb) / len(bb)
 
 
 def _snap_to_boundary(text, pos):
@@ -534,6 +528,7 @@ class TranscriberApp(rumps.App):
         self._prev_raw          = ""
         self._frozen_prefix     = ""
         self._stale_count       = 0
+        self._accept_count      = 0
         # Pause-based segmentation state
         self._segment_start_frame    = 0      # index into self.frames where current segment starts
         self._pause_silence_frames   = 0      # consecutive silent frames counter
@@ -795,6 +790,7 @@ class TranscriberApp(rumps.App):
                 self._prev_raw = ""
                 self._frozen_prefix = ""
                 self._stale_count = 0
+                self._accept_count = 0
                 self._last_live_result = ""
                 self._pause_detected = False
                 self._pause_silence_frames = 0
@@ -894,7 +890,7 @@ class TranscriberApp(rumps.App):
         drop already-displayed text.
         """
         accept = False
-        stale_override = self._stale_count >= 5
+        stale_override = self._stale_count >= 3
         if len(raw_text) >= len(self._best_raw):
             accept = True
             if not stale_override:
@@ -903,7 +899,9 @@ class TranscriberApp(rumps.App):
                     if _prefix_overlap_ratio(raw_text, self._best_raw) < 0.5:
                         accept = False
                 # Guard 2: reject if new raw rewrites frozen prefix
-                if accept and len(self._frozen_prefix) >= 4:
+                # Only apply after 3+ acceptances so early unstable content
+                # doesn't lock the frozen prefix prematurely
+                if accept and self._accept_count >= 3 and len(self._frozen_prefix) >= 4:
                     if _prefix_overlap_ratio(raw_text, self._frozen_prefix) < 0.5:
                         accept = False
         # else: shorter raw = regression, keep _best_raw
@@ -923,6 +921,7 @@ class TranscriberApp(rumps.App):
             self._prev_raw = raw_text
             self._best_raw = raw_text
             self._stale_count = 0
+            self._accept_count += 1
         else:
             self._stale_count += 1
 

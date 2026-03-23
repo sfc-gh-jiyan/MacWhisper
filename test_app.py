@@ -576,6 +576,7 @@ def test_build_display_first_call():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
     result = inst._build_display_text("你好世界")
     assert result == "你好世界"
@@ -590,6 +591,7 @@ def test_build_display_ratchet_grows():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     r1 = inst._build_display_text("你好世界。")
@@ -611,6 +613,7 @@ def test_build_display_ratchet_ignores_regression():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     inst._build_display_text("开头内容。中间内容。后续内容。")
@@ -628,12 +631,14 @@ def test_build_display_reset():
     inst._prev_raw = "旧的文本。"
     inst._frozen_prefix = "旧的"
     inst._stale_count = 0
+    inst._accept_count = 0
 
     # Simulate what _start_recording does
     inst._best_raw = ""
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     result = inst._build_display_text("全新录音。")
@@ -702,6 +707,7 @@ def test_build_display_frozen_prefix_grows():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     inst._build_display_text("你好世界。这是测试。")
@@ -722,6 +728,7 @@ def test_build_display_oscillation_not_stuck():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     # Simulate Whisper oscillation (real data from 68s recording)
@@ -732,17 +739,18 @@ def test_build_display_oscillation_not_stuck():
     r3 = inst._build_display_text("现在来看看效果。")       # 8ch - regression
     assert len(r3) == 21  # must keep best, NOT stuck at 8
 
-    # "来我们" prepended = content rewrite of the displayed beginning
-    # Guard correctly rejects: display stays stable at 21ch
+    # "来我们" prepended but all original content preserved + extended.
+    # Bigram containment passes because best_raw's content is present.
+    # This is correct: Whisper refined the beginning while keeping content.
     r4 = inst._build_display_text("来我们现在看看效果,我刚才又commit了一下,然后呢,我觉得可能还是有些问题。")
-    assert len(r4) == 21  # guard rejects beginning rewrite
+    assert len(r4) == 40  # accepted: preserves content and is longer
 
     r5 = inst._build_display_text("现在来看看效果。")       # 8ch - regression again
-    assert len(r5) == 21  # must keep best
+    assert len(r5) == 40  # must keep best
 
-    # Legitimate extension that preserves the beginning → accepted
+    # Shorter than current best (40ch) → ratchet rejects
     r6 = inst._build_display_text("现在看看效果,我刚才又commit了一下,然后呢,我觉得可能还是有些问题。")
-    assert len(r6) == 37  # accepted: starts with best_raw prefix
+    assert len(r6) == 40  # ratchet: 37 < 40, keep best
 
 
 def test_build_display_rejects_content_rewrite():
@@ -753,6 +761,7 @@ def test_build_display_rejects_content_rewrite():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     # Build up a stable frozen prefix (real data from 83.5s recording 212421)
@@ -804,6 +813,7 @@ def test_build_display_with_segment_history():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = "第一段内容。"
 
     raw = "第二段的内容在这里。"
@@ -820,6 +830,7 @@ def test_build_display_no_segment_history():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = ""
 
     raw = "当前段落。"
@@ -835,6 +846,7 @@ def test_build_display_multi_segment_accumulation():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._segment_committed_text = "段一。段二。"
 
     raw = "段三内容。"
@@ -851,6 +863,7 @@ def test_pause_commit_resets_state():
     inst._prev_raw = "一些已提交的文本。更多内容。"
     inst._frozen_prefix = "一些已提交的文本。"
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._last_live_result = "一些已提交的文本。更多内容。"
     inst._segment_committed_text = ""
     inst._segment_start_frame = 0
@@ -866,6 +879,7 @@ def test_pause_commit_resets_state():
     inst._prev_raw = ""
     inst._frozen_prefix = ""
     inst._stale_count = 0
+    inst._accept_count = 0
     inst._last_live_result = ""
     inst._pause_detected = False
     inst._pause_silence_frames = 0
