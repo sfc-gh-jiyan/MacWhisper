@@ -131,24 +131,36 @@ def _common_prefix_len(a, b):
 
 
 def _prefix_overlap_ratio(a, b):
-    """Ratio of common prefix after stripping punctuation/spaces.
+    """Ratio of position-aligned matching chars after stripping punctuation.
 
-    Used by continuity guards to tolerate Whisper's punctuation and
-    whitespace changes (e.g. comma→period, space inserted) while still
-    catching true content rewrites.  Returns overlap / len(stripped_b).
+    Used by continuity guards to tolerate Whisper's punctuation, whitespace,
+    and minor wording changes (e.g. 这个→这种, 非常好→非常的好) while still
+    catching true content rewrites.  Returns matches / len(stripped_b).
+
+    Also tries up to 2-character shifts at the beginning to handle Whisper
+    adding/dropping leading filler characters (来, 好, 那, etc.).
     """
     def _strip(s):
         return ''.join(c.lower() for c in s if c not in _OVERLAP_STRIP_CHARS)
+
+    def _match_ratio(x, y):
+        """Ratio of matching chars at aligned positions."""
+        n = min(len(x), len(y))
+        if n == 0:
+            return 0.0
+        matches = sum(1 for i in range(n) if x[i] == y[i])
+        return matches / len(y)
+
     sa, sb = _strip(a), _strip(b)
     if not sb:
         return 1.0
-    n = min(len(sa), len(sb))
-    common = 0
-    for i in range(n):
-        if sa[i] != sb[i]:
-            break
-        common += 1
-    return common / len(sb)
+    best = _match_ratio(sa, sb)
+    # Tolerate Whisper adding/dropping up to 2 leading characters
+    for shift in range(1, min(3, len(sa))):
+        best = max(best, _match_ratio(sa[shift:], sb))
+    for shift in range(1, min(3, len(sb))):
+        best = max(best, _match_ratio(sa, sb[shift:]))
+    return best
 
 
 def _snap_to_boundary(text, pos):
