@@ -47,7 +47,7 @@ MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
 SILENCE_RMS_THRESHOLD = 300   # int16 RMS below this = silence, skip inference
 PAUSE_RMS_THRESHOLD   = 100   # RMS below this = silence (for pause detection, stricter than inference skip)
 PAUSE_MIN_DURATION    = 0.8   # seconds of continuous silence to trigger pause commit
-PAUSE_MIN_SEGMENT     = 2.0   # minimum segment length before allowing pause commit
+PAUSE_MIN_SEGMENT     = 10.0  # minimum segment length before allowing pause commit
 PAUSE_SAFETY_FALLBACK = 28.0  # force commit at 28s even without pause (under 30s limit)
 NSWindowStyleMaskBorderless = 0
 
@@ -62,7 +62,13 @@ _OVERLAP_STRIP_CHARS = set(' \t\n，。！？、,.!?-\u3000')
 _HALLUCINATION_PHRASES = {
     "thank you for watching", "thanks for watching", "thank you",
     "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
+    "请不吝点赞", "订阅转发", "打赏支持", "明镜与点点栏目",
+    "感谢观看", "欢迎订阅", "点赞关注", "支持明镜",
 }
+
+_HALLUCINATION_SUBSTRINGS = [
+    "请不吝点赞", "打赏支持明镜", "字幕由amara", "字幕提供",
+]
 
 def _strip_trailing_repetition(text):
     """Remove repetitive tail that Whisper appends when decoder loops.
@@ -122,6 +128,39 @@ def _common_prefix_len(a, b):
         if ca != cb:
             return i
     return n
+
+
+def _prefix_overlap_ratio(a, b):
+    """Ratio of position-aligned matching chars after stripping punctuation.
+
+    Used by continuity guards to tolerate Whisper's punctuation, whitespace,
+    and minor wording changes (e.g. 这个→这种, 非常好→非常的好) while still
+    catching true content rewrites.  Returns matches / len(stripped_b).
+
+    Also tries up to 2-character shifts at the beginning to handle Whisper
+    adding/dropping leading filler characters (来, 好, 那, etc.).
+    """
+    def _strip(s):
+        return ''.join(c.lower() for c in s if c not in _OVERLAP_STRIP_CHARS)
+
+    def _match_ratio(x, y):
+        """Ratio of matching chars at aligned positions."""
+        n = min(len(x), len(y))
+        if n == 0:
+            return 0.0
+        matches = sum(1 for i in range(n) if x[i] == y[i])
+        return matches / len(y)
+
+    sa, sb = _strip(a), _strip(b)
+    if not sb:
+        return 1.0
+    best = _match_ratio(sa, sb)
+    # Tolerate Whisper adding/dropping up to 2 leading characters
+    for shift in range(1, min(3, len(sa))):
+        best = max(best, _match_ratio(sa[shift:], sb))
+    for shift in range(1, min(3, len(sb))):
+        best = max(best, _match_ratio(sa, sb[shift:]))
+    return best
 
 
 def _snap_to_boundary(text, pos):
@@ -223,6 +262,9 @@ def _is_hallucination(text):
     lower = text.lower().strip(" .!,。，！")
     if lower in _HALLUCINATION_PHRASES:
         return True
+    for sub in _HALLUCINATION_SUBSTRINGS:
+        if sub in text:
+            return True
     tokens = text.split()
     if len(tokens) >= 3:
         if len(set(tokens)) == 1:
@@ -479,10 +521,10 @@ class TranscriberApp(rumps.App):
         self.frames    = []
         self.recording = True
         self._last_live_result = ""
-        self._committed_text    = ""
-        self._prev_raw_text     = ""
-        self._stable_prefix_len = 0
-        self._stable_cycles     = 0
+        self._best_raw          = ""
+        self._prev_raw          = ""
+        self._frozen_prefix     = ""
+        self._stale_count       = 0
         # Pause-based segmentation state
         self._segment_start_frame    = 0      # index into self.frames where current segment starts
         self._pause_silence_frames   = 0      # consecutive silent frames counter
@@ -740,10 +782,10 @@ class TranscriberApp(rumps.App):
                       f"{len(self._segment_committed_text)} chars total")
                 # Reset per-segment state
                 self._segment_start_frame = n
-                self._committed_text = ""
-                self._prev_raw_text = ""
-                self._stable_prefix_len = 0
-                self._stable_cycles = 0
+                self._best_raw = ""
+                self._prev_raw = ""
+                self._frozen_prefix = ""
+                self._stale_count = 0
                 self._last_live_result = ""
                 self._pause_detected = False
                 self._pause_silence_frames = 0
@@ -829,62 +871,53 @@ class TranscriberApp(rumps.App):
         return text
 
     def _build_display_text(self, raw_text):
-        """Build stable display text using committed-prefix tracking.
+        """Stabilized display: ratchet growth + frozen prefix tracking.
 
-        Compares consecutive raw transcriptions to find a stable prefix.
-        Once stable for 2+ cycles the prefix is committed and preserved
-        even when the sliding window causes Whisper to reinterpret audio.
+        Within a segment audio only grows, so Whisper output should grow
+        proportionally.  Shorter outputs are truncation regressions and
+        are ignored (ratchet).  The frozen prefix tracks the longest
+        common sentence-boundary-aligned prefix between consecutive
+        accepted raws — it only grows, providing visual stability.
+
+        Prefix continuity guard: even if the new raw is longer, reject it
+        when it doesn't preserve the frozen prefix — that means Whisper
+        rewrote the beginning (content rewrite), which would silently
+        drop already-displayed text.
         """
-        if not self._prev_raw_text:
-            self._prev_raw_text = raw_text
-            if self._segment_committed_text:
-                return self._segment_committed_text + raw_text
-            return raw_text
+        accept = False
+        stale_override = self._stale_count >= 5
+        if len(raw_text) >= len(self._best_raw):
+            accept = True
+            if not stale_override:
+                # Guard 1: reject if new raw rewrites substantial best_raw
+                if accept and len(self._best_raw) >= 15:
+                    if _prefix_overlap_ratio(raw_text, self._best_raw) < 0.5:
+                        accept = False
+                # Guard 2: reject if new raw rewrites frozen prefix
+                if accept and len(self._frozen_prefix) >= 4:
+                    if _prefix_overlap_ratio(raw_text, self._frozen_prefix) < 0.5:
+                        accept = False
+        # else: shorter raw = regression, keep _best_raw
 
-        # Find common prefix snapped to sentence boundary
-        prefix_len = _common_prefix_len(raw_text, self._prev_raw_text)
-        snapped = _snap_to_boundary(raw_text, prefix_len)
-
-        # Track stability
-        if snapped >= self._stable_prefix_len and snapped > 0:
-            self._stable_cycles += 1
+        if accept:
+            if stale_override:
+                # Reset frozen prefix on stale recovery so new content
+                # isn't immediately blocked by the old frozen state
+                self._frozen_prefix = ""
+            # Grow frozen prefix from common prefix with previous accepted raw
+            if self._prev_raw:
+                pfx = _common_prefix_len(raw_text, self._prev_raw)
+                snapped = _snap_to_boundary(raw_text, pfx)
+                if snapped > len(self._frozen_prefix):
+                    self._frozen_prefix = raw_text[:snapped]
+            # Ratchet: accept longer/equal raw
+            self._prev_raw = raw_text
+            self._best_raw = raw_text
+            self._stale_count = 0
         else:
-            self._stable_cycles = 1
-        self._stable_prefix_len = snapped
+            self._stale_count += 1
 
-        # Commit prefix after 2 stable cycles
-        if self._stable_cycles >= 2 and snapped > len(self._committed_text):
-            self._committed_text = raw_text[:snapped]
-
-        # Build display — 4-level matching cascade
-        if self._committed_text:
-            prefix_match = _common_prefix_len(raw_text, self._committed_text)
-            committed_check = min(20, len(self._committed_text))
-
-            if prefix_match >= committed_check:
-                # Level 1: No drift — raw naturally extends committed
-                display = raw_text
-            elif prefix_match >= len(self._committed_text) * 0.4:
-                # Level 2: Same audio position, Whisper paraphrased — trust raw
-                display = raw_text
-            else:
-                # Level 3: Window slid — tail-substring overlap search
-                new_part = _find_after_overlap(self._committed_text, raw_text)
-                if new_part and new_part != raw_text:
-                    display = self._committed_text + new_part
-                else:
-                    # Level 4: Sentence-anchor overlap search
-                    sent_part = _find_after_sentence_overlap(
-                        self._committed_text, raw_text
-                    )
-                    if sent_part is not None:
-                        display = self._committed_text + sent_part
-                    else:
-                        display = self._committed_text
-        else:
-            display = raw_text
-
-        self._prev_raw_text = raw_text
+        display = self._best_raw
         # Prepend text from previously committed segments
         if self._segment_committed_text:
             display = self._segment_committed_text + display
