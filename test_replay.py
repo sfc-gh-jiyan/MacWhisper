@@ -6,10 +6,10 @@ simulation) and compares final display text against the ground-truth
 full transcript. No microphone or GUI needed.
 
 Usage:
-    venv/bin/python test_replay.py                          # all WAVs with transcripts
-    venv/bin/python test_replay.py --wav 30260322_183047.wav  # single file
-    venv/bin/python test_replay.py --long-only               # only recordings > 30s
-    venv/bin/python test_replay.py --min-duration 10         # only recordings > 10s
+    venv/bin/python test_replay.py                          # longest WAV only (fast)
+    venv/bin/python test_replay.py --all                    # all WAVs with transcripts
+    venv/bin/python test_replay.py --wav 20260322_183047.wav  # single file
+    venv/bin/python test_replay.py --min-duration 60        # only recordings > 60s
 """
 
 import argparse
@@ -91,10 +91,9 @@ def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
     """Create a minimal TranscriberApp with just the state needed for replay."""
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
     inst.current_model = model
-    inst._committed_text = ""
-    inst._prev_raw_text = ""
-    inst._stable_prefix_len = 0
-    inst._stable_cycles = 0
+    inst._best_raw = ""
+    inst._prev_raw = ""
+    inst._frozen_prefix = ""
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
     inst._pause_detected = False
@@ -152,10 +151,9 @@ def simulate_stream(frames, inst):
                 print(f"  [SEGMENT COMMIT ({reason})]: "
                       f"{len(inst._segment_committed_text)} chars total")
                 inst._segment_start_frame = n
-                inst._committed_text = ""
-                inst._prev_raw_text = ""
-                inst._stable_prefix_len = 0
-                inst._stable_cycles = 0
+                inst._best_raw = ""
+                inst._prev_raw = ""
+                inst._frozen_prefix = ""
                 inst._last_live_result = ""
                 inst._pause_detected = False
                 inst._pause_silence_frames = 0
@@ -344,14 +342,16 @@ def run_replay(pair, verbose=True):
 def main():
     parser = argparse.ArgumentParser(description="Replay test for live subtitles")
     parser.add_argument("--wav", help="Test a specific WAV file (filename only)")
-    parser.add_argument("--long-only", action="store_true", help="Only test recordings > 30s")
-    parser.add_argument("--min-duration", type=float, default=31, help="Minimum duration in seconds (default: 31s)")
+    parser.add_argument("--all", action="store_true", help="Test all recordings (default: longest only)")
+    parser.add_argument("--min-duration", type=float, default=0, help="Minimum duration filter (seconds)")
     parser.add_argument("--save", action="store_true", default=True, help="Save results to replay_results.jsonl")
     parser.add_argument("--verbose", action="store_true", default=True, help="Print detailed output")
     args = parser.parse_args()
 
-    min_dur = 30.0 if args.long_only else args.min_duration
-    pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=min_dur)
+    pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=args.min_duration)
+    if not args.wav and not args.all and pairs:
+        # Default: only test the longest recording
+        pairs = [max(pairs, key=lambda p: p["duration_s"])]
 
     if not pairs:
         print("[WARN] No matching WAV + transcript pairs found.")
@@ -359,8 +359,8 @@ def main():
         print(f"       Transcripts: {TRANSCRIPT_LOG}")
         if args.wav:
             print(f"       Filter: --wav {args.wav}")
-        if min_dur > 0:
-            print(f"       Min duration: {min_dur}s")
+        if args.min_duration > 0:
+            print(f"       Min duration: {args.min_duration}s")
         return
 
     print(f"Found {len(pairs)} test pair(s)")

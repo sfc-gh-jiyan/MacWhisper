@@ -47,7 +47,7 @@ MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
 SILENCE_RMS_THRESHOLD = 300   # int16 RMS below this = silence, skip inference
 PAUSE_RMS_THRESHOLD   = 100   # RMS below this = silence (for pause detection, stricter than inference skip)
 PAUSE_MIN_DURATION    = 0.8   # seconds of continuous silence to trigger pause commit
-PAUSE_MIN_SEGMENT     = 2.0   # minimum segment length before allowing pause commit
+PAUSE_MIN_SEGMENT     = 10.0  # minimum segment length before allowing pause commit
 PAUSE_SAFETY_FALLBACK = 28.0  # force commit at 28s even without pause (under 30s limit)
 NSWindowStyleMaskBorderless = 0
 
@@ -479,10 +479,9 @@ class TranscriberApp(rumps.App):
         self.frames    = []
         self.recording = True
         self._last_live_result = ""
-        self._committed_text    = ""
-        self._prev_raw_text     = ""
-        self._stable_prefix_len = 0
-        self._stable_cycles     = 0
+        self._best_raw          = ""
+        self._prev_raw          = ""
+        self._frozen_prefix     = ""
         # Pause-based segmentation state
         self._segment_start_frame    = 0      # index into self.frames where current segment starts
         self._pause_silence_frames   = 0      # consecutive silent frames counter
@@ -740,10 +739,9 @@ class TranscriberApp(rumps.App):
                       f"{len(self._segment_committed_text)} chars total")
                 # Reset per-segment state
                 self._segment_start_frame = n
-                self._committed_text = ""
-                self._prev_raw_text = ""
-                self._stable_prefix_len = 0
-                self._stable_cycles = 0
+                self._best_raw = ""
+                self._prev_raw = ""
+                self._frozen_prefix = ""
                 self._last_live_result = ""
                 self._pause_detected = False
                 self._pause_silence_frames = 0
@@ -829,62 +827,27 @@ class TranscriberApp(rumps.App):
         return text
 
     def _build_display_text(self, raw_text):
-        """Build stable display text using committed-prefix tracking.
+        """Stabilized display: ratchet growth + frozen prefix tracking.
 
-        Compares consecutive raw transcriptions to find a stable prefix.
-        Once stable for 2+ cycles the prefix is committed and preserved
-        even when the sliding window causes Whisper to reinterpret audio.
+        Within a segment audio only grows, so Whisper output should grow
+        proportionally.  Shorter outputs are truncation regressions and
+        are ignored (ratchet).  The frozen prefix tracks the longest
+        common sentence-boundary-aligned prefix between consecutive
+        accepted raws — it only grows, providing visual stability.
         """
-        if not self._prev_raw_text:
-            self._prev_raw_text = raw_text
-            if self._segment_committed_text:
-                return self._segment_committed_text + raw_text
-            return raw_text
+        if len(raw_text) >= len(self._best_raw):
+            # Grow frozen prefix from common prefix with previous accepted raw
+            if self._prev_raw:
+                pfx = _common_prefix_len(raw_text, self._prev_raw)
+                snapped = _snap_to_boundary(raw_text, pfx)
+                if snapped > len(self._frozen_prefix):
+                    self._frozen_prefix = raw_text[:snapped]
+            # Ratchet: accept longer/equal raw
+            self._prev_raw = raw_text
+            self._best_raw = raw_text
+        # else: shorter raw = regression, keep _best_raw
 
-        # Find common prefix snapped to sentence boundary
-        prefix_len = _common_prefix_len(raw_text, self._prev_raw_text)
-        snapped = _snap_to_boundary(raw_text, prefix_len)
-
-        # Track stability
-        if snapped >= self._stable_prefix_len and snapped > 0:
-            self._stable_cycles += 1
-        else:
-            self._stable_cycles = 1
-        self._stable_prefix_len = snapped
-
-        # Commit prefix after 2 stable cycles
-        if self._stable_cycles >= 2 and snapped > len(self._committed_text):
-            self._committed_text = raw_text[:snapped]
-
-        # Build display — 4-level matching cascade
-        if self._committed_text:
-            prefix_match = _common_prefix_len(raw_text, self._committed_text)
-            committed_check = min(20, len(self._committed_text))
-
-            if prefix_match >= committed_check:
-                # Level 1: No drift — raw naturally extends committed
-                display = raw_text
-            elif prefix_match >= len(self._committed_text) * 0.4:
-                # Level 2: Same audio position, Whisper paraphrased — trust raw
-                display = raw_text
-            else:
-                # Level 3: Window slid — tail-substring overlap search
-                new_part = _find_after_overlap(self._committed_text, raw_text)
-                if new_part and new_part != raw_text:
-                    display = self._committed_text + new_part
-                else:
-                    # Level 4: Sentence-anchor overlap search
-                    sent_part = _find_after_sentence_overlap(
-                        self._committed_text, raw_text
-                    )
-                    if sent_part is not None:
-                        display = self._committed_text + sent_part
-                    else:
-                        display = self._committed_text
-        else:
-            display = raw_text
-
-        self._prev_raw_text = raw_text
+        display = self._best_raw
         # Prepend text from previously committed segments
         if self._segment_committed_text:
             display = self._segment_committed_text + display
