@@ -304,7 +304,10 @@ def test_hallucination_cyrillic():
 def test_hallucination_normal_text():
     import app
     assert app._is_hallucination("我上周去了San Francisco") is False
-    assert app._is_hallucination("Hello world") is False
+    # Pure-English without CJK is flagged in bilingual context
+    assert app._is_hallucination("Hello world") is True
+    # Short pure-English (< 5 non-space chars) is OK
+    assert app._is_hallucination("OK") is False
 
 
 # ── Test: trailing repetition stripping ───────────────────────

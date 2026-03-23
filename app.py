@@ -257,6 +257,9 @@ def _is_hallucination(text):
     lower = text.lower().strip(" .!,。，！")
     if lower in _HALLUCINATION_PHRASES:
         return True
+    # Garbled prefix (incomplete decoder output)
+    if text.lstrip().startswith('..'):
+        return True
     for sub in _HALLUCINATION_SUBSTRINGS:
         if sub in text:
             return True
@@ -279,6 +282,14 @@ def _is_hallucination(text):
         for c in clean:
             freq[c] = freq.get(c, 0) + 1
         if max(freq.values()) / len(clean) > 0.4:
+            return True
+    # No CJK at all in bilingual context → likely wrong-language hallucination
+    # (e.g. "Det tror jeg, du er." from Whisper confusing the language)
+    if len(clean) >= 5:
+        has_cjk = any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
+                       or 0x20000 <= ord(c) <= 0x2FA1F or 0x3040 <= ord(c) <= 0x30FF
+                       for c in clean)
+        if not has_cjk:
             return True
     for ch in text:
         cat = unicodedata.category(ch)
