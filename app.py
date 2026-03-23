@@ -124,6 +124,27 @@ def _common_prefix_len(a, b):
     return n
 
 
+def _prefix_overlap_ratio(a, b):
+    """Ratio of common prefix after stripping punctuation/spaces.
+
+    Used by continuity guards to tolerate Whisper's punctuation and
+    whitespace changes (e.g. comma→period, space inserted) while still
+    catching true content rewrites.  Returns overlap / len(stripped_b).
+    """
+    def _strip(s):
+        return ''.join(c.lower() for c in s if c not in _OVERLAP_STRIP_CHARS)
+    sa, sb = _strip(a), _strip(b)
+    if not sb:
+        return 1.0
+    n = min(len(sa), len(sb))
+    common = 0
+    for i in range(n):
+        if sa[i] != sb[i]:
+            break
+        common += 1
+    return common / len(sb)
+
+
 def _snap_to_boundary(text, pos):
     """Snap a position back to the nearest sentence-ending punctuation."""
     if pos <= 0:
@@ -845,13 +866,11 @@ class TranscriberApp(rumps.App):
             accept = True
             # Guard 1: reject if new raw rewrites substantial best_raw
             if accept and len(self._best_raw) >= 15:
-                overlap = _common_prefix_len(raw_text, self._best_raw)
-                if overlap < len(self._best_raw) * 0.5:
+                if _prefix_overlap_ratio(raw_text, self._best_raw) < 0.5:
                     accept = False
             # Guard 2: reject if new raw rewrites frozen prefix
             if accept and len(self._frozen_prefix) >= 4:
-                overlap = _common_prefix_len(raw_text, self._frozen_prefix)
-                if overlap < len(self._frozen_prefix) * 0.5:
+                if _prefix_overlap_ratio(raw_text, self._frozen_prefix) < 0.5:
                     accept = False
         # else: shorter raw = regression, keep _best_raw
 
