@@ -9,24 +9,38 @@ set -e
 APP_NAME="MacWhisper"
 APP_PATH="/Applications/${APP_NAME}.app"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 
 echo "=========================================="
-echo "  MacWhisper Installer"
+echo "  MacWhisper Installer  v${VERSION}"
 echo "=========================================="
 echo ""
 echo "Project directory: $SCRIPT_DIR"
 echo "App will be installed to: $APP_PATH"
 echo ""
 
-# ── Pre-flight: Apple Silicon check ───────────────────────
+# ── Pre-flight checks ────────────────────────────────────
 
 ARCH=$(uname -m)
 if [ "$ARCH" != "arm64" ]; then
     echo "ERROR: MacWhisper requires Apple Silicon (M1/M2/M3/M4)."
     echo "       Detected architecture: $ARCH"
-    echo "       This Mac is not supported."
     exit 1
 fi
+
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 not found. Install Python 3.10+ from python.org or via Homebrew."
+    exit 1
+fi
+
+PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
+    echo "ERROR: Python 3.10+ required. Found: python3 $PY_VERSION"
+    exit 1
+fi
+echo "Python: $PY_VERSION (OK)"
 
 # ── Step 1: Python virtual environment ────────────────────
 
@@ -73,8 +87,8 @@ runpy.run_path(os.path.join(_dir, "app.py"), run_name="__main__")
 LAUNCHER
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 
-# Info.plist
-cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
+# Info.plist — version from VERSION file
+cat > "${APP_PATH}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,7 +101,9 @@ cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
   <key>CFBundleIdentifier</key>
   <string>com.macwhisper.app</string>
   <key>CFBundleVersion</key>
-  <string>1.0</string>
+  <string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key>
+  <string>${VERSION}</string>
   <key>CFBundleExecutable</key>
   <string>MacWhisper</string>
   <key>CFBundleIconFile</key>
@@ -116,7 +132,6 @@ mkdir -p "$HOME/.macwhisper/audio"
 export SSL_CERT_FILE="$("$SCRIPT_DIR/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
 MODEL_REPO="$("$SCRIPT_DIR/venv/bin/python3" -c "
 import json, os
-# Try new location first, fall back to old
 cfg_path = os.path.expanduser('~/.macwhisper/config.json')
 if not os.path.isfile(cfg_path):
     cfg_path = os.path.expanduser('~/.macwhisper_config.json')
@@ -136,11 +151,11 @@ print('Model downloaded OK')
 # ── Step 5: Verify ────────────────────────────────────────
 
 echo "[5/5] Verifying installation..."
-"$SCRIPT_DIR/venv/bin/python3" -c "import rumps, mlx_whisper, pynput, sounddevice, pyperclip, certifi; print('All dependencies OK')"
+"$SCRIPT_DIR/venv/bin/python3" -c "import rumps, mlx_whisper, pynput, sounddevice, pyperclip, certifi, opencc; print('All dependencies OK')"
 
 echo ""
 echo "=========================================="
-echo "  Installation complete!"
+echo "  Installation complete!  v${VERSION}"
 echo "=========================================="
 echo ""
 echo "  To launch:"
@@ -160,4 +175,5 @@ echo "  Usage:"
 echo "    Hold Right Option key to record, release to transcribe"
 echo "    Ctrl+Shift+M  — switch model (Small/Medium/Large)"
 echo "    Ctrl+Shift+T  — toggle translate mode"
+echo "    Ctrl+Shift+S  — toggle live subtitles"
 echo ""

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Verify Install
+    runs-on: macos-14  # Apple Silicon (M1)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Version consistency check
+        run: |
+          FILE_VER=$(cat VERSION)
+          APP_VER=$(grep -oE '__version__ = "[^"]+"' app.py | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "VERSION file: $FILE_VER"
+          echo "app.py:       $APP_VER"
+          if [ "$FILE_VER" != "$APP_VER" ]; then
+            echo "::error::VERSION ($FILE_VER) != app.py __version__ ($APP_VER)"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install -r requirements.txt
+
+      - name: Import check
+        run: |
+          venv/bin/python -c "
+          import rumps, mlx_whisper, pynput, sounddevice
+          import pyperclip, certifi, opencc, numpy
+          print('All imports OK')
+          "
+
+      - name: Syntax check
+        run: venv/bin/python -m py_compile app.py
+
+      - name: Script syntax
+        run: |
+          bash -n install.sh
+          bash -n bump_version.sh
+          bash -n build.sh
+          bash -n release.sh
+          bash -n test_install.sh
+
+  build:
+    name: Build Tarball
+    runs-on: macos-14
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build source tarball
+        run: bash build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacWhisper-tarball
+          path: dist/MacWhisper-*.tar.gz
