@@ -1,10 +1,12 @@
 """
-MacWhisper - macOS Menu Bar App
+MacWhisper - macOS Menu Bar App  v0.3.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
 Ctrl + Shift + S  toggle live subtitles (show preview while recording)
 """
+
+__version__ = "0.3.0"
 
 import json
 import threading
@@ -42,7 +44,7 @@ import opencc
 from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
-LIVE_CHUNK_SECONDS = 3
+LIVE_CHUNK_SECONDS = 2
 MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
 SILENCE_RMS_THRESHOLD = 120   # int16 RMS below this = silence, skip inference
 PAUSE_RMS_THRESHOLD   = 100   # RMS below this = silence (for pause detection, stricter than inference skip)
@@ -640,6 +642,8 @@ class TranscriberApp(rumps.App):
         self._pause_silence_frames   = 0      # consecutive silent frames counter
         self._pause_detected         = False  # flag for chunk loop to commit
         self._segment_committed_text = ""     # accumulated text from completed segments
+        self._segment_committed_display = ""  # pre-formatted committed text for overlay
+        self._last_overlay_text = ""          # skip overlay update when text unchanged
         self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
@@ -736,7 +740,7 @@ class TranscriberApp(rumps.App):
             task, prompt = "translate", None
             print(f"[INFO] Translating {len(audio_float)/SAMPLE_RATE:.1f}s audio to English...")
         else:
-            task, prompt = "transcribe", "以下是普通话与英语的混合对话。"
+            task, prompt = "transcribe", "以下是普通话与English的混合对话。This is a bilingual conversation."
             print(f"[INFO] Transcribing {len(audio_float)/SAMPLE_RATE:.1f}s audio...")
 
         kwargs = dict(path_or_hf_repo=self.current_model, task=task)
@@ -822,8 +826,26 @@ class TranscriberApp(rumps.App):
             self._overlay_text = None
             print("[INFO] Overlay panel destroyed")
 
-    def _replace_overlay(self, full_text):
-        display_text = re.sub(r'([。！？])\s*', r'\1\n', full_text).rstrip('\n')
+    def _replace_overlay(self, frozen_display, current_raw):
+        """Update overlay with frozen committed text + in-progress text.
+
+        frozen_display: pre-formatted committed text (already has newlines,
+                        never changes once committed).
+        current_raw:    in-progress text for the current segment (reformatted
+                        each cycle as Whisper refines it).
+        """
+        # Only format the in-progress part
+        current_formatted = re.sub(
+            r'([。！？.!?])\s*', r'\1\n', current_raw
+        ).rstrip('\n') if current_raw else ""
+
+        # Combine: frozen block + separator + in-progress line
+        if frozen_display and current_formatted:
+            display_text = frozen_display + "\n" + current_formatted
+        elif frozen_display:
+            display_text = frozen_display
+        else:
+            display_text = current_formatted
 
         def _do_update():
             if not self._overlay_text or not self._overlay_panel:
@@ -868,7 +890,7 @@ class TranscriberApp(rumps.App):
             seg_start = self._segment_start_frame
             seg_frames = n - seg_start
             seg_secs = seg_frames * 1024 / SAMPLE_RATE
-            interval = min(LIVE_CHUNK_SECONDS, max(1.0, seg_secs / 5.0))
+            interval = min(LIVE_CHUNK_SECONDS, max(0.5, seg_secs / 5.0))
             time.sleep(interval)
             if not self.recording:
                 break
@@ -887,6 +909,12 @@ class TranscriberApp(rumps.App):
                 # as prefix (from _build_display_text), so direct assignment avoids
                 # double-counting.
                 self._segment_committed_text = self._last_live_result
+                # Pre-format committed text with newlines for frozen overlay display.
+                # This is computed once and never reformatted — the overlay shows
+                # this frozen block above the in-progress line.
+                self._segment_committed_display = re.sub(
+                    r'([。！？.!?])\s*', r'\1\n', self._segment_committed_text
+                ).rstrip('\n')
                 reason = "pause" if self._pause_detected else f"safety@{seg_secs:.0f}s"
                 print(f"[INFO] Segment committed ({reason}): "
                       f"{len(self._segment_committed_text)} chars total")
@@ -954,7 +982,14 @@ class TranscriberApp(rumps.App):
                     with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     if self._overlay_panel and self.recording:
-                        AppHelper.callAfter(lambda t=display: self._replace_overlay(t))
+                        # Pass frozen committed display + current raw separately
+                        # so overlay only reformats the in-progress part.
+                        frozen = self._segment_committed_display
+                        cur = self._best_raw
+                        overlay_key = (frozen, cur)
+                        if overlay_key != self._last_overlay_text:
+                            self._last_overlay_text = overlay_key
+                            AppHelper.callAfter(lambda f=frozen, c=cur: self._replace_overlay(f, c))
             except Exception as e:
                 print(f"[ERROR] Live transcription failed: {e}")
 
@@ -971,7 +1006,7 @@ class TranscriberApp(rumps.App):
         duration = len(audio_float) / SAMPLE_RATE
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
-        prompt = "以下是普通话与英语的混合对话。"
+        prompt = "以下是普通话与English的混合对话。This is a bilingual conversation."
 
         t0 = time.time()
         result = mlx_whisper.transcribe(
@@ -1019,7 +1054,7 @@ class TranscriberApp(rumps.App):
         g1_ratio = None
         g2_ratio = None
         stale_override = self._stale_count >= 3
-        if len(raw_text) >= len(self._best_raw):
+        if len(raw_text) >= len(self._best_raw) or stale_override:
             accept = True
             if not stale_override:
                 # Guard 1: reject if new raw rewrites substantial best_raw.
@@ -1041,7 +1076,6 @@ class TranscriberApp(rumps.App):
                         reject_reason = "guard2"
         else:
             reject_reason = "ratchet"
-        # else: shorter raw = regression, keep _best_raw
 
         # Post-commit echo detection: reject stale in-flight results that
         # arrive after segment commit and duplicate the committed content.
