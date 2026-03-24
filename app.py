@@ -942,7 +942,7 @@ class TranscriberApp(rumps.App):
         g1_ratio = None
         g2_ratio = None
         stale_override = self._stale_count >= 3
-        if len(raw_text) >= len(self._best_raw):
+        if len(raw_text) >= len(self._best_raw) or stale_override:
             accept = True
             if not stale_override:
                 # Guard 1: reject if new raw rewrites substantial best_raw.
@@ -964,7 +964,6 @@ class TranscriberApp(rumps.App):
                         reject_reason = "guard2"
         else:
             reject_reason = "ratchet"
-        # else: shorter raw = regression, keep _best_raw
 
         # Post-commit echo detection: reject stale in-flight results that
         # arrive after segment commit and duplicate the committed content.
