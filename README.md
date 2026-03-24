@@ -24,6 +24,21 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 
 ## Installation
 
+### Option 1: Homebrew (Recommended)
+
+```bash
+# Step 1 — Add the tap (one time only)
+brew tap sfc-gh-jiyan/macwhisper
+
+# Step 2 — Install
+brew install macwhisper-mlx
+
+# Step 3 — Create MacWhisper.app in /Applications
+macwhisper-mlx-install
+```
+
+### Option 2: From Source
+
 ```bash
 git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
@@ -33,19 +48,35 @@ cd MacWhisper
 The install script will:
 1. Create a Python virtual environment and install dependencies
 2. Build a `MacWhisper.app` in `/Applications`
-3. Verify all dependencies are working
+3. Pre-download the default Whisper model (~1.5 GB)
+4. Verify all dependencies are working
 
-### Required Permissions
+### Required Permissions (Important!)
 
-MacWhisper needs **three** macOS permissions to function. Grant them in **System Settings → Privacy & Security**:
+MacWhisper needs **three** macOS permissions to function. **The app will not work without these.**
 
-| Permission | Why | What to add |
-|---|---|---|
-| **Microphone** | Record audio | `MacWhisper` |
-| **Accessibility** | Auto-paste transcribed text (Cmd+V) | `MacWhisper` |
-| **Input Monitoring** | Detect Right Option key globally | `MacWhisper` |
+Go to **System Settings → Privacy & Security**:
 
-> **Running from Terminal?** If you use `./run.sh` instead of the .app, you must also add your **terminal app** (Terminal, iTerm, etc.) to both Accessibility and Input Monitoring.
+**1. Microphone**
+- Navigate to: Privacy & Security → Microphone
+- Toggle **ON** for `MacWhisper`
+- *Why: needed to record audio from your microphone*
+
+**2. Accessibility**
+- Navigate to: Privacy & Security → Accessibility
+- Click the **+** button, find and add `MacWhisper` from `/Applications`
+- Toggle **ON** for `MacWhisper`
+- *Why: needed to simulate Cmd+V to auto-paste transcribed text*
+
+**3. Input Monitoring**
+- Navigate to: Privacy & Security → Input Monitoring
+- Click the **+** button, find and add `MacWhisper` from `/Applications`
+- Toggle **ON** for `MacWhisper`
+- *Why: needed to detect the Right Option key as a global hotkey*
+
+> **Running from Terminal?** If you use `macwhisper-mlx` or `./run.sh` instead of the .app, you must also add your **terminal app** (Terminal, iTerm, Warp, etc.) to **all three** permission categories above.
+
+> **Permissions not taking effect?** After granting permissions, you may need to quit and relaunch MacWhisper. In some cases, a system restart is needed for Input Monitoring to activate.
 
 ## Usage
 

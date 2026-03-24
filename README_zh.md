@@ -24,6 +24,21 @@
 
 ## 安装
 
+### 方式一：Homebrew（推荐）
+
+```bash
+# 第一步 — 添加 tap（只需一次）
+brew tap sfc-gh-jiyan/macwhisper
+
+# 第二步 — 安装
+brew install macwhisper-mlx
+
+# 第三步 — 创建 MacWhisper.app 到 /Applications
+macwhisper-mlx-install
+```
+
+### 方式二：从源码安装
+
 ```bash
 git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
@@ -33,19 +48,35 @@ cd MacWhisper
 安装脚本会自动完成：
 1. 创建 Python 虚拟环境并安装依赖
 2. 在 `/Applications` 中创建 `MacWhisper.app`
-3. 验证所有依赖是否正常
+3. 预下载默认 Whisper 模型（约 1.5 GB）
+4. 验证所有依赖是否正常
 
-### 必需权限
+### 必需权限（重要！）
 
-MacWhisper 需要 **三项** macOS 权限才能正常运行。在 **系统设置 → 隐私与安全性** 中授权：
+MacWhisper 需要 **三项** macOS 权限才能正常运行。**不授权这些权限，应用将无法工作。**
 
-| 权限 | 用途 | 添加对象 |
-|---|---|---|
-| **麦克风** | 录制音频 | `MacWhisper` |
-| **辅助功能** | 自动粘贴转录文字（模拟 Cmd+V） | `MacWhisper` |
-| **输入监控** | 全局监听右 Option 键 | `MacWhisper` |
+打开 **系统设置 → 隐私与安全性**：
 
-> **从终端启动？** 如果你使用 `./run.sh` 而不是 .app，还需要将你的**终端应用**（Terminal、iTerm 等）也添加到"辅助功能"和"输入监控"中。
+**1. 麦克风（Microphone）**
+- 路径：隐私与安全性 → 麦克风
+- 将 `MacWhisper` 的开关打开
+- *用途：录制麦克风音频*
+
+**2. 辅助功能（Accessibility）**
+- 路径：隐私与安全性 → 辅助功能
+- 点击 **+** 按钮，从 `/Applications` 中找到并添加 `MacWhisper`
+- 将 `MacWhisper` 的开关打开
+- *用途：模拟 Cmd+V 自动粘贴转录文字*
+
+**3. 输入监控（Input Monitoring）**
+- 路径：隐私与安全性 → 输入监控
+- 点击 **+** 按钮，从 `/Applications` 中找到并添加 `MacWhisper`
+- 将 `MacWhisper` 的开关打开
+- *用途：全局监听右 Option 键作为快捷键*
+
+> **从终端启动？** 如果你使用 `macwhisper-mlx` 命令或 `./run.sh` 而不是 .app，还需要将你的**终端应用**（Terminal、iTerm、Warp 等）也添加到以上**三项**权限中。
+
+> **权限不生效？** 授权后可能需要退出并重新启动 MacWhisper。某些情况下，输入监控权限需要重启系统才能激活。
 
 ## 使用
 
