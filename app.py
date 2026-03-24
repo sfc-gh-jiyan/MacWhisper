@@ -6,7 +6,7 @@ Ctrl + Shift + T  toggle translate mode (all speech -> English)
 Ctrl + Shift + S  toggle live subtitles (show preview while recording)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import json
 import threading
