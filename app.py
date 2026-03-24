@@ -42,7 +42,7 @@ import opencc
 from ApplicationServices import AXIsProcessTrusted
 
 SAMPLE_RATE = 16000
-LIVE_CHUNK_SECONDS = 3
+LIVE_CHUNK_SECONDS = 2
 MAX_LIVE_WINDOW = 30          # seconds – cap to keep inference within budget
 SILENCE_RMS_THRESHOLD = 120   # int16 RMS below this = silence, skip inference
 PAUSE_RMS_THRESHOLD   = 100   # RMS below this = silence (for pause detection, stricter than inference skip)
@@ -564,6 +564,7 @@ class TranscriberApp(rumps.App):
         self._pause_detected         = False  # flag for chunk loop to commit
         self._segment_committed_text = ""     # accumulated text from completed segments
         self._segment_committed_display = ""  # pre-formatted committed text for overlay
+        self._last_overlay_text = ""          # skip overlay update when text unchanged
         self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
@@ -810,7 +811,7 @@ class TranscriberApp(rumps.App):
             seg_start = self._segment_start_frame
             seg_frames = n - seg_start
             seg_secs = seg_frames * 1024 / SAMPLE_RATE
-            interval = min(LIVE_CHUNK_SECONDS, max(1.0, seg_secs / 5.0))
+            interval = min(LIVE_CHUNK_SECONDS, max(0.5, seg_secs / 5.0))
             time.sleep(interval)
             if not self.recording:
                 break
@@ -906,7 +907,10 @@ class TranscriberApp(rumps.App):
                         # so overlay only reformats the in-progress part.
                         frozen = self._segment_committed_display
                         cur = self._best_raw
-                        AppHelper.callAfter(lambda f=frozen, c=cur: self._replace_overlay(f, c))
+                        overlay_key = (frozen, cur)
+                        if overlay_key != self._last_overlay_text:
+                            self._last_overlay_text = overlay_key
+                            AppHelper.callAfter(lambda f=frozen, c=cur: self._replace_overlay(f, c))
             except Exception as e:
                 print(f"[ERROR] Live transcription failed: {e}")
 
