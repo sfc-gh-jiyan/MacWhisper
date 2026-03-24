@@ -1,10 +1,12 @@
 """
-MacWhisper - macOS Menu Bar App
+MacWhisper - macOS Menu Bar App  v0.3.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
 Ctrl + Shift + S  toggle live subtitles (show preview while recording)
 """
+
+__version__ = "0.3.0"
 
 import json
 import threading
