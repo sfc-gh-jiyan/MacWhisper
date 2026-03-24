@@ -582,6 +582,7 @@ def test_build_display_first_call():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
     result = inst._build_display_text("你好世界")
@@ -600,6 +601,7 @@ def test_build_display_ratchet_grows():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -625,6 +627,7 @@ def test_build_display_ratchet_ignores_regression():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -646,6 +649,7 @@ def test_build_display_reset():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
 
     # Simulate what _start_recording does
@@ -656,6 +660,7 @@ def test_build_display_reset():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -728,6 +733,7 @@ def test_build_display_frozen_prefix_grows():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -752,6 +758,7 @@ def test_build_display_oscillation_not_stuck():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -788,6 +795,7 @@ def test_build_display_rejects_content_rewrite():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -843,6 +851,7 @@ def test_build_display_with_segment_history():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = "第一段内容。"
 
@@ -863,6 +872,7 @@ def test_build_display_no_segment_history():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = ""
 
@@ -882,6 +892,7 @@ def test_build_display_multi_segment_accumulation():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_committed_text = "段一。段二。"
 
@@ -902,6 +913,7 @@ def test_pause_commit_resets_state():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._last_live_result = "一些已提交的文本。更多内容。"
     inst._segment_committed_text = ""
@@ -921,6 +933,7 @@ def test_pause_commit_resets_state():
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._last_live_result = ""
     inst._pause_detected = False

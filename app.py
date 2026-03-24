@@ -557,6 +557,7 @@ class TranscriberApp(rumps.App):
         self._accept_count      = 0
         self._last_committed_raw = ""
         self._segment_gen       = 0       # generation counter for stale-result detection
+        self._last_display      = ""      # display-level ratchet: never shrink visible text
         # Pause-based segmentation state
         self._segment_start_frame    = 0      # index into self.frames where current segment starts
         self._pause_silence_frames   = 0      # consecutive silent frames counter
@@ -860,6 +861,10 @@ class TranscriberApp(rumps.App):
                     continue
                 if raw and self.recording:
                     display = self._build_display_text(raw)
+                    # Display-level ratchet: never show shorter text to user
+                    if len(display) < len(self._last_display):
+                        display = self._last_display
+                    self._last_display = display
                     self._last_live_result = display
                     _ensure_history_dirs()
                     entry = {
@@ -940,8 +945,11 @@ class TranscriberApp(rumps.App):
         if len(raw_text) >= len(self._best_raw):
             accept = True
             if not stale_override:
-                # Guard 1: reject if new raw rewrites substantial best_raw
-                if accept and len(self._best_raw) >= 15:
+                # Guard 1: reject if new raw rewrites substantial best_raw.
+                # Only apply after 3+ acceptances — early in a segment,
+                # Whisper often rewrites content legitimately (e.g. language
+                # switch as more audio arrives).
+                if accept and self._accept_count >= 3 and len(self._best_raw) >= 15:
                     g1_ratio = _prefix_overlap_ratio(raw_text, self._best_raw)
                     if g1_ratio < 0.5:
                         accept = False

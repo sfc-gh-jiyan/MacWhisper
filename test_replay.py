@@ -108,6 +108,7 @@ def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
@@ -157,6 +158,7 @@ def replay_wav(inst, wav_frames):
     inst._accept_count = 0
     inst._last_debug = {}
     inst._last_committed_raw = ""
+    inst._last_display = ""
     inst._segment_gen = 0
     inst._segment_start_frame = 0
     inst._pause_silence_frames = 0
