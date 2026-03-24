@@ -430,6 +430,7 @@ class TranscriberApp(rumps.App):
             "translate_mode": self.translate_mode,
             "current_model": self.current_model,
             "live_mode": self.live_mode,
+            "save_audio": self.save_audio,
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f)
@@ -442,6 +443,7 @@ class TranscriberApp(rumps.App):
         self.translate_mode = cfg.get("translate_mode", False)
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Small (Fast)"])
         self.live_mode      = cfg.get("live_mode", False)
+        self.save_audio     = cfg.get("save_audio", False)
 
         idle_icon = "🌐" if self.translate_mode else "🎙"
         super().__init__(idle_icon, quit_button="Quit")
@@ -462,6 +464,10 @@ class TranscriberApp(rumps.App):
 
         self.item_live = rumps.MenuItem(f"{live_prefix} Live Subtitles: {live_label}", callback=self._toggle_live_mode)
 
+        save_audio_prefix = "✅" if self.save_audio else "  "
+        save_audio_label = "On" if self.save_audio else "Off"
+        self.item_save_audio = rumps.MenuItem(f"{save_audio_prefix} Save Audio: {save_audio_label}", callback=self._toggle_save_audio)
+
         self.menu = [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -470,6 +476,7 @@ class TranscriberApp(rumps.App):
             rumps.MenuItem(f"{translate_prefix} Translate to English", callback=self._toggle_translate),
             rumps.separator,
             self.item_live,
+            self.item_save_audio,
             rumps.separator,
             rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
             rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
@@ -549,6 +556,16 @@ class TranscriberApp(rumps.App):
         self._set_status("Subtitles ON" if self.live_mode else "Subtitles OFF")
         self._save_config()
         print(f"[INFO] Live subtitles {'enabled' if self.live_mode else 'disabled'}")
+
+    def _toggle_save_audio(self, _):
+        self.save_audio = not self.save_audio
+        if self.save_audio:
+            self.item_save_audio.title = "✅ Save Audio: On"
+        else:
+            self.item_save_audio.title = "   Save Audio: Off"
+        self._set_status("Save Audio ON" if self.save_audio else "Save Audio OFF")
+        self._save_config()
+        print(f"[INFO] Save audio {'enabled' if self.save_audio else 'disabled'}")
 
     def _cycle_model(self):
         current_idx = next(
@@ -725,16 +742,18 @@ class TranscriberApp(rumps.App):
         audio = np.concatenate(frames, axis=0).squeeze()
         audio_float = audio.astype(np.float32) / 32768.0
 
-        # Save audio WAV for test corpus
+        # Save audio WAV (only when save_audio is enabled)
         _ensure_history_dirs()
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        wav_path = os.path.join(AUDIO_DIR, f"{timestamp}.wav")
-        with wave.open(wav_path, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(audio.tobytes())
-        print(f"[INFO] Saved audio: {wav_path}")
+        wav_path = None
+        if self.save_audio:
+            wav_path = os.path.join(AUDIO_DIR, f"{timestamp}.wav")
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(audio.tobytes())
+            print(f"[INFO] Saved audio: {wav_path}")
 
         if self.translate_mode:
             task, prompt = "translate", None
@@ -758,7 +777,7 @@ class TranscriberApp(rumps.App):
         # Log transcription result
         log_entry = {
             "timestamp": datetime.datetime.now().isoformat(),
-            "audio_file": os.path.basename(wav_path),
+            "audio_file": os.path.basename(wav_path) if wav_path else None,
             "model": self.current_model,
             "translate": self.translate_mode,
             "duration_s": round(len(audio_float) / SAMPLE_RATE, 1),
