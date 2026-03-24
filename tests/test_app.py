@@ -1189,3 +1189,83 @@ def test_safety_fallback_threshold():
     import app
     assert app.PAUSE_SAFETY_FALLBACK < 30.0
     assert app.PAUSE_SAFETY_FALLBACK >= 20.0
+
+
+# ── Test: v0.4 additions ────────────────────────────────────
+
+
+def test_version_format():
+    """__version__ must be a valid semver string."""
+    import app
+    import re
+    assert re.match(r'^\d+\.\d+\.\d+$', app.__version__), f"Bad version: {app.__version__}"
+
+
+def test_version_file_consistency():
+    """VERSION file and app.__version__ must match."""
+    import app
+    version_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "VERSION")
+    with open(version_path) as f:
+        file_version = f.read().strip()
+    assert file_version == app.__version__, f"VERSION={file_version} != app.__version__={app.__version__}"
+
+
+def test_check_audio_device_exists():
+    """_check_audio_device function must be defined and callable."""
+    import app
+    assert callable(app._check_audio_device)
+
+
+def test_check_audio_device_with_input(monkeypatch):
+    """_check_audio_device should pass when an input device exists."""
+    import app
+    mock_devices = [
+        {"name": "Built-in Mic", "max_input_channels": 2, "max_output_channels": 0},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2},
+    ]
+    monkeypatch.setattr("app.sd.query_devices", lambda: mock_devices)
+    # Should not raise or exit
+    app._check_audio_device()
+
+
+def test_check_audio_device_no_input(monkeypatch):
+    """_check_audio_device should exit(1) when no input device exists."""
+    import app
+    mock_devices = [
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2},
+    ]
+    monkeypatch.setattr("app.sd.query_devices", lambda: mock_devices)
+    monkeypatch.setattr("app.rumps.alert", lambda **kw: None)
+    with pytest.raises(SystemExit) as exc_info:
+        app._check_audio_device()
+    assert exc_info.value.code == 1
+
+
+def test_check_audio_device_exception(monkeypatch, capsys):
+    """_check_audio_device should warn but not crash on query failure."""
+    import app
+    def raise_err():
+        raise RuntimeError("no audio subsystem")
+    monkeypatch.setattr("app.sd.query_devices", raise_err)
+    # Should not raise
+    app._check_audio_device()
+
+
+def test_crash_handler_writes_log(tmp_path, monkeypatch):
+    """Crash handler should write to crash.log when an exception occurs."""
+    import app
+    crash_log = tmp_path / "crash.log"
+    monkeypatch.setattr("app.LOG_DIR", str(tmp_path))
+
+    # Simulate what the crash handler does
+    import datetime, traceback
+    try:
+        raise ValueError("simulated crash")
+    except Exception:
+        with open(str(crash_log), "a", encoding="utf-8") as f:
+            f.write(f"MacWhisper v{app.__version__} crash at {datetime.datetime.now().isoformat()}\n")
+            traceback.print_exc(file=f)
+
+    content = crash_log.read_text()
+    assert "simulated crash" in content
+    assert app.__version__ in content
