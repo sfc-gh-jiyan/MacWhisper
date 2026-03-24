@@ -355,18 +355,20 @@ def test_history_constants():
     assert hasattr(app, "HISTORY_DIR")
     assert hasattr(app, "AUDIO_DIR")
     assert hasattr(app, "TRANSCRIPT_LOG")
-    assert app.AUDIO_DIR.endswith(os.path.join("history", "audio"))
-    assert app.TRANSCRIPT_LOG.endswith(os.path.join("history", "transcripts.jsonl"))
+    assert app.AUDIO_DIR.endswith(os.path.join(".macwhisper", "audio"))
+    assert app.TRANSCRIPT_LOG.endswith(os.path.join(".macwhisper", "transcripts.jsonl"))
 
 
 def test_ensure_history_dirs(tmp_path):
     import app
     audio_dir = str(tmp_path / "history" / "audio")
-    with patch("app.AUDIO_DIR", audio_dir):
+    log_dir = str(tmp_path / "history" / "logs")
+    with patch("app.AUDIO_DIR", audio_dir), patch("app.LOG_DIR", log_dir):
         app._ensure_history_dirs()
     assert os.path.isdir(audio_dir)
+    assert os.path.isdir(log_dir)
     # Calling again should not raise
-    with patch("app.AUDIO_DIR", audio_dir):
+    with patch("app.AUDIO_DIR", audio_dir), patch("app.LOG_DIR", log_dir):
         app._ensure_history_dirs()
 
 
@@ -442,7 +444,7 @@ def test_transcript_log_appends_jsonl(tmp_path):
 def test_subtitle_log_constant():
     import app
     assert hasattr(app, "SUBTITLE_LOG")
-    assert app.SUBTITLE_LOG.endswith(os.path.join("history", "subtitles.jsonl"))
+    assert app.SUBTITLE_LOG.endswith(os.path.join(".macwhisper", "subtitles.jsonl"))
 
 
 def test_subtitle_log_appends_on_live_result(tmp_path):
@@ -488,6 +490,218 @@ def test_subtitle_log_appends_on_live_result(tmp_path):
     assert "audio_s" in entry
     # Log may use old "text" key or new "raw"/"display" keys
     assert entry.get("text") == "测试字幕内容" or entry.get("raw") == "测试字幕内容"
+
+
+# ── Test: data directory constants ───────────────────────────
+
+def test_data_dir_constant():
+    import app
+    assert hasattr(app, "_DATA_DIR")
+    assert app._DATA_DIR.endswith(".macwhisper")
+    assert app.CONFIG_PATH.endswith(os.path.join(".macwhisper", "config.json"))
+    assert hasattr(app, "LOG_DIR")
+    assert app.LOG_DIR.endswith(os.path.join(".macwhisper", "logs"))
+
+
+def test_ensure_history_dirs_creates_log_dir(tmp_path):
+    import app
+    audio_dir = str(tmp_path / "audio")
+    log_dir = str(tmp_path / "logs")
+    with patch("app.AUDIO_DIR", audio_dir), patch("app.LOG_DIR", log_dir):
+        app._ensure_history_dirs()
+    assert os.path.isdir(log_dir)
+
+
+# ── Test: migration logic ────────────────────────────────────
+
+def test_migrate_config(tmp_path):
+    """Old ~/.macwhisper_config.json should move to new config.json."""
+    import app
+    old_config = str(tmp_path / "old_config.json")
+    new_config = str(tmp_path / "new" / "config.json")
+    audio_dir = str(tmp_path / "new" / "audio")
+    log_dir = str(tmp_path / "new" / "logs")
+
+    with open(old_config, "w") as f:
+        json.dump({"current_model": "test-model"}, f)
+
+    with patch("app.CONFIG_PATH", new_config), \
+         patch("app.AUDIO_DIR", audio_dir), \
+         patch("app.LOG_DIR", log_dir), \
+         patch("os.path.expanduser", return_value=old_config), \
+         patch("os.path.abspath", return_value=str(tmp_path / "project" / "app.py")):
+        app._migrate_old_data()
+
+    assert os.path.isfile(new_config)
+    assert not os.path.exists(old_config)
+    with open(new_config) as f:
+        assert json.load(f)["current_model"] == "test-model"
+
+
+def test_migrate_audio_files(tmp_path):
+    """Audio WAVs should move from old history/audio/ to new audio dir."""
+    import app
+    project = tmp_path / "project"
+    old_audio = project / "history" / "audio"
+    old_audio.mkdir(parents=True)
+    (old_audio / "20250101_120000.wav").write_text("fake wav")
+
+    new_audio = tmp_path / "new" / "audio"
+    log_dir = tmp_path / "new" / "logs"
+
+    with patch("app.AUDIO_DIR", str(new_audio)), \
+         patch("app.LOG_DIR", str(log_dir)), \
+         patch("app.CONFIG_PATH", str(tmp_path / "new" / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(project / "app.py")):
+        app._migrate_old_data()
+
+    assert (new_audio / "20250101_120000.wav").exists()
+    assert not (old_audio / "20250101_120000.wav").exists()
+
+
+def test_migrate_transcripts(tmp_path):
+    """transcripts.jsonl should move to new location."""
+    import app
+    project = tmp_path / "project"
+    old_history = project / "history"
+    old_history.mkdir(parents=True)
+    old_transcript = old_history / "transcripts.jsonl"
+    old_transcript.write_text('{"text":"hello"}\n')
+
+    new_dir = tmp_path / "new"
+    new_transcript = new_dir / "transcripts.jsonl"
+
+    with patch("app.AUDIO_DIR", str(new_dir / "audio")), \
+         patch("app.LOG_DIR", str(new_dir / "logs")), \
+         patch("app.TRANSCRIPT_LOG", str(new_transcript)), \
+         patch("app.CONFIG_PATH", str(new_dir / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(project / "app.py")):
+        app._migrate_old_data()
+
+    assert new_transcript.exists()
+    assert new_transcript.read_text().strip() == '{"text":"hello"}'
+    assert not old_transcript.exists()
+
+
+def test_migrate_subtitles(tmp_path):
+    """subtitles.jsonl should move to new location."""
+    import app
+    project = tmp_path / "project"
+    old_history = project / "history"
+    old_history.mkdir(parents=True)
+    old_subtitle = old_history / "subtitles.jsonl"
+    old_subtitle.write_text('{"text":"sub1"}\n')
+
+    new_dir = tmp_path / "new"
+    new_subtitle = new_dir / "subtitles.jsonl"
+
+    with patch("app.AUDIO_DIR", str(new_dir / "audio")), \
+         patch("app.LOG_DIR", str(new_dir / "logs")), \
+         patch("app.SUBTITLE_LOG", str(new_subtitle)), \
+         patch("app.CONFIG_PATH", str(new_dir / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(project / "app.py")):
+        app._migrate_old_data()
+
+    assert new_subtitle.exists()
+    assert new_subtitle.read_text().strip() == '{"text":"sub1"}'
+    assert not old_subtitle.exists()
+
+
+def test_migrate_merges_existing_transcripts(tmp_path):
+    """When both old and new transcript files exist, old entries are appended."""
+    import app
+    project = tmp_path / "project"
+    old_history = project / "history"
+    old_history.mkdir(parents=True)
+    old_transcript = old_history / "transcripts.jsonl"
+    old_transcript.write_text('{"text":"old"}\n')
+
+    new_dir = tmp_path / "new"
+    new_dir.mkdir(parents=True)
+    new_transcript = new_dir / "transcripts.jsonl"
+    new_transcript.write_text('{"text":"new"}\n')
+
+    with patch("app.AUDIO_DIR", str(new_dir / "audio")), \
+         patch("app.LOG_DIR", str(new_dir / "logs")), \
+         patch("app.TRANSCRIPT_LOG", str(new_transcript)), \
+         patch("app.CONFIG_PATH", str(new_dir / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(project / "app.py")):
+        app._migrate_old_data()
+
+    lines = new_transcript.read_text().strip().split("\n")
+    assert len(lines) == 2
+    assert json.loads(lines[0])["text"] == "new"
+    assert json.loads(lines[1])["text"] == "old"
+    assert not old_transcript.exists()
+
+
+def test_migrate_logs(tmp_path):
+    """Log files should move from <project>/logs/ to new logs dir."""
+    import app
+    project = tmp_path / "project"
+    old_logs = project / "logs"
+    old_logs.mkdir(parents=True)
+    (old_logs / "macwhisper.log").write_text("some log output")
+
+    new_dir = tmp_path / "new"
+    new_logs = new_dir / "logs"
+
+    with patch("app.AUDIO_DIR", str(new_dir / "audio")), \
+         patch("app.LOG_DIR", str(new_logs)), \
+         patch("app.CONFIG_PATH", str(new_dir / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(project / "app.py")):
+        app._migrate_old_data()
+
+    assert (new_logs / "macwhisper.log").exists()
+    assert (new_logs / "macwhisper.log").read_text() == "some log output"
+    assert not (old_logs / "macwhisper.log").exists()
+
+
+def test_migrate_noop_when_no_old_data(tmp_path):
+    """Migration should not error when no old data exists."""
+    import app
+    new_dir = tmp_path / "new"
+
+    with patch("app.AUDIO_DIR", str(new_dir / "audio")), \
+         patch("app.LOG_DIR", str(new_dir / "logs")), \
+         patch("app.CONFIG_PATH", str(new_dir / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(tmp_path / "empty_project" / "app.py")):
+        app._migrate_old_data()  # should not raise
+
+    assert os.path.isdir(str(new_dir / "audio"))
+    assert os.path.isdir(str(new_dir / "logs"))
+
+
+def test_migrate_cleans_empty_dirs(tmp_path):
+    """Old history/ and logs/ dirs should be removed when empty after migration."""
+    import app
+    project = tmp_path / "project"
+    old_history = project / "history"
+    old_audio = old_history / "audio"
+    old_audio.mkdir(parents=True)
+    (old_audio / "test.wav").write_text("wav")
+    old_logs = project / "logs"
+    old_logs.mkdir(parents=True)
+    (old_logs / "macwhisper.log").write_text("log")
+
+    new_dir = tmp_path / "new"
+
+    with patch("app.AUDIO_DIR", str(new_dir / "audio")), \
+         patch("app.LOG_DIR", str(new_dir / "logs")), \
+         patch("app.CONFIG_PATH", str(new_dir / "config.json")), \
+         patch("os.path.expanduser", return_value=str(tmp_path / "no_old_config")), \
+         patch("os.path.abspath", return_value=str(project / "app.py")):
+        app._migrate_old_data()
+
+    assert not old_audio.exists()
+    assert not old_history.exists()
+    assert not old_logs.exists()
 
 
 # ── Test: helper functions for committed text ─────────────

@@ -318,7 +318,9 @@ def _hallucination_reason(text):
 def _is_hallucination(text):
     return _hallucination_reason(text) is not None
 
-CONFIG_PATH = os.path.expanduser("~/.macwhisper_config.json")
+_DATA_DIR = os.path.expanduser("~/.macwhisper")
+CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
+LOG_DIR = os.path.join(_DATA_DIR, "logs")
 
 MODEL_OPTIONS = {
     "Small (Fast)":      "mlx-community/whisper-small-mlx",
@@ -327,13 +329,87 @@ MODEL_OPTIONS = {
 }
 MODEL_KEYS = list(MODEL_OPTIONS.keys())
 
-HISTORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history")
-AUDIO_DIR = os.path.join(HISTORY_DIR, "audio")
-TRANSCRIPT_LOG = os.path.join(HISTORY_DIR, "transcripts.jsonl")
-SUBTITLE_LOG = os.path.join(HISTORY_DIR, "subtitles.jsonl")
+HISTORY_DIR = _DATA_DIR
+AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
+TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
+SUBTITLE_LOG = os.path.join(_DATA_DIR, "subtitles.jsonl")
+
 
 def _ensure_history_dirs():
     os.makedirs(AUDIO_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def _migrate_old_data():
+    """One-time migration from old locations to ~/.macwhisper/."""
+    import shutil
+    _ensure_history_dirs()
+
+    # 1) Migrate old config: ~/.macwhisper_config.json -> ~/.macwhisper/config.json
+    old_config = os.path.expanduser("~/.macwhisper_config.json")
+    if os.path.isfile(old_config) and not os.path.isfile(CONFIG_PATH):
+        shutil.move(old_config, CONFIG_PATH)
+        print(f"[MIGRATE] Moved config: {old_config} -> {CONFIG_PATH}")
+
+    # 2) Migrate old history dir: <project>/history/ -> ~/.macwhisper/
+    _project_dir = os.path.dirname(os.path.abspath(__file__))
+    old_history = os.path.join(_project_dir, "history")
+
+    # Audio files
+    old_audio = os.path.join(old_history, "audio")
+    if os.path.isdir(old_audio):
+        for fname in os.listdir(old_audio):
+            src = os.path.join(old_audio, fname)
+            dst = os.path.join(AUDIO_DIR, fname)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.move(src, dst)
+        if os.path.isdir(old_audio) and not os.listdir(old_audio):
+            os.rmdir(old_audio)
+        print(f"[MIGRATE] Moved audio files: {old_audio} -> {AUDIO_DIR}")
+
+    # Transcript log
+    old_transcript = os.path.join(old_history, "transcripts.jsonl")
+    if os.path.isfile(old_transcript) and not os.path.isfile(TRANSCRIPT_LOG):
+        shutil.move(old_transcript, TRANSCRIPT_LOG)
+        print(f"[MIGRATE] Moved transcripts: {old_transcript} -> {TRANSCRIPT_LOG}")
+    elif os.path.isfile(old_transcript) and os.path.isfile(TRANSCRIPT_LOG):
+        with open(old_transcript, "r", encoding="utf-8") as src:
+            data = src.read()
+        if data.strip():
+            with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as dst:
+                dst.write(data)
+        os.remove(old_transcript)
+        print(f"[MIGRATE] Merged transcripts: {old_transcript} -> {TRANSCRIPT_LOG}")
+
+    # Subtitle log
+    old_subtitle = os.path.join(old_history, "subtitles.jsonl")
+    if os.path.isfile(old_subtitle) and not os.path.isfile(SUBTITLE_LOG):
+        shutil.move(old_subtitle, SUBTITLE_LOG)
+        print(f"[MIGRATE] Moved subtitles: {old_subtitle} -> {SUBTITLE_LOG}")
+    elif os.path.isfile(old_subtitle) and os.path.isfile(SUBTITLE_LOG):
+        with open(old_subtitle, "r", encoding="utf-8") as src:
+            data = src.read()
+        if data.strip():
+            with open(SUBTITLE_LOG, "a", encoding="utf-8") as dst:
+                dst.write(data)
+        os.remove(old_subtitle)
+        print(f"[MIGRATE] Merged subtitles: {old_subtitle} -> {SUBTITLE_LOG}")
+
+    # Remove old history dir if empty
+    if os.path.isdir(old_history) and not os.listdir(old_history):
+        os.rmdir(old_history)
+
+    # 3) Migrate old logs: <project>/logs/ -> ~/.macwhisper/logs/
+    old_logs = os.path.join(_project_dir, "logs")
+    if os.path.isdir(old_logs):
+        for fname in os.listdir(old_logs):
+            src = os.path.join(old_logs, fname)
+            dst = os.path.join(LOG_DIR, fname)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.move(src, dst)
+        if os.path.isdir(old_logs) and not os.listdir(old_logs):
+            os.rmdir(old_logs)
+        print(f"[MIGRATE] Moved logs: {old_logs} -> {LOG_DIR}")
 
 
 class TranscriberApp(rumps.App):
@@ -359,6 +435,7 @@ class TranscriberApp(rumps.App):
     # ── Init ──────────────────────────────────────────────────
 
     def __init__(self):
+        _migrate_old_data()
         cfg = self._load_config()
         self.translate_mode = cfg.get("translate_mode", False)
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Small (Fast)"])

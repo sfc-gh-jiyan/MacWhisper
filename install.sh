@@ -61,7 +61,7 @@ if platform.machine() != "arm64":
 _dir = "${SCRIPT_DIR}"
 os.chdir(_dir)
 sys.path.insert(0, _dir)
-_log_dir = os.path.join(_dir, "logs")
+_log_dir = os.path.expanduser("~/.macwhisper/logs")
 os.makedirs(_log_dir, exist_ok=True)
 _lf = open(os.path.join(_log_dir, "macwhisper.log"), "a")
 sys.stdout = _lf
@@ -106,16 +106,20 @@ cat > "${APP_PATH}/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-# ── Step 3: Create logs directory ─────────────────────────
+# ── Step 3: Create data directory ─────────────────────────
 
-mkdir -p "$SCRIPT_DIR/logs"
+mkdir -p "$HOME/.macwhisper/logs"
+mkdir -p "$HOME/.macwhisper/audio"
 
 # ── Step 4: Pre-download model ───────────────────────────
 
 export SSL_CERT_FILE="$("$SCRIPT_DIR/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
 MODEL_REPO="$("$SCRIPT_DIR/venv/bin/python3" -c "
 import json, os
-cfg_path = os.path.expanduser('~/.macwhisper_config.json')
+# Try new location first, fall back to old
+cfg_path = os.path.expanduser('~/.macwhisper/config.json')
+if not os.path.isfile(cfg_path):
+    cfg_path = os.path.expanduser('~/.macwhisper_config.json')
 try:
     model = json.load(open(cfg_path))['current_model']
 except Exception:
