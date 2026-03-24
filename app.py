@@ -661,7 +661,7 @@ class TranscriberApp(rumps.App):
             task, prompt = "translate", None
             print(f"[INFO] Translating {len(audio_float)/SAMPLE_RATE:.1f}s audio to English...")
         else:
-            task, prompt = "transcribe", "以下是普通话与英语的混合对话。"
+            task, prompt = "transcribe", "以下是普通话与English的混合对话。This is a bilingual conversation."
             print(f"[INFO] Transcribing {len(audio_float)/SAMPLE_RATE:.1f}s audio...")
 
         kwargs = dict(path_or_hf_repo=self.current_model, task=task)
@@ -927,7 +927,7 @@ class TranscriberApp(rumps.App):
         duration = len(audio_float) / SAMPLE_RATE
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
-        prompt = "以下是普通话与英语的混合对话。"
+        prompt = "以下是普通话与English的混合对话。This is a bilingual conversation."
 
         t0 = time.time()
         result = mlx_whisper.transcribe(
