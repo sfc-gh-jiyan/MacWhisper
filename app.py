@@ -563,6 +563,7 @@ class TranscriberApp(rumps.App):
         self._pause_silence_frames   = 0      # consecutive silent frames counter
         self._pause_detected         = False  # flag for chunk loop to commit
         self._segment_committed_text = ""     # accumulated text from completed segments
+        self._segment_committed_display = ""  # pre-formatted committed text for overlay
         self.title     = "🟠"
         self._set_status("Recording...")
         print("[INFO] Recording started")
@@ -745,8 +746,26 @@ class TranscriberApp(rumps.App):
             self._overlay_text = None
             print("[INFO] Overlay panel destroyed")
 
-    def _replace_overlay(self, full_text):
-        display_text = re.sub(r'([。！？])\s*', r'\1\n', full_text).rstrip('\n')
+    def _replace_overlay(self, frozen_display, current_raw):
+        """Update overlay with frozen committed text + in-progress text.
+
+        frozen_display: pre-formatted committed text (already has newlines,
+                        never changes once committed).
+        current_raw:    in-progress text for the current segment (reformatted
+                        each cycle as Whisper refines it).
+        """
+        # Only format the in-progress part
+        current_formatted = re.sub(
+            r'([。！？.!?])\s*', r'\1\n', current_raw
+        ).rstrip('\n') if current_raw else ""
+
+        # Combine: frozen block + separator + in-progress line
+        if frozen_display and current_formatted:
+            display_text = frozen_display + "\n" + current_formatted
+        elif frozen_display:
+            display_text = frozen_display
+        else:
+            display_text = current_formatted
 
         def _do_update():
             if not self._overlay_text or not self._overlay_panel:
@@ -810,6 +829,12 @@ class TranscriberApp(rumps.App):
                 # as prefix (from _build_display_text), so direct assignment avoids
                 # double-counting.
                 self._segment_committed_text = self._last_live_result
+                # Pre-format committed text with newlines for frozen overlay display.
+                # This is computed once and never reformatted — the overlay shows
+                # this frozen block above the in-progress line.
+                self._segment_committed_display = re.sub(
+                    r'([。！？.!?])\s*', r'\1\n', self._segment_committed_text
+                ).rstrip('\n')
                 reason = "pause" if self._pause_detected else f"safety@{seg_secs:.0f}s"
                 print(f"[INFO] Segment committed ({reason}): "
                       f"{len(self._segment_committed_text)} chars total")
@@ -877,7 +902,11 @@ class TranscriberApp(rumps.App):
                     with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     if self._overlay_panel and self.recording:
-                        AppHelper.callAfter(lambda t=display: self._replace_overlay(t))
+                        # Pass frozen committed display + current raw separately
+                        # so overlay only reformats the in-progress part.
+                        frozen = self._segment_committed_display
+                        cur = self._best_raw
+                        AppHelper.callAfter(lambda f=frozen, c=cur: self._replace_overlay(f, c))
             except Exception as e:
                 print(f"[ERROR] Live transcription failed: {e}")
 

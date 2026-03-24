@@ -114,6 +114,7 @@ def create_headless_instance(model="mlx-community/whisper-medium-mlx"):
     inst._pause_silence_frames = 0
     inst._pause_detected = False
     inst._segment_committed_text = ""
+    inst._segment_committed_display = ""
 
     # GUI stubs
     inst._overlay_panel = None
@@ -164,6 +165,7 @@ def replay_wav(inst, wav_frames):
     inst._pause_silence_frames = 0
     inst._pause_detected = False
     inst._segment_committed_text = ""
+    inst._segment_committed_display = ""
 
     # Start the real _live_chunk_loop thread
     chunk_thread = threading.Thread(target=inst._live_chunk_loop, daemon=True)
