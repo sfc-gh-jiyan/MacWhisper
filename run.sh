@@ -20,4 +20,6 @@ fi
 
 cd "$SCRIPT_DIR"
 export SSL_CERT_FILE="$(venv/bin/python3 -c 'import certifi; print(certifi.where())')"
+# Workaround: macOS nano malloc zone can corrupt heap when mlx + AppKit coexist
+export MallocNanoZone=0
 exec venv/bin/python3 app.py
