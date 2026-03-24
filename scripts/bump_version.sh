@@ -39,6 +39,24 @@ fi
 
 echo "Bumping version: $OLD_VERSION -> $NEW_VERSION"
 
+# 0) Archive runtime data from previous version
+DATA_DIR="$HOME/.macwhisper"
+ARCHIVE_DIR="$DATA_DIR/archive/v$OLD_VERSION"
+ARCHIVED=0
+
+if [ -f "$DATA_DIR/transcripts.jsonl" ] || [ -f "$DATA_DIR/replay_results.jsonl" ]; then
+    mkdir -p "$ARCHIVE_DIR"
+    for f in transcripts.jsonl replay_results.jsonl; do
+        if [ -f "$DATA_DIR/$f" ]; then
+            mv "$DATA_DIR/$f" "$ARCHIVE_DIR/$f"
+            ARCHIVED=$((ARCHIVED + 1))
+        fi
+    done
+    echo "  Archived $ARCHIVED data file(s) to $ARCHIVE_DIR"
+else
+    echo "  No runtime data to archive"
+fi
+
 # 1) VERSION file
 echo "$NEW_VERSION" > "$VERSION_FILE"
 echo "  Updated VERSION"
