@@ -1,17 +1,17 @@
-# Homebrew Formula for MacWhisper
+# Homebrew Formula for MacWhisper (MLX)
 #
 # To use this formula:
 #   1. Create a GitHub repo: <your-user>/homebrew-macwhisper
-#   2. Copy this file to Formula/macwhisper.rb
+#   2. Copy this file to Formula/macwhisper-mlx.rb
 #   3. Update the url and sha256 after running build.sh + release.sh
-#   4. Users install via: brew tap <your-user>/macwhisper && brew install macwhisper
+#   4. Users install via: brew tap <your-user>/macwhisper && brew install macwhisper-mlx
 #
 
-class Macwhisper < Formula
+class MacwhisperMlx < Formula
   desc "macOS menu bar real-time speech transcription powered by MLX Whisper"
-  homepage "https://github.com/JackieYan/MacWhisper"
-  url "https://github.com/JackieYan/MacWhisper/releases/download/v0.4.0/MacWhisper-0.4.0.tar.gz"
-  sha256 "PLACEHOLDER_SHA256"
+  homepage "https://github.com/sfc-gh-jiyan/MacWhisper"
+  url "https://github.com/sfc-gh-jiyan/MacWhisper/releases/download/v0.4.0/MacWhisper-0.4.0.tar.gz"
+  sha256 "1742f2ce7bee79bc357373c4866f8aff6104e0afd09be55ed889190e5704a954"
   license "MIT"
 
   depends_on :macos
@@ -28,14 +28,14 @@ class Macwhisper < Formula
     system venv/"bin/pip", "install", "-r", libexec/"requirements.txt"
 
     # Wrapper script
-    (bin/"macwhisper").write <<~EOS
+    (bin/"macwhisper-mlx").write <<~EOS
       #!/bin/bash
       cd "#{libexec}"
       exec "#{venv}/bin/python3" app.py "$@"
     EOS
 
     # Install script for .app bundle
-    (bin/"macwhisper-install").write <<~EOS
+    (bin/"macwhisper-mlx-install").write <<~EOS
       #!/bin/bash
       cd "#{libexec}"
       exec bash install.sh
@@ -47,7 +47,7 @@ class Macwhisper < Formula
       MacWhisper requires Apple Silicon (M1/M2/M3/M4).
 
       To create the .app bundle in /Applications:
-        macwhisper-install
+        macwhisper-mlx-install
 
       Required macOS permissions (System Settings → Privacy & Security):
         1. Microphone
