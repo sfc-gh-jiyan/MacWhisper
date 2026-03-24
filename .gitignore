@@ -7,3 +7,8 @@ dist/
 build/
 .vscode/
 .idea/
+.pytest_cache/
+history/
+Plans/
+INTERNAL_*.md
+sweep_params.py
