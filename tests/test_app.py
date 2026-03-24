@@ -454,7 +454,7 @@ def test_subtitle_log_appends_on_live_result(tmp_path):
     audio_dir = str(tmp_path / "history" / "audio")
     subtitle_log = str(tmp_path / "history" / "subtitles.jsonl")
 
-    frames = _make_frames(10, 1024)
+    frames = _make_frames(14, 1024)  # >= 0.8s so min-duration check passes
 
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
     inst.recording = True

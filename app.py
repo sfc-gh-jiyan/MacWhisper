@@ -71,7 +71,7 @@ _HALLUCINATION_PHRASES = {
 _HALLUCINATION_SUBSTRINGS = [
     "请不吝点赞", "打赏支持明镜", "字幕由amara", "字幕提供",
     "普通话与英语的混合", "中英双语对话的转录", "中英语对话的转录",
-    "中文字幕组",
+    "中文字幕组", "中英语对话",
 ]
 
 def _strip_trailing_repetition(text):
@@ -1033,6 +1033,9 @@ class TranscriberApp(rumps.App):
 
         audio_float = audio.astype(np.float32) / 32768.0
         duration = len(audio_float) / SAMPLE_RATE
+        if duration < 0.8:
+            print(f"[INFO] Live chunk too short ({duration:.1f}s), skipped")
+            return ""
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
         prompt = BILINGUAL_PROMPT
@@ -1092,7 +1095,7 @@ class TranscriberApp(rumps.App):
                 # switch as more audio arrives).
                 if accept and self._accept_count >= 3 and len(self._best_raw) >= 15:
                     g1_ratio = _prefix_overlap_ratio(raw_text, self._best_raw)
-                    if g1_ratio < 0.5:
+                    if g1_ratio < 0.35:
                         accept = False
                         reject_reason = "guard1"
                 # Guard 2: reject if new raw rewrites frozen prefix
