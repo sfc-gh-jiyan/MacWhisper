@@ -1,10 +1,10 @@
 # Homebrew Formula for MacWhisper (MLX)
 #
-# To use this formula:
-#   1. Create a GitHub repo: <your-user>/homebrew-macwhisper
-#   2. Copy this file to Formula/macwhisper-mlx.rb
-#   3. Update the url and sha256 after running build.sh + release.sh
-#   4. Users install via: brew tap <your-user>/macwhisper && brew install macwhisper-mlx
+# NOTE: The url and sha256 in the tap repo (sfc-gh-jiyan/homebrew-macwhisper)
+# are automatically updated by CI when a v*.*.0 tag is pushed.
+# See .github/workflows/ci.yml (update-homebrew job).
+#
+# Manual install: brew tap sfc-gh-jiyan/macwhisper && brew install macwhisper-mlx
 #
 
 class MacwhisperMlx < Formula
