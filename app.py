@@ -746,6 +746,7 @@ class TranscriberApp(rumps.App):
         kwargs = dict(path_or_hf_repo=self.current_model, task=task)
         if prompt:
             kwargs["initial_prompt"] = prompt
+            kwargs["language"] = "zh"
 
         result = mlx_whisper.transcribe(audio_float, **kwargs)
         text = result["text"].strip()
@@ -1013,6 +1014,7 @@ class TranscriberApp(rumps.App):
             audio_float,
             path_or_hf_repo=self.current_model,
             task="transcribe",
+            language="zh",
             condition_on_previous_text=False,
             initial_prompt=prompt,
         )
