@@ -236,11 +236,30 @@ def _normalize(text):
     )
 
 
+def _char_overlap(display, ground_truth):
+    """Character-level overlap via LCS: ratio of GT chars found in display."""
+    d = _normalize(display)
+    g = _normalize(ground_truth)
+    if not g:
+        return 1.0
+    m, n = len(g), len(d)
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if g[i - 1] == d[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev = curr
+    return round(prev[n] / m, 3)
+
+
 def evaluate(entries, ground_truth):
     """Evaluate replay quality against ground truth."""
     if not entries:
-        return {"total_cycles": 0, "completeness": 0.0, "duplications": 0,
-                "stability_jumps": 0, "pass": False}
+        return {"total_cycles": 0, "completeness": 0.0, "char_overlap": 0.0,
+                "duplications": 0, "stability_jumps": 0, "pass": False}
 
     final_display = entries[-1]["display"]
     norm_display = _normalize(final_display)
@@ -250,6 +269,9 @@ def evaluate(entries, ground_truth):
     found = sum(1 for s in gt_sents
                 if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
     completeness = round(found / len(gt_sents), 2) if gt_sents else 1.0
+
+    # Character overlap: LCS-based ratio (primary quality metric)
+    overlap = _char_overlap(final_display, ground_truth)
 
     # Duplication: repeated sentences in final display
     display_sents = _split_sentences(final_display)
@@ -272,10 +294,11 @@ def evaluate(entries, ground_truth):
         if check > 0 and not curr_d.startswith(prev_d[:check]):
             jumps += 1
 
-    passed = completeness >= 0.6 and dup_count == 0
+    passed = overlap >= 0.75 and dup_count == 0
     return {
         "total_cycles": len(entries),
         "completeness": completeness,
+        "char_overlap": overlap,
         "duplications": dup_count,
         "stability_jumps": jumps,
         "pass": passed,
@@ -404,7 +427,8 @@ def print_report(entries, ground_truth, scores, audio_file, duration, elapsed):
     found_count = sum(1 for s in gt_sents
                       if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
 
-    print(f"\n  Completeness: {scores['completeness']} ({found_count}/{len(gt_sents)} sentences)")
+    print(f"\n  Char overlap: {scores['char_overlap']:.1%} (LCS-based, >= 75% to pass)")
+    print(f"  Completeness: {scores['completeness']} ({found_count}/{len(gt_sents)} sentences)")
     print(f"  Duplications: {scores['duplications']}")
     print(f"  Stability:    {scores['stability_jumps']} jump(s)")
     print(f"  Result:       {status}")

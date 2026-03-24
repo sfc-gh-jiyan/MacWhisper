@@ -70,7 +70,8 @@ _HALLUCINATION_PHRASES = {
 
 _HALLUCINATION_SUBSTRINGS = [
     "请不吝点赞", "打赏支持明镜", "字幕由amara", "字幕提供",
-    "普通话与英语的混合",
+    "普通话与英语的混合", "中英双语对话的转录", "中英语对话的转录",
+    "中文字幕组",
 ]
 
 def _strip_trailing_repetition(text):
@@ -335,6 +336,7 @@ HISTORY_DIR = _DATA_DIR
 AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
 TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
 SUBTITLE_LOG = os.path.join(_DATA_DIR, "subtitles.jsonl")
+BILINGUAL_PROMPT = "以下是中英双语对话的转录。"
 
 
 def _ensure_history_dirs():
@@ -759,19 +761,26 @@ class TranscriberApp(rumps.App):
             task, prompt = "translate", None
             print(f"[INFO] Translating {len(audio_float)/SAMPLE_RATE:.1f}s audio to English...")
         else:
-            task, prompt = "transcribe", "以下是中英双语对话的转录。"
+            task, prompt = "transcribe", BILINGUAL_PROMPT
             print(f"[INFO] Transcribing {len(audio_float)/SAMPLE_RATE:.1f}s audio...")
 
         kwargs = dict(path_or_hf_repo=self.current_model, task=task)
         if prompt:
             kwargs["initial_prompt"] = prompt
-            kwargs["language"] = "zh"
 
         result = mlx_whisper.transcribe(audio_float, **kwargs)
         text = result["text"].strip()
         if prompt and text.startswith(prompt):
             text = text[len(prompt):].strip()
+        text = _t2s.convert(text)
+        if prompt and (text in prompt or text.rstrip("。.") in prompt):
+            text = ""
+            print("[INFO] Result (prompt echo filtered)")
         text = _strip_trailing_repetition(text)
+        hall_reason = _hallucination_reason(text) if text else None
+        if hall_reason:
+            print(f"[INFO] Result (hallucination:{hall_reason}): {text}")
+            text = ""
         print(f"[INFO] Result: {text}")
 
         # Log transcription result
@@ -1026,14 +1035,13 @@ class TranscriberApp(rumps.App):
         duration = len(audio_float) / SAMPLE_RATE
         print(f"[INFO] Live transcribing {duration:.1f}s chunk (RMS={rms:.0f})...")
 
-        prompt = "以下是中英双语对话的转录。"
+        prompt = BILINGUAL_PROMPT
 
         t0 = time.time()
         result = mlx_whisper.transcribe(
             audio_float,
             path_or_hf_repo=self.current_model,
             task="transcribe",
-            language="zh",
             condition_on_previous_text=False,
             initial_prompt=prompt,
         )
