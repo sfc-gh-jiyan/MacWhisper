@@ -1,12 +1,12 @@
 """
-MacWhisper - macOS Menu Bar App  v0.3.0
+MacWhisper - macOS Menu Bar App  v0.4.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
 Ctrl + Shift + S  toggle live subtitles (show preview while recording)
 """
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 import json
 import threading
@@ -746,6 +746,7 @@ class TranscriberApp(rumps.App):
         kwargs = dict(path_or_hf_repo=self.current_model, task=task)
         if prompt:
             kwargs["initial_prompt"] = prompt
+            kwargs["language"] = "zh"
 
         result = mlx_whisper.transcribe(audio_float, **kwargs)
         text = result["text"].strip()
@@ -1013,6 +1014,7 @@ class TranscriberApp(rumps.App):
             audio_float,
             path_or_hf_repo=self.current_model,
             task="transcribe",
+            language="zh",
             condition_on_previous_text=False,
             initial_prompt=prompt,
         )
@@ -1142,5 +1144,37 @@ class TranscriberApp(rumps.App):
         ])
 
 
+def _check_audio_device():
+    """Verify at least one audio input device is available."""
+    try:
+        devices = sd.query_devices()
+        has_input = any(
+            d.get("max_input_channels", 0) > 0
+            for d in (devices if isinstance(devices, list) else [devices])
+        )
+        if not has_input:
+            rumps.alert(
+                title="MacWhisper – No Microphone",
+                message="No audio input device found. Please connect a microphone and restart MacWhisper.",
+            )
+            sys.exit(1)
+    except Exception as e:
+        print(f"[WARN] Audio device check failed: {e}")
+
+
 if __name__ == "__main__":
-    TranscriberApp().run()
+    _check_audio_device()
+    try:
+        TranscriberApp().run()
+    except Exception:
+        import traceback
+        crash_log = os.path.join(LOG_DIR, "crash.log")
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(crash_log, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"MacWhisper v{__version__} crash at {datetime.datetime.now().isoformat()}\n")
+            f.write(f"{'='*60}\n")
+            traceback.print_exc(file=f)
+        print(f"[FATAL] Crash logged to {crash_log}")
+        traceback.print_exc()
+        sys.exit(1)

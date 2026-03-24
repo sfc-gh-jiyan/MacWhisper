@@ -49,6 +49,7 @@ _MOCK_MODULES = {
 for mod, mock in _MOCK_MODULES.items():
     sys.modules[mod] = mock
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import app  # noqa: E402 — must come after mocks
 
 
