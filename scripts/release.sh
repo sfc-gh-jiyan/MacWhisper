@@ -10,7 +10,7 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 TAG="v${VERSION}"
 DIST_DIR="$SCRIPT_DIR/dist"
@@ -23,7 +23,7 @@ if ! command -v gh &>/dev/null; then
 fi
 
 if [ ! -f "$ARCHIVE" ]; then
-    echo "ERROR: $ARCHIVE not found. Run ./build.sh first."
+    echo "ERROR: $ARCHIVE not found. Run ./scripts/build.sh first."
     exit 1
 fi
 

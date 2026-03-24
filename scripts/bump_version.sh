@@ -11,7 +11,7 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION_FILE="$SCRIPT_DIR/VERSION"
 APP_FILE="$SCRIPT_DIR/app.py"
 

@@ -32,7 +32,7 @@ check() {
     fi
 }
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR=$(mktemp -d)
 trap "rm -rf $WORK_DIR" EXIT
 
@@ -124,9 +124,9 @@ echo ""
 echo "Phase 6: Script syntax checks..."
 
 check "install.sh syntax" bash -n "$SRC/install.sh"
-check "bump_version.sh syntax" bash -n "$SRC/bump_version.sh"
-check "build.sh syntax" bash -n "$SRC/build.sh"
-check "release.sh syntax" bash -n "$SRC/release.sh"
+check "bump_version.sh syntax" bash -n "$SRC/scripts/bump_version.sh"
+check "build.sh syntax" bash -n "$SRC/scripts/build.sh"
+check "release.sh syntax" bash -n "$SRC/scripts/release.sh"
 
 # ── Summary ───────────────────────────────────────────────
 

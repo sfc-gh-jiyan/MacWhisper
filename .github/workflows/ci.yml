@@ -49,10 +49,10 @@ jobs:
       - name: Script syntax
         run: |
           bash -n install.sh
-          bash -n bump_version.sh
-          bash -n build.sh
-          bash -n release.sh
-          bash -n test_install.sh
+          bash -n scripts/bump_version.sh
+          bash -n scripts/build.sh
+          bash -n scripts/release.sh
+          bash -n tests/test_install.sh
 
   build:
     name: Build Tarball
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build source tarball
-        run: bash build.sh
+        run: bash scripts/build.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

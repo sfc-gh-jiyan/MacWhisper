@@ -7,7 +7,7 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 DIST_DIR="$SCRIPT_DIR/dist"
 ARCHIVE_NAME="MacWhisper-${VERSION}.tar.gz"
@@ -31,4 +31,4 @@ echo "Build complete:"
 echo "  Archive: $DIST_DIR/$ARCHIVE_NAME"
 echo "  SHA256:  $SHA"
 echo ""
-echo "Next: ./release.sh to upload to GitHub"
+echo "Next: ./scripts/release.sh to upload to GitHub"
