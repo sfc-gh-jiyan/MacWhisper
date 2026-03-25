@@ -244,6 +244,17 @@ class TranscriberApp(rumps.App):
         self._backend_ready = threading.Event()
         self._warmup_model(self.current_model)
 
+        # VAD — created once, reset() per recording (avoids reloading Silero model)
+        self._vad: VoiceActivityDetector | None = None
+        self._vad_available = False
+        try:
+            self._vad = VoiceActivityDetector(
+                threshold=0.5, min_silence_ms=800, min_speech_ms=250,
+            )
+            self._vad_available = True
+        except Exception:
+            print("[WARN] VAD unavailable at startup")
+
         # Workers
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
@@ -475,6 +486,7 @@ class TranscriberApp(rumps.App):
         self.title = "💬"
         self._set_status("Transcribing...")
         self.transcribe_queue.put(list(self.frames))
+        self.frames = []  # release memory immediately
 
     # ── Live Subtitles — unified loop (replaces old chunk + worker) ──
 
@@ -499,17 +511,10 @@ class TranscriberApp(rumps.App):
 
     def _live_loop_impl(self, proc):
         """Inner live loop implementation (separated for clean try/finally)."""
-        # VAD for speech-end detection (segmentation)
-        try:
-            vad = VoiceActivityDetector(
-                threshold=0.5,
-                min_silence_ms=800,
-                min_speech_ms=250,
-            )
-            use_vad = True
-        except Exception:
-            use_vad = False
-            print("[WARN] VAD unavailable for live loop")
+        # Reuse pre-created VAD instance (reset state for new recording)
+        use_vad = self._vad_available
+        if use_vad:
+            self._vad.reset()
 
         last_frame_idx = 0
 
@@ -534,14 +539,14 @@ class TranscriberApp(rumps.App):
 
             # VAD: check for speech end → segment commit
             if use_vad:
-                vad.process_chunk(audio_chunk)
+                self._vad.process_chunk(audio_chunk)
                 seg_duration = len(proc.audio_buffer) / SAMPLE_RATE
-                if vad.is_speech_end() and seg_duration > 5.0:
+                if self._vad.is_speech_end() and seg_duration > 5.0:
                     segment_text = proc.segment_close()
                     if segment_text:
                         print(f"[INFO] VAD segment committed: {len(segment_text)} chars")
                         self._log_subtitle(segment_text, seg_duration)
-                    vad.reset()
+                    self._vad.reset()
 
             # Show current state BEFORE blocking inference so overlay
             # stays responsive while Whisper is processing
@@ -625,6 +630,10 @@ class TranscriberApp(rumps.App):
                 print(f"[ERROR] Transcription failed: {e}")
             finally:
                 self.transcribe_queue.task_done()
+                # Release processor memory (audio_buffer, committed words, etc.)
+                if self._processor:
+                    self._processor.reset()
+                    self._processor = None
                 self.title = self._idle_icon
                 self._set_status("Ready")
 
@@ -658,8 +667,8 @@ class TranscriberApp(rumps.App):
                 wf.writeframes(audio.tobytes())
             print(f"[INFO] Saved audio: {wav_path}")
 
-        # Create backend for final pass
-        backend = MLXWhisperBackend(model_repo=self.current_model)
+        # Reuse pre-warmed backend (avoids loading model again — saves ~500MB-3GB)
+        backend = self._backend
 
         if self.translate_mode:
             task, prompt = "translate", None

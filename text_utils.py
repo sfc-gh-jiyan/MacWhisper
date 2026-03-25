@@ -11,22 +11,44 @@ import opencc
 
 # ── Constants ─────────────────────────────────────────────
 
-BILINGUAL_PROMPT = "以下是中英双语对话的转录。"
+BILINGUAL_PROMPT = "以下是中英双语对话的转录。This is a bilingual transcript mixing Chinese and English."
 
 _PUNCT_NORMALIZE = str.maketrans('，。！？、', ',.!?,')
 OVERLAP_STRIP_CHARS = set(' \t\n，。！？、,.!?-\u3000')
 
-# English → Chinese punctuation for display consistency
-_PUNCT_TO_CJK = str.maketrans({',': '，', '.': '。', '!': '！', '?': '？'})
+# Punctuation mapping tables
+_PUNCT_TO_CJK = {',': '，', '.': '。', '!': '！', '?': '？'}
+_PUNCT_TO_ASCII = {'，': ',', '。': '.', '！': '!', '？': '?'}
 
 
 def normalize_punctuation(text: str) -> str:
-    """Normalize English punctuation to Chinese style for consistent display.
+    """Context-aware punctuation normalization for bilingual text.
 
-    Whisper freely mixes ，/, and 。/. in bilingual text. This normalizes
-    to Chinese-style punctuation for visual consistency.
+    After CJK characters: use CJK punctuation (，。！？)
+    After Latin characters: use ASCII punctuation (,.!?)
+    This preserves natural reading in both languages.
     """
-    return text.translate(_PUNCT_TO_CJK)
+    if not text:
+        return text
+    result = []
+    for i, ch in enumerate(text):
+        if ch in _PUNCT_TO_CJK or ch in _PUNCT_TO_ASCII:
+            # Look back for the nearest letter to decide context
+            prev_is_cjk = False
+            for j in range(i - 1, -1, -1):
+                c = text[j]
+                if c.isalpha():
+                    cp = ord(c)
+                    prev_is_cjk = (0x2E80 <= cp <= 0x9FFF or 0xF900 <= cp <= 0xFAFF
+                                   or 0x20000 <= cp <= 0x2FA1F or 0x3040 <= cp <= 0x30FF)
+                    break
+            if prev_is_cjk:
+                result.append(_PUNCT_TO_CJK.get(ch, ch))
+            else:
+                result.append(_PUNCT_TO_ASCII.get(ch, ch))
+        else:
+            result.append(ch)
+    return ''.join(result)
 
 _HALLUCINATION_PHRASES = {
     "thank you for watching", "thanks for watching", "thank you",
@@ -39,6 +61,7 @@ _HALLUCINATION_SUBSTRINGS = [
     "请不吝点赞", "打赏支持明镜", "字幕由amara", "字幕提供",
     "普通话与英语的混合", "中英双语对话的转录", "中英语对话的转录",
     "中文字幕组", "中英语对话",
+    "bilingual transcript mixing",
 ]
 
 # ── Traditional → Simplified Chinese ─────────────────────
@@ -263,12 +286,8 @@ def hallucination_reason(text: str) -> str | None:
             mx = max(grams.values())
             if mx >= 4 and mx * n > len(clean) * 0.4:
                 return "phrase_repeat"
-    if 5 <= len(clean) < 30:
-        has_cjk = any(0x2E80 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
-                       or 0x20000 <= ord(c) <= 0x2FA1F or 0x3040 <= ord(c) <= 0x30FF
-                       for c in clean)
-        if not has_cjk:
-            return "no_cjk"
+    # NOTE: Removed "no_cjk" filter — it incorrectly rejects legitimate
+    # English speech in bilingual conversations (e.g. "What's going on?").
     for ch in text:
         cat = unicodedata.category(ch)
         if cat.startswith('L'):

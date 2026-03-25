@@ -7,6 +7,7 @@ Run:  ./venv/bin/python3 -m pytest tests/test_app.py -v
 import json
 import os
 import queue
+import threading
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -238,9 +239,10 @@ def test_hallucination_cyrillic():
 def test_hallucination_normal_text():
     from text_utils import is_hallucination
     assert is_hallucination("我上周去了San Francisco") is False
-    # Pure-English without CJK is flagged in bilingual context
-    assert is_hallucination("Hello world") is True
-    # Short pure-English (< 5 non-space chars) is OK
+    # Pure-English is legitimate in bilingual context (no_cjk filter removed)
+    assert is_hallucination("Hello world") is False
+    assert is_hallucination("What's going on there?") is False
+    # Short pure-English is OK
     assert is_hallucination("OK") is False
 
 
@@ -440,8 +442,10 @@ def test_audio_history_saves_wav(tmp_path):
     inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-small-mlx"
     inst.save_audio = True
+    inst._live_loop_done = threading.Event()
+    inst._live_loop_done.set()
 
-    # Mock the MLXWhisperBackend
+    # Mock the ASR backend (app.py uses self._backend directly)
     from asr_backend import TranscriptionResult, Segment, WordTimestamp
     mock_result = TranscriptionResult(
         text="Hello world",
@@ -449,12 +453,14 @@ def test_audio_history_saves_wav(tmp_path):
                          words=[WordTimestamp("Hello", 0.0, 0.5),
                                 WordTimestamp("world", 0.5, 1.0)])],
     )
+    mock_backend = MagicMock()
+    mock_backend.transcribe.return_value = mock_result
+    inst._backend = mock_backend
+
     with patch("app.AUDIO_DIR", audio_dir), \
          patch("app.TRANSCRIPT_LOG", transcript_log), \
          patch("app._DATA_DIR", data_dir), \
-         patch("app.MLXWhisperBackend") as MockBackend, \
          patch.object(inst, "_auto_paste"):
-        MockBackend.return_value.transcribe.return_value = mock_result
         app._ensure_history_dirs()
         inst._do_transcribe(frames)
 
@@ -482,7 +488,10 @@ def test_transcript_log_appends_jsonl(tmp_path):
     inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-small-mlx"
     inst.save_audio = True
+    inst._live_loop_done = threading.Event()
+    inst._live_loop_done.set()
 
+    # Mock the ASR backend (app.py uses self._backend directly)
     from asr_backend import TranscriptionResult, Segment, WordTimestamp
     mock_result = TranscriptionResult(
         text="你好世界 hello",
@@ -490,12 +499,13 @@ def test_transcript_log_appends_jsonl(tmp_path):
                          words=[WordTimestamp("你好世界", 0.0, 0.5),
                                 WordTimestamp("hello", 0.5, 1.0)])],
     )
+    mock_backend = MagicMock()
+    mock_backend.transcribe.return_value = mock_result
+    inst._backend = mock_backend
     with patch("app.AUDIO_DIR", audio_dir), \
          patch("app.TRANSCRIPT_LOG", transcript_log), \
          patch("app._DATA_DIR", data_dir), \
-         patch("app.MLXWhisperBackend") as MockBackend, \
          patch.object(inst, "_auto_paste"):
-        MockBackend.return_value.transcribe.return_value = mock_result
         app._ensure_history_dirs()
         inst._do_transcribe(frames)
 

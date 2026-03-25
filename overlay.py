@@ -197,3 +197,4 @@ def destroy_overlay(panel):
     """Hide and release the overlay panel."""
     if panel:
         panel.orderOut_(None)
+        panel.close()

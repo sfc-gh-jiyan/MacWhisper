@@ -74,16 +74,16 @@ if platform.machine() != "arm64":
     sys.exit(r.returncode)
 _dir = "${SCRIPT_DIR}"
 os.chdir(_dir)
-sys.path.insert(0, _dir)
 _log_dir = os.path.expanduser("~/.macwhisper/logs")
 os.makedirs(_log_dir, exist_ok=True)
-_lf = open(os.path.join(_log_dir, "macwhisper.log"), "a")
-sys.stdout = _lf
-sys.stderr = _lf
+_fd = os.open(os.path.join(_log_dir, "macwhisper.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+os.dup2(_fd, 1)
+os.dup2(_fd, 2)
+os.close(_fd)
 import certifi
 os.environ["SSL_CERT_FILE"] = certifi.where()
-import runpy
-runpy.run_path(os.path.join(_dir, "app.py"), run_name="__main__")
+os.environ["PYTHONPATH"] = _dir
+os.execv(sys.executable, [sys.executable, os.path.join(_dir, "app.py")])
 LAUNCHER
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 
