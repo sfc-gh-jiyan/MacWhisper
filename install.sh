@@ -118,6 +118,8 @@ cat > "${APP_PATH}/Contents/Info.plist" << PLIST
   <array>
     <string>arm64</string>
   </array>
+  <key>LSUIElement</key>
+  <true/>
 </dict>
 </plist>
 PLIST
