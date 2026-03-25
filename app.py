@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.4.7
+MacWhisper - macOS Menu Bar App  v0.5.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
