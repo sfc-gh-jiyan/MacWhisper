@@ -20,8 +20,8 @@ import numpy as np
 
 from asr_backend import ASRBackend, TranscriptionResult
 from text_utils import (
-    BILINGUAL_PROMPT, convert_t2s, strip_trailing_repetition,
-    hallucination_reason,
+    BILINGUAL_PROMPT, convert_t2s, normalize_punctuation,
+    strip_trailing_repetition, hallucination_reason,
 )
 
 SAMPLE_RATE = 16000
@@ -288,12 +288,12 @@ class OnlineASRProcessor:
         words = []
         for seg in result.segments:
             for w in seg.words:
-                text = convert_t2s(w.word)
+                text = normalize_punctuation(convert_t2s(w.word))
                 if text.strip():
                     words.append((w.start, w.end, text))
         # Fallback: if no word timestamps, treat entire text as one "word"
         if not words and result.text.strip():
-            text = convert_t2s(result.text.strip())
+            text = normalize_punctuation(convert_t2s(result.text.strip()))
             start = result.segments[0].start if result.segments else 0.0
             end = result.segments[-1].end if result.segments else 0.0
             words.append((start, end, text))

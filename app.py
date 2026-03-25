@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.5.0
+MacWhisper - macOS Menu Bar App  v0.4.6
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.4.6"
 
 import json
 import threading
@@ -235,6 +235,8 @@ class TranscriberApp(rumps.App):
 
         # Online processor (created per recording session)
         self._processor: OnlineASRProcessor | None = None
+        self._live_loop_done = threading.Event()
+        self._live_loop_done.set()  # initially "done" (no loop running)
 
         # Workers
         self.transcribe_queue = queue.Queue()
@@ -386,6 +388,7 @@ class TranscriberApp(rumps.App):
 
         if self.live_mode:
             AppHelper.callAfter(self._create_overlay)
+            self._live_loop_done.clear()
             threading.Thread(target=self._live_loop, daemon=True).start()
 
         def callback(indata, frame_count, time_info, status):
@@ -402,18 +405,25 @@ class TranscriberApp(rumps.App):
         self.recording = False
         print(f"[INFO] Recording stopped, frames: {len(self.frames)}")
 
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+        # Wait for _live_loop to finish (so we don't run two mlx inferences
+        # concurrently, which causes Metal command buffer assertion failures)
+        self._live_loop_done.wait(timeout=10)
 
-        # Force-confirm remaining words from processor
-        final_text = ""
-        if self._processor:
-            final_text = self._processor.segment_close()
+        try:
+            if self.stream:
+                self.stream.stop()
+                self.stream.close()
+                self.stream = None
 
-        if self._overlay_panel:
-            AppHelper.callAfter(self._destroy_overlay)
+            # Force-confirm remaining words from processor
+            final_text = ""
+            if self._processor:
+                final_text = self._processor.segment_close()
+
+            if self._overlay_panel:
+                AppHelper.callAfter(self._destroy_overlay)
+        except Exception as e:
+            print(f"[ERROR] Cleanup failed: {e}")
 
         if not self.frames:
             self.title = self._idle_icon
@@ -435,8 +445,18 @@ class TranscriberApp(rumps.App):
         """
         proc = self._processor
         if not proc:
+            self._live_loop_done.set()
             return
 
+        try:
+            self._live_loop_impl(proc)
+        except Exception as e:
+            print(f"[ERROR] Live loop crashed: {e}")
+        finally:
+            self._live_loop_done.set()
+
+    def _live_loop_impl(self, proc):
+        """Inner live loop implementation (separated for clean try/finally)."""
         # VAD for speech-end detection (segmentation)
         try:
             vad = VoiceActivityDetector(
@@ -452,8 +472,8 @@ class TranscriberApp(rumps.App):
         last_frame_idx = 0
 
         while self.recording:
-            # Sleep briefly — the processor's internal throttle handles timing
-            time.sleep(0.3)
+            # Brief yield — processor's internal throttle handles timing
+            time.sleep(0.05)
             if not self.recording:
                 break
 
@@ -488,15 +508,16 @@ class TranscriberApp(rumps.App):
 
             confirmed, unconfirmed = result
 
-            # Log debug info
+            # Log debug info + subtitle text to console
             if proc.last_debug:
                 debug = proc.last_debug
+                conf_tail = confirmed[-40:] if confirmed else "(empty)"
                 print(f"[LIVE] iter={debug.get('iter', '?')} "
                       f"buf={debug.get('buffer_s', '?')}s "
                       f"inf={debug.get('inference_ms', '?')}ms "
-                      f"confirmed={debug.get('confirmed_words', 0)} "
-                      f"unconfirmed={debug.get('unconfirmed_words', 0)} "
-                      f"new={debug.get('newly_confirmed', 0)}")
+                      f"conf={debug.get('confirmed_words', 0)} "
+                      f"new={debug.get('newly_confirmed', 0)} "
+                      f"| {conf_tail}")
 
             # Update overlay (dual-color: white confirmed, gray unconfirmed)
             overlay_key = (confirmed, unconfirmed)

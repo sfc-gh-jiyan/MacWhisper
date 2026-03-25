@@ -419,3 +419,30 @@ class TestOnlineASRProcessor:
         # Key: confirmed text is preserved (not empty)
         assert confirmed_after == confirmed_before, \
             f"Hallucination should preserve confirmed text, got '{confirmed_after}'"
+
+    def test_punctuation_normalization_in_word_matching(self):
+        """Words with English vs Chinese punctuation should still match."""
+        from online_processor import OnlineASRProcessor
+        backend = MockASRBackend()
+        # First iteration: English comma
+        backend.add_result("你好, 世界.", [("你好,", 0, 0.5), (" 世界.", 0.5, 1.0)])
+        # Second iteration: Chinese comma (same words, different punctuation style)
+        # After normalize_punctuation, both become "你好，" and " 世界。"
+        backend.add_result("你好, 世界.", [("你好,", 0, 0.5), (" 世界.", 0.5, 1.0)])
+
+        proc = OnlineASRProcessor(backend=backend, vad=None,
+                                  min_chunk_size=0.5)
+        proc.throttle = False
+
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        r2 = proc.process_iter()
+        assert r2 is not None
+        confirmed = r2[0]
+        # Punctuation should be normalized to Chinese style
+        assert "，" in confirmed or "。" in confirmed, \
+            f"Expected Chinese punctuation in '{confirmed}'"
+        # English punctuation should NOT appear
+        assert "," not in confirmed, \
+            f"English comma should be normalized, got '{confirmed}'"

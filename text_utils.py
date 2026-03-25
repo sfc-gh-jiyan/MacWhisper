@@ -16,6 +16,18 @@ BILINGUAL_PROMPT = "以下是中英双语对话的转录。"
 _PUNCT_NORMALIZE = str.maketrans('，。！？、', ',.!?,')
 OVERLAP_STRIP_CHARS = set(' \t\n，。！？、,.!?-\u3000')
 
+# English → Chinese punctuation for display consistency
+_PUNCT_TO_CJK = str.maketrans({',': '，', '.': '。', '!': '！', '?': '？'})
+
+
+def normalize_punctuation(text: str) -> str:
+    """Normalize English punctuation to Chinese style for consistent display.
+
+    Whisper freely mixes ，/, and 。/. in bilingual text. This normalizes
+    to Chinese-style punctuation for visual consistency.
+    """
+    return text.translate(_PUNCT_TO_CJK)
+
 _HALLUCINATION_PHRASES = {
     "thank you for watching", "thanks for watching", "thank you",
     "please subscribe", "中文字幕君", "字幕由amara", "字幕提供",
