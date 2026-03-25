@@ -98,6 +98,10 @@ class MLXWhisperBackend(ASRBackend):
             "task": task,
             "word_timestamps": True,
             "condition_on_previous_text": False,
+            # Anti-hallucination: limit decoder output length.
+            # Normal 5s audio produces 20-40 tokens; 100 gives 2-3x headroom
+            # while preventing 200+ token hallucination loops (default is 224).
+            "sample_len": 100,
         }
         if language is not None:
             kwargs["language"] = language

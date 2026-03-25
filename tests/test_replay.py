@@ -39,8 +39,8 @@ TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
 REPLAY_RESULTS = os.path.join(_DATA_DIR, "replay_results.jsonl")
 
 # Processor defaults (match app.py)
-MIN_CHUNK_SIZE = 0.7
-MAX_BUFFER_S = 20.0
+MIN_CHUNK_SIZE = 0.5
+MAX_BUFFER_S = 5.0            # must match app.py
 DEFAULT_MODEL = "mlx-community/whisper-medium-mlx"
 
 
@@ -73,6 +73,14 @@ def replay_wav(audio_float, sample_rate, model=DEFAULT_MODEL,
         elapsed: wall-clock time for replay
     """
     backend = MLXWhisperBackend(model_repo=model)
+
+    # Warmup: first mlx inference compiles Metal shaders (~5-15s).
+    # Do this once before timing so it doesn't pollute freeze metrics.
+    print("  Warming up model (first inference compiles Metal shaders)...")
+    warmup_audio = np.zeros(int(sample_rate * 1.0), dtype=np.float32)
+    backend.transcribe(warmup_audio, language=None, task="transcribe")
+    print("  Warmup complete.")
+
     proc = OnlineASRProcessor(
         backend=backend,
         vad=None,
@@ -361,6 +369,15 @@ def evaluate(snapshots, final_confirmed, ground_truth, offline_baseline=None):
         "jumps":     _tier(jumps, 10, 5, 1, higher_is_better=False),
         "latency":   _tier(avg_latency, 5, 3, 1, higher_is_better=False),
     }
+
+    # ── Freeze / inference metrics ──
+    freeze_metrics = _compute_freeze_metrics(snapshots)
+    max_freeze = freeze_metrics["max_freeze_s"]
+    max_infer = freeze_metrics["max_inference_ms"]
+
+    tiers["max_freeze"] = _tier(max_freeze, 5.0, 3.0, 1.5, higher_is_better=False)
+    tiers["max_inference"] = _tier(max_infer, 3000, 1500, 800, higher_is_better=False)
+
     # Overall tier: worst of all
     tier_order = ["FAIL", "WARN", "PASS", "EXCELLENT"]
     overall_tier = min(tiers.values(), key=lambda t: tier_order.index(t))
@@ -377,9 +394,104 @@ def evaluate(snapshots, final_confirmed, ground_truth, offline_baseline=None):
         "avg_latency": avg_latency,
         "p95_latency": p95_latency,
         "offline_wer_delta": offline_wer_delta,
+        **freeze_metrics,
         "tiers": tiers,
         "tier": overall_tier,
         "pass": passed,
+    }
+
+
+# ── Freeze / inference diagnostics ───────────────────────────
+
+def _analyze_freezes(snapshots, threshold_s=2.0):
+    """Detect freeze gaps (periods >threshold_s between overlay updates).
+
+    A 'freeze' is any period where the user sees no change on screen.
+    In the live loop, this happens when process_iter() is blocked by
+    a slow Whisper inference call.
+    """
+    freezes = []
+    if len(snapshots) < 2:
+        return freezes
+    for i in range(1, len(snapshots)):
+        gap = snapshots[i]["wall_s"] - snapshots[i - 1]["wall_s"]
+        if gap > threshold_s:
+            freezes.append({
+                "idx": i,
+                "from_wall_s": snapshots[i - 1]["wall_s"],
+                "to_wall_s": snapshots[i]["wall_s"],
+                "gap_s": round(gap, 1),
+                "from_audio_s": snapshots[i - 1]["audio_s"],
+                "to_audio_s": snapshots[i]["audio_s"],
+                "buffer_at_start": snapshots[i - 1]["debug"].get("buffer_s", 0),
+                "inference_ms": snapshots[i]["debug"].get("inference_ms", 0),
+            })
+    return freezes
+
+
+def _analyze_inference(snapshots):
+    """Extract inference timing statistics from snapshots."""
+    times = [s["debug"].get("inference_ms", 0) for s in snapshots if s["debug"].get("inference_ms")]
+    if not times:
+        return {"avg_ms": 0, "max_ms": 0, "p95_ms": 0, "count": 0,
+                "histogram": {}}
+    times_sorted = sorted(times)
+    p95_idx = min(int(len(times_sorted) * 0.95), len(times_sorted) - 1)
+    # Histogram buckets
+    buckets = {"0-500ms": 0, "500-1000ms": 0, "1000-2000ms": 0, "2000ms+": 0}
+    for t in times:
+        if t <= 500:
+            buckets["0-500ms"] += 1
+        elif t <= 1000:
+            buckets["500-1000ms"] += 1
+        elif t <= 2000:
+            buckets["1000-2000ms"] += 1
+        else:
+            buckets["2000ms+"] += 1
+    return {
+        "avg_ms": int(sum(times) / len(times)),
+        "max_ms": max(times),
+        "p95_ms": times_sorted[p95_idx],
+        "count": len(times),
+        "histogram": buckets,
+    }
+
+
+def _analyze_trims(snapshots):
+    """Count and detail buffer trim events."""
+    trims = []
+    for s in snapshots:
+        trim_info = s["debug"].get("trim")
+        if trim_info and trim_info.get("trimmed"):
+            trims.append({
+                "iter": s["debug"].get("iter", "?"),
+                "audio_s": s["audio_s"],
+                "from_s": trim_info.get("from_s", 0),
+                "to_s": trim_info.get("to_s", 0),
+                "effective_max": trim_info.get("effective_max", 0),
+                "retained_s": trim_info.get("retained_s", 0),
+            })
+    return trims
+
+
+def _compute_freeze_metrics(snapshots):
+    """Compute freeze-related metrics for tiered judgment."""
+    freezes = _analyze_freezes(snapshots, threshold_s=1.5)
+    gaps = []
+    if len(snapshots) >= 2:
+        for i in range(1, len(snapshots)):
+            gaps.append(snapshots[i]["wall_s"] - snapshots[i - 1]["wall_s"])
+    max_freeze = max(gaps) if gaps else 0.0
+    freeze_count = len(freezes)
+    inf_stats = _analyze_inference(snapshots)
+    trim_info = _analyze_trims(snapshots)
+    return {
+        "max_freeze_s": round(max_freeze, 1),
+        "freeze_count": freeze_count,
+        "avg_inference_ms": inf_stats["avg_ms"],
+        "max_inference_ms": inf_stats["max_ms"],
+        "p95_inference_ms": inf_stats["p95_ms"],
+        "trim_count": len(trim_info),
     }
 
 
@@ -497,10 +609,124 @@ def print_report(snapshots, final_confirmed, ground_truth, scores,
     print(f"  {'Stability':<16} {scores['stability_jumps']:>8d}  {tiers.get('jumps','?'):<10}  F>10 W>5 P>1 E<=1")
     print(f"  {'Avg latency':<16} {scores['avg_latency']:>6.1f}s  {tiers.get('latency','?'):<10}  F>5s W>3s P>1s E<1s")
     print(f"  {'P95 latency':<16} {scores['p95_latency']:>6.1f}s")
+    print(f"  {'Max freeze':<16} {scores.get('max_freeze_s',0):>5.1f}s  {tiers.get('max_freeze','?'):<10}  F>5s W>3s P>1.5s E<1.5s")
+    print(f"  {'Freeze count':<16} {scores.get('freeze_count',0):>8d}  {'':10}  (gaps > 1.5s)")
+    print(f"  {'Avg inference':<16} {scores.get('avg_inference_ms',0):>5d}ms  {'':10}")
+    print(f"  {'Max inference':<16} {scores.get('max_inference_ms',0):>5d}ms  {tiers.get('max_inference','?'):<10}  F>3s W>1.5s P>800ms E<800ms")
+    print(f"  {'Trim count':<16} {scores.get('trim_count',0):>8d}")
     print(f"  {'Completeness':<16} {scores['completeness']:>7.0%}  {'':10}  ({found_count}/{len(gt_sents)} sentences)")
     if scores.get('offline_wer_delta', 0) != 0:
         print(f"  {'Offline delta':<16} {scores['offline_wer_delta']:>+7.1%}  {'':10}  (streaming WER - offline WER)")
     print(f"\n  Overall: {status}")
+    print(f"{'=' * 70}")
+
+
+# ── Deep diagnostic report ───────────────────────────────────
+
+def print_diagnostic_report(snapshots, audio_file, duration):
+    """Print deep per-second diagnostic: timeline, freezes, inference, trims.
+
+    This is the 'X-ray' view — shows exactly where the pipeline stalls.
+    """
+    if not snapshots:
+        print("  [DIAGNOSE] No snapshots to analyze.")
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  DIAGNOSTIC: {audio_file}")
+    print(f"{'=' * 70}")
+
+    # ── 1. Per-second timeline ──
+    print(f"\n  --- Per-second timeline ---")
+    print(f"  {'Sec':>4}  {'Event':<14}  {'Buf':>5}  {'Infer':>7}  {'Conf':>5}  {'New':>4}  Note")
+    print(f"  {'─'*4}  {'─'*14}  {'─'*5}  {'─'*7}  {'─'*5}  {'─'*4}  {'─'*30}")
+
+    # Build a second-by-second view from snapshots
+    snap_by_second = {}  # second -> list of snapshots in that second
+    for s in snapshots:
+        sec = int(s["wall_s"])
+        snap_by_second.setdefault(sec, []).append(s)
+
+    max_wall = int(snapshots[-1]["wall_s"]) + 1 if snapshots else int(duration)
+    for sec in range(max_wall + 1):
+        if sec in snap_by_second:
+            for s in snap_by_second[sec]:
+                buf = s["debug"].get("buffer_s", 0)
+                inf = s["debug"].get("inference_ms", 0)
+                conf = s["debug"].get("confirmed_words", 0)
+                new_w = s["debug"].get("newly_confirmed", 0)
+                trim = s["debug"].get("trim")
+                note = ""
+                if inf > 2000:
+                    note = "<< SLOW INFERENCE"
+                elif inf > 1000:
+                    note = "< slow"
+                if trim and trim.get("trimmed"):
+                    note += f" TRIM->{trim['retained_s']}s"
+                print(f"  {sec:4d}  {'inference':14}  {buf:4.1f}s  {inf:6d}ms  {conf:5d}  {new_w:4d}  {note}")
+        else:
+            # No snapshot this second — the loop was blocked
+            # Find the surrounding snapshots
+            prev_s = None
+            next_s = None
+            for s in snapshots:
+                if s["wall_s"] <= sec:
+                    prev_s = s
+                if s["wall_s"] > sec and next_s is None:
+                    next_s = s
+            if prev_s:
+                buf_est = prev_s["debug"].get("buffer_s", 0)
+                print(f"  {sec:4d}  {'... blocked':14}  {buf_est:4.1f}s  {'---':>7}  {'':>5}  {'':>4}  (no overlay update)")
+            else:
+                print(f"  {sec:4d}  {'... waiting':14}  {'':>5}  {'---':>7}  {'':>5}  {'':>4}")
+
+    # ── 2. Freeze events ──
+    freezes = _analyze_freezes(snapshots, threshold_s=1.5)
+    print(f"\n  --- Freeze events (gaps > 1.5s between updates) ---")
+    if freezes:
+        print(f"  {'#':>3}  {'From':>6}  {'To':>6}  {'Gap':>5}  {'Buffer':>6}  {'Inference':>9}")
+        print(f"  {'─'*3}  {'─'*6}  {'─'*6}  {'─'*5}  {'─'*6}  {'─'*9}")
+        for i, f in enumerate(freezes):
+            print(f"  {i+1:3d}  {f['from_wall_s']:5.1f}s  {f['to_wall_s']:5.1f}s  "
+                  f"{f['gap_s']:4.1f}s  {f['buffer_at_start']:5.1f}s  {f['inference_ms']:8d}ms")
+    else:
+        print(f"  None detected -- no gaps > 1.5s")
+
+    # ── 3. Inference histogram ──
+    inf_stats = _analyze_inference(snapshots)
+    print(f"\n  --- Inference timing ---")
+    print(f"  Avg: {inf_stats['avg_ms']}ms  Max: {inf_stats['max_ms']}ms  "
+          f"P95: {inf_stats['p95_ms']}ms  ({inf_stats['count']} iterations)")
+    if inf_stats["histogram"]:
+        print(f"  Histogram:")
+        total = inf_stats["count"]
+        for bucket, count in inf_stats["histogram"].items():
+            bar = "#" * int(count / max(total, 1) * 40)
+            print(f"    {bucket:<12}  {count:3d}  ({count/total*100:4.0f}%)  {bar}")
+
+    # ── 4. Buffer trim events ──
+    trims = _analyze_trims(snapshots)
+    print(f"\n  --- Buffer trims ---")
+    if trims:
+        print(f"  {'#':>3}  {'Audio':>6}  {'Trim from':>10}  {'Trim to':>8}  {'MaxEff':>7}  {'Retained':>8}")
+        print(f"  {'─'*3}  {'─'*6}  {'─'*10}  {'─'*8}  {'─'*7}  {'─'*8}")
+        for i, t in enumerate(trims):
+            print(f"  {i+1:3d}  {t['audio_s']:5.1f}s  {t['from_s']:9.1f}s  "
+                  f"{t['to_s']:7.1f}s  {t['effective_max']:6.1f}s  {t['retained_s']:7.1f}s")
+    else:
+        print(f"  No trims occurred (buffer stayed within limit)")
+
+    # ── 5. Buffer growth over time ──
+    print(f"\n  --- Buffer size over time ---")
+    buf_points = [(s["wall_s"], s["debug"].get("buffer_s", 0)) for s in snapshots]
+    # Show as ASCII sparkline
+    if buf_points:
+        max_buf = max(b for _, b in buf_points)
+        scale = 40 / max(max_buf, 1)
+        for wall_s, buf_s in buf_points:
+            bar = "#" * int(buf_s * scale)
+            print(f"  {wall_s:5.1f}s  {buf_s:4.1f}s  {bar}")
+
     print(f"{'=' * 70}")
 
 
@@ -567,6 +793,8 @@ def main():
                         help=f"max_buffer_s for processor (default: {MAX_BUFFER_S})")
     parser.add_argument("--no-offline", action="store_true",
                         help="Skip offline baseline generation (faster)")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Deep diagnostic: per-second timeline, freeze detection, inference histogram")
     args = parser.parse_args()
 
     # Load pairs
@@ -629,6 +857,9 @@ def main():
 
         print_report(snapshots, final_confirmed, pair["ground_truth"],
                      scores, audio_file, duration, elapsed)
+
+        if args.diagnose:
+            print_diagnostic_report(snapshots, audio_file, duration)
 
         all_results.append(scores)
 

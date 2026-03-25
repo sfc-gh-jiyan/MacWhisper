@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.4.6
+MacWhisper - macOS Menu Bar App  v0.4.7
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.4.6"
+__version__ = "0.5.0"
 
 import json
 import threading
@@ -54,8 +54,8 @@ from subtitle_export import export_srt, save_enhanced_history
 
 # ── Constants ────────────────────────────────────────────
 SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 0.7          # seconds — LocalAgreement confirmation latency ≈ 2x this
-MAX_BUFFER_S = 20.0           # audio buffer cap (seconds)
+MIN_CHUNK_SIZE = 0.5          # seconds — LocalAgreement confirmation latency ≈ 2x this
+MAX_BUFFER_S = 5.0            # audio buffer cap (seconds) — keeps inference <600ms
 
 _DATA_DIR = os.path.expanduser("~/.macwhisper")
 CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
@@ -238,6 +238,12 @@ class TranscriberApp(rumps.App):
         self._live_loop_done = threading.Event()
         self._live_loop_done.set()  # initially "done" (no loop running)
 
+        # Pre-warmed ASR backend — created once, reused across recordings.
+        # Warmup runs in a background thread so the app starts instantly.
+        self._backend: MLXWhisperBackend | None = None
+        self._backend_ready = threading.Event()
+        self._warmup_model(self.current_model)
+
         # Workers
         self.transcribe_queue = queue.Queue()
         threading.Thread(target=self._transcription_worker, daemon=True).start()
@@ -246,6 +252,23 @@ class TranscriberApp(rumps.App):
 
     def _set_status(self, text):
         self.status_item.title = f"Status: {text}"
+
+    # ── Backend warmup ───────────────────────────────────────
+
+    def _warmup_model(self, model_repo: str):
+        """Create backend and warm up Metal shaders in a background thread."""
+        self._backend_ready.clear()
+
+        def _do_warmup():
+            print(f"[INFO] Warming up model: {model_repo}")
+            backend = MLXWhisperBackend(model_repo=model_repo)
+            warmup_audio = np.zeros(int(SAMPLE_RATE * 1.0), dtype=np.float32)
+            backend.transcribe(warmup_audio, language=None, task="transcribe")
+            self._backend = backend
+            self._backend_ready.set()
+            print("[INFO] Warmup complete — backend ready")
+
+        threading.Thread(target=_do_warmup, daemon=True).start()
 
     # ── Model switching ───────────────────────────────────────
 
@@ -262,6 +285,8 @@ class TranscriberApp(rumps.App):
         short_name = label.split(" ")[0]
         self._set_status(f"Model: {short_name}")
         self._save_config()
+        # Re-warmup the new model in background
+        self._warmup_model(self.current_model)
 
     def _toggle_translate(self, _):
         self.translate_mode = not self.translate_mode
@@ -376,21 +401,11 @@ class TranscriberApp(rumps.App):
         self._set_status("Recording...")
         print("[INFO] Recording started")
 
-        # Create OnlineASRProcessor for this session
-        backend = MLXWhisperBackend(model_repo=self.current_model)
-        self._processor = OnlineASRProcessor(
-            backend=backend,
-            vad=None,  # VAD used for segmentation in the live loop
-            min_chunk_size=MIN_CHUNK_SIZE,
-            max_buffer_s=MAX_BUFFER_S,
-            language=None,  # auto-detect
-        )
-
+        # ── 1. Show overlay IMMEDIATELY (before any blocking work) ──
         if self.live_mode:
             AppHelper.callAfter(self._create_overlay)
-            self._live_loop_done.clear()
-            threading.Thread(target=self._live_loop, daemon=True).start()
 
+        # ── 2. Start audio capture IMMEDIATELY ──
         def callback(indata, frame_count, time_info, status):
             if self.recording:
                 self.frames.append(indata.copy())
@@ -401,29 +416,56 @@ class TranscriberApp(rumps.App):
         )
         self.stream.start()
 
+        # ── 3. Wait for pre-warmed backend (usually instant) ──
+        # Backend was warmed up at app start or model switch.
+        # If warmup is still running (rare — app just launched), wait briefly.
+        if not self._backend_ready.wait(timeout=15):
+            print("[WARN] Backend warmup timed out, creating fresh backend")
+            self._backend = MLXWhisperBackend(model_repo=self.current_model)
+
+        # ── 4. Create processor and start live loop ──
+        self._processor = OnlineASRProcessor(
+            backend=self._backend,
+            vad=None,
+            min_chunk_size=MIN_CHUNK_SIZE,
+            max_buffer_s=MAX_BUFFER_S,
+            language=None,
+        )
+
+        if self.live_mode:
+            self._live_loop_done.clear()
+            threading.Thread(target=self._live_loop, daemon=True).start()
+
     def _stop_and_transcribe(self):
         self.recording = False
         print(f"[INFO] Recording stopped, frames: {len(self.frames)}")
 
-        # Wait for _live_loop to finish (so we don't run two mlx inferences
-        # concurrently, which causes Metal command buffer assertion failures)
-        self._live_loop_done.wait(timeout=10)
-
+        # ── 1. Stop audio stream IMMEDIATELY (no more data for live loop) ──
         try:
             if self.stream:
                 self.stream.stop()
                 self.stream.close()
                 self.stream = None
-
-            # Force-confirm remaining words from processor
-            final_text = ""
-            if self._processor:
-                final_text = self._processor.segment_close()
-
-            if self._overlay_panel:
-                AppHelper.callAfter(self._destroy_overlay)
         except Exception as e:
-            print(f"[ERROR] Cleanup failed: {e}")
+            print(f"[ERROR] Stream cleanup failed: {e}")
+
+        # ── 2. Destroy overlay IMMEDIATELY so user sees instant response ──
+        if self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
+
+        # ── 3. Wait briefly for live loop to finish current inference ──
+        # If it's stuck in a long hallucination inference, don't block forever.
+        # The live loop checks self.recording and will exit after its current
+        # inference completes; the final transcription runs in a queue anyway.
+        if not self._live_loop_done.wait(timeout=3):
+            print("[WARN] Live loop still running (mid-inference) — proceeding")
+
+        # Force-confirm remaining words from processor
+        try:
+            if self._processor:
+                self._processor.segment_close()
+        except Exception as e:
+            print(f"[ERROR] Processor cleanup failed: {e}")
 
         if not self.frames:
             self.title = self._idle_icon
@@ -500,6 +542,20 @@ class TranscriberApp(rumps.App):
                         print(f"[INFO] VAD segment committed: {len(segment_text)} chars")
                         self._log_subtitle(segment_text, seg_duration)
                     vad.reset()
+
+            # Show current state BEFORE blocking inference so overlay
+            # stays responsive while Whisper is processing
+            if self._overlay_panel and (proc.committed or proc.last_unconfirmed):
+                pre_conf = "".join(w[2] for w in proc.committed)
+                pre_unconf = "".join(w[2] for w in proc.last_unconfirmed)
+                pre_key = (pre_conf, pre_unconf)
+                if pre_key != self._last_overlay_key:
+                    self._last_overlay_key = pre_key
+                    AppHelper.callAfter(
+                        lambda c=pre_conf, u=pre_unconf: update_overlay(
+                            self._overlay_panel, self._overlay_text, c, u
+                        )
+                    )
 
             # Run one processing iteration (LocalAgreement)
             result = proc.process_iter()
@@ -579,6 +635,12 @@ class TranscriberApp(rumps.App):
         live mode is off, this is the only transcription. For live mode,
         this provides a final high-quality pass over the full audio.
         """
+        # Ensure live loop has fully exited before starting Metal inference
+        # (concurrent Metal inferences cause assertion failures / crashes)
+        done_event = getattr(self, "_live_loop_done", None)
+        if done_event and not done_event.wait(timeout=15):
+            print("[WARN] Live loop did not exit in time — proceeding anyway")
+
         audio = np.concatenate(frames, axis=0).squeeze()
         audio_float = audio.astype(np.float32) / 32768.0
         duration = len(audio_float) / SAMPLE_RATE

@@ -137,6 +137,8 @@ class OnlineASRProcessor:
         self._last_process_time: float = 0.0
         self._iter_count: int = 0
         self.throttle: bool = True  # can disable for testing
+        self._last_inference_ms: int = 0  # track last inference time for adaptive trimming
+        self._last_trim_info: dict | None = None  # set by _maybe_trim_buffer
 
         # Debug info (for logging)
         self.last_debug: dict = {}
@@ -167,7 +169,7 @@ class OnlineASRProcessor:
         now = time.time()
         if self._last_process_time > 0 and self.throttle:
             elapsed = now - self._last_process_time
-            if elapsed < self.min_chunk_size * 0.8:
+            if elapsed < self.min_chunk_size * 0.5:
                 return None
 
         self._iter_count += 1
@@ -176,7 +178,25 @@ class OnlineASRProcessor:
         # Build dynamic prompt from committed text
         prompt = self._build_prompt()
 
-        # Run ASR
+        # Run ASR — emergency cap if buffer grew far beyond max during
+        # a previous blocking inference. Normal trimming happens in
+        # _maybe_trim_buffer() after inference. This only triggers when
+        # the buffer is >2x the max (i.e., lots of audio accumulated
+        # while we were blocked).
+        max_samples = int(self.max_buffer_s * 2 * self.sample_rate)
+        if len(self.audio_buffer) > max_samples:
+            target_samples = int(self.max_buffer_s * self.sample_rate)
+            excess = len(self.audio_buffer) - target_samples
+            self.audio_buffer = self.audio_buffer[excess:]
+            self.buffer_time_offset += excess / self.sample_rate
+            # Reset HypothesisBuffer — word positions shifted
+            self.transcript_buffer.reset()
+            # Re-populate with committed words in retained region
+            for w in self.committed:
+                if w[0] >= self.buffer_time_offset - 0.2:
+                    self.transcript_buffer.committed_in_buffer.append(w)
+                    self.transcript_buffer.buffer.append(w)
+
         result = self.backend.transcribe(
             self.audio_buffer,
             language=self.language,
@@ -185,9 +205,27 @@ class OnlineASRProcessor:
         )
 
         inference_ms = int((time.time() - t0) * 1000)
+        self._last_inference_ms = inference_ms
 
         # Extract word timestamps
         raw_words = self._extract_words(result)
+
+        # Anti-hallucination layer 3: discard if word count is unreasonable
+        # Normal speech is ~3-5 words/sec; >12 words/sec is hallucination
+        max_reasonable_words = max(10, int(buffer_duration * 12))
+        if len(raw_words) > max_reasonable_words:
+            print(f"[WARN] Excessive words: {len(raw_words)} for {buffer_duration:.1f}s audio — discarding")
+            self._last_process_time = time.time()
+            confirmed_text = "".join(w[2] for w in self.committed)
+            unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
+            self.last_debug = {
+                "iter": self._iter_count, "buffer_s": round(buffer_duration, 1),
+                "inference_ms": inference_ms, "raw_text": "(word count discard)",
+                "confirmed_words": len(self.committed),
+                "unconfirmed_words": len(self.last_unconfirmed),
+                "newly_confirmed": 0, "trim": self._last_trim_info,
+            }
+            return (confirmed_text, unconfirmed_text)
 
         # Post-process: t2s conversion, hallucination filter
         raw_text = result.text
@@ -232,6 +270,7 @@ class OnlineASRProcessor:
             "confirmed_words": len(self.committed),
             "unconfirmed_words": len(self.last_unconfirmed),
             "newly_confirmed": len(newly_confirmed),
+            "trim": self._last_trim_info,
         }
 
         return (confirmed_text, unconfirmed_text)
@@ -270,6 +309,8 @@ class OnlineASRProcessor:
         self._committed_end_time = 0.0
         self._last_process_time = 0.0
         self._iter_count = 0
+        self._last_inference_ms = 0
+        self._last_trim_info = None
         self.last_debug = {}
 
     # ── Internal ─────────────────────────────────────────
@@ -302,11 +343,24 @@ class OnlineASRProcessor:
     def _maybe_trim_buffer(self):
         """Trim audio buffer if it exceeds max_buffer_s.
 
-        Strategy: find the timestamp of the last confirmed sentence boundary
-        and trim everything before it.
+        Uses adaptive threshold: if last inference was slow (>800ms),
+        trim more aggressively to keep inference fast. If inference was
+        very slow (>2s), force trim to 3s regardless.
         """
         buffer_duration = len(self.audio_buffer) / self.sample_rate
-        if buffer_duration <= self.max_buffer_s:
+
+        # Adaptive: if inference was slow, use a tighter limit
+        effective_max = self.max_buffer_s
+        if self._last_inference_ms > 2000:
+            # Very slow — emergency trim to 3s
+            effective_max = 3.0
+        elif self._last_inference_ms > 800:
+            # Moderately slow — trim to 60% of current buffer
+            effective_max = min(effective_max, buffer_duration * 0.6)
+            effective_max = max(effective_max, 3.0)  # never trim below 3s
+
+        if buffer_duration <= effective_max:
+            self._last_trim_info = None
             return
 
         # Find trim point: last confirmed word's end time, or half the buffer
@@ -325,7 +379,16 @@ class OnlineASRProcessor:
         trim_samples = min(trim_samples, len(self.audio_buffer))
 
         self.audio_buffer = self.audio_buffer[trim_samples:]
+        old_offset = self.buffer_time_offset
         self.buffer_time_offset = trim_time
+
+        self._last_trim_info = {
+            "trimmed": True,
+            "from_s": round(old_offset, 1),
+            "to_s": round(trim_time, 1),
+            "effective_max": round(effective_max, 1),
+            "retained_s": round(len(self.audio_buffer) / self.sample_rate, 1),
+        }
 
         # Reset HypothesisBuffer after trim — word positions change completely
         # so old buffer comparison would never match. Committed words are safe
