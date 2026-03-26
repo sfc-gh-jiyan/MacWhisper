@@ -446,3 +446,113 @@ class TestOnlineASRProcessor:
         # English punctuation should NOT appear
         assert "," not in confirmed, \
             f"English comma should be normalized, got '{confirmed}'"
+
+    def test_segment_close_no_echo_duplication(self):
+        """After segment_close(), re-transcribed words should not duplicate.
+
+        Bug: segment_close() reset HypothesisBuffer without pre-populating
+        committed_in_buffer, so post-close transcription re-confirmed words
+        that were already in self.committed → duplicated text.
+        """
+        from online_processor import OnlineASRProcessor
+
+        backend = MockASRBackend()
+        # Phase 1: two identical → confirm "你好世界"
+        backend.add_result("你好世界", [("你好", 0, 0.5), ("世界", 0.5, 1.0)])
+        backend.add_result("你好世界", [("你好", 0, 0.5), ("世界", 0.5, 1.0)])
+        # Phase 2: after segment_close, retained audio re-transcribes same words + new
+        backend.add_result("你好世界新内容", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("新内容", 1.0, 1.5)])
+        backend.add_result("你好世界新内容", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("新内容", 1.0, 1.5)])
+
+        proc = OnlineASRProcessor(backend=backend, vad=None,
+                                  min_chunk_size=0.5)
+        proc.throttle = False
+
+        # Phase 1: confirm initial words
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        r2 = proc.process_iter()
+        assert r2 is not None
+        assert "你好" in r2[0]
+
+        # Force close segment (simulates VAD speech end)
+        proc.segment_close()
+
+        # Phase 2: continue processing (retained audio)
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+
+        # Check: no duplicates in committed words
+        committed_texts = [w[2] for w in proc.committed]
+        from collections import Counter
+        counts = Counter(committed_texts)
+        for word, count in counts.items():
+            assert count == 1, f"Word '{word}' committed {count} times after segment_close (expected 1)"
+
+    def test_echo_detection_drops_echoed_words(self):
+        """Post-commit echo detection should drop words that repeat committed tail.
+
+        Even if HypothesisBuffer pre-population fails (e.g., shifted timestamps),
+        the echo detection safety net should catch duplicates.
+        """
+        from online_processor import OnlineASRProcessor
+
+        backend = MockASRBackend()
+        # Phase 1: confirm "今天天气很好"
+        backend.add_result("今天天气很好", [("今天", 0, 0.3), ("天气", 0.3, 0.6), ("很好", 0.6, 1.0)])
+        backend.add_result("今天天气很好", [("今天", 0, 0.3), ("天气", 0.3, 0.6), ("很好", 0.6, 1.0)])
+        # Phase 2: after segment_close, echo with SHIFTED timestamps (won't match pre-population)
+        backend.add_result("今天天气很好明天", [("今天", 0.1, 0.4), ("天气", 0.4, 0.7), ("很好", 0.7, 1.1), ("明天", 1.1, 1.5)])
+        backend.add_result("今天天气很好明天", [("今天", 0.1, 0.4), ("天气", 0.4, 0.7), ("很好", 0.7, 1.1), ("明天", 1.1, 1.5)])
+
+        proc = OnlineASRProcessor(backend=backend, vad=None,
+                                  min_chunk_size=0.5)
+        proc.throttle = False
+
+        # Phase 1
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+
+        # Close segment
+        proc.segment_close()
+
+        # Phase 2 — new content after echo
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        r4 = proc.process_iter()
+        assert r4 is not None
+
+        # "今天", "天气", "很好" should appear exactly once
+        committed_texts = [w[2] for w in proc.committed]
+        from collections import Counter
+        counts = Counter(committed_texts)
+        for word in ["今天", "天气", "很好"]:
+            assert counts.get(word, 0) == 1, \
+                f"Echo word '{word}' appeared {counts.get(word, 0)} times (expected 1)"
+        # "明天" is new — should be committed
+        assert "明天" in committed_texts, "New word '明天' should be committed"
+
+    def test_echo_detection_debug_field(self):
+        """last_debug should include echo_dropped count."""
+        from online_processor import OnlineASRProcessor
+
+        backend = MockASRBackend()
+        backend.add_result("测试", [("测试", 0, 0.5)])
+        backend.add_result("测试", [("测试", 0, 0.5)])
+
+        proc = OnlineASRProcessor(backend=backend, vad=None,
+                                  min_chunk_size=0.5)
+        proc.throttle = False
+
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+
+        assert "echo_dropped" in proc.last_debug

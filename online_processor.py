@@ -132,6 +132,7 @@ class OnlineASRProcessor:
         self.committed: list[tuple[float, float, str]] = []
         self.last_unconfirmed: list[tuple[float, float, str]] = []
         self._committed_end_time: float = 0.0  # end time of last committed word
+        self._last_committed_raw: str = ""  # for post-commit echo detection
 
         # Timing
         self._last_process_time: float = 0.0
@@ -245,6 +246,34 @@ class OnlineASRProcessor:
 
         # Flush confirmed words
         newly_confirmed = self.transcript_buffer.flush()
+
+        # Post-commit echo detection: if newly confirmed words just repeat
+        # the tail of the previous segment's committed text, skip them.
+        echo_dropped = 0
+        if newly_confirmed and self._last_committed_raw:
+            new_text = "".join(w[2] for w in newly_confirmed)
+            # Check if the new text is a substring of the committed tail
+            tail = self._last_committed_raw[-len(new_text) - 20:]
+            if new_text in tail:
+                echo_dropped = len(newly_confirmed)
+                newly_confirmed = []
+            else:
+                # Partial echo: drop leading words that match committed tail
+                kept = []
+                running = ""
+                for w in newly_confirmed:
+                    running += w[2]
+                    if running in tail:
+                        echo_dropped += 1
+                    else:
+                        kept.append(w)
+                newly_confirmed = kept
+            if echo_dropped:
+                # Clear echo state once non-echo content arrives
+                # (only clear after full echo is consumed)
+                if newly_confirmed:
+                    self._last_committed_raw = ""
+
         self.committed.extend(newly_confirmed)
         if newly_confirmed:
             self._committed_end_time = newly_confirmed[-1][1]  # end time
@@ -270,6 +299,7 @@ class OnlineASRProcessor:
             "confirmed_words": len(self.committed),
             "unconfirmed_words": len(self.last_unconfirmed),
             "newly_confirmed": len(newly_confirmed),
+            "echo_dropped": echo_dropped,
             "trim": self._last_trim_info,
         }
 
@@ -285,9 +315,20 @@ class OnlineASRProcessor:
         self.committed.extend(unconfirmed)
         full_text = "".join(w[2] for w in self.committed)
 
+        # Save committed text for post-commit echo detection
+        self._last_committed_raw = full_text
+
         # Reset for next segment (keep committed words for history)
         self.transcript_buffer.reset()
         self.last_unconfirmed = []
+
+        # Pre-populate HypothesisBuffer with committed words still in
+        # retained audio region — prevents re-confirmation of old words
+        # (same pattern as _maybe_trim_buffer)
+        for w in self.committed:
+            if w[0] >= self.buffer_time_offset - 0.2:
+                self.transcript_buffer.committed_in_buffer.append(w)
+                self.transcript_buffer.buffer.append(w)
 
         return full_text
 
@@ -307,6 +348,7 @@ class OnlineASRProcessor:
         self.committed = []
         self.last_unconfirmed = []
         self._committed_end_time = 0.0
+        self._last_committed_raw = ""
         self._last_process_time = 0.0
         self._iter_count = 0
         self._last_inference_ms = 0
