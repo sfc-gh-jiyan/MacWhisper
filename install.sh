@@ -82,8 +82,9 @@ os.dup2(_fd, 2)
 os.close(_fd)
 import certifi
 os.environ["SSL_CERT_FILE"] = certifi.where()
-os.environ["PYTHONPATH"] = _dir
-os.execv(sys.executable, [sys.executable, os.path.join(_dir, "app.py")])
+sys.path.insert(0, _dir)
+import runpy
+runpy.run_path(os.path.join(_dir, "app.py"), run_name="__main__")
 LAUNCHER
 chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
 
