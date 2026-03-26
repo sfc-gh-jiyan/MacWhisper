@@ -24,6 +24,59 @@ import datetime
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
+# ── NSBundle swizzle ───────────────────────────────────────
+# Homebrew's framework Python contains Python.app which hijacks
+# NSBundle.mainBundle(), making it return Python.app's bundle instead
+# of MacWhisper.app's.  This breaks LSUIElement (menu-bar-only mode)
+# and the status bar icon.  We fix it by swizzling mainBundle at the
+# ObjC runtime level before any AppKit code reads it.
+import ctypes, ctypes.util  # noqa: E401,E402
+_objc_lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+_swizzle_prevent_gc = None  # prevent GC of ctypes callback
+
+def _swizzle_main_bundle():
+    """Override NSBundle.mainBundle() to return MacWhisper.app's bundle."""
+    global _swizzle_prevent_gc
+    import objc
+    from Foundation import NSBundle as _NSB
+
+    _app_path = "/Applications/MacWhisper.app"
+    if not os.path.isdir(_app_path):
+        return  # not installed as .app — nothing to fix
+
+    _custom = _NSB.bundleWithPath_(_app_path)
+    if _custom is None:
+        return
+
+    lib = _objc_lib
+    for fn, res, args in [
+        ("objc_getClass",         ctypes.c_void_p, [ctypes.c_char_p]),
+        ("sel_registerName",      ctypes.c_void_p, [ctypes.c_char_p]),
+        ("class_getClassMethod",  ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p]),
+        ("method_setImplementation", ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p]),
+    ]:
+        f = getattr(lib, fn)
+        f.restype, f.argtypes = res, args
+
+    cls = lib.objc_getClass(b"NSBundle")
+    sel = lib.sel_registerName(b"mainBundle")
+    method = lib.class_getClassMethod(cls, sel)
+    if not method:
+        return
+
+    _ptr = objc.pyobjc_id(_custom)
+    _IMP = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _replacement(self, _cmd):
+        return _ptr
+
+    _swizzle_prevent_gc = _IMP(_replacement)
+    lib.method_setImplementation(method, _swizzle_prevent_gc)
+
+_swizzle_main_bundle()
+del _swizzle_main_bundle, _objc_lib  # one-shot; clean up namespace
+# ── end NSBundle swizzle ───────────────────────────────────
+
 from AppKit import NSApplication, NSImage
 from PyObjCTools import AppHelper
 
