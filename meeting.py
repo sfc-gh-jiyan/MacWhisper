@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import threading
 import time
@@ -21,6 +22,8 @@ from asr_backend import ASRBackend, WordTimestamp
 from online_processor import OnlineASRProcessor, SAMPLE_RATE
 from vad import VoiceActivityDetector
 from subtitle_export import export_srt, export_vtt
+
+logger = logging.getLogger(__name__)
 
 # Meeting data directory
 MEETINGS_DIR = os.path.join(os.path.expanduser("~/.macwhisper"), "meetings")
@@ -71,17 +74,30 @@ class MeetingSession:
         # Callback: on_update(confirmed_text, unconfirmed_text, segments)
         self._on_update = on_update
 
-        # Audio source (default: microphone, optionally + system audio)
-        if audio_source is None:
-            mic = MicrophoneSource(sample_rate=SAMPLE_RATE)
-            sources: list[AudioSource] = [mic]
-            if capture_system_audio:
-                sys_audio = SystemAudioSource(sample_rate=SAMPLE_RATE)
-                if sys_audio.available:
-                    sources.append(sys_audio)
-            self._audio_source = MixedAudioSource(sources)
-        else:
+        # Audio source setup
+        # Dual-channel mode: separate mic + sys sources for overlap handling
+        # Single-channel mode: mic only (or caller-supplied audio_source)
+        self._dual_channel = False
+        self._mic_source: AudioSource | None = None
+        self._sys_source: AudioSource | None = None
+        self._audio_source: AudioSource | None = None
+
+        if audio_source is not None:
+            # Caller-supplied source (e.g. tests with WavFileSource)
             self._audio_source = audio_source
+        elif capture_system_audio:
+            mic = MicrophoneSource(sample_rate=SAMPLE_RATE)
+            sys_audio = SystemAudioSource(sample_rate=SAMPLE_RATE)
+            if sys_audio.available:
+                # Dual-channel: keep sources separate for overlap priority
+                self._dual_channel = True
+                self._mic_source = mic
+                self._sys_source = sys_audio
+            else:
+                # System audio unavailable — fall back to mic only
+                self._audio_source = mic
+        else:
+            self._audio_source = MicrophoneSource(sample_rate=SAMPLE_RATE)
 
         # State
         self._state: str = "idle"  # idle, recording, paused, stopped
@@ -90,8 +106,9 @@ class MeetingSession:
         self._loop_done = threading.Event()
         self._loop_done.set()
 
-        # Audio frames collected from source callback
-        self._frames: list[np.ndarray] = []
+        # Audio frames — dual buffers for overlap handling
+        self._mic_frames: list[np.ndarray] = []
+        self._sys_frames: list[np.ndarray] = []
         self._frames_lock = threading.Lock()
 
         # Meeting data
@@ -125,7 +142,8 @@ class MeetingSession:
         self._session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self._meeting_start = time.time()
         self._segments = []
-        self._frames = []
+        self._mic_frames = []
+        self._sys_frames = []
 
         # Create processor
         self._processor = OnlineASRProcessor(
@@ -141,7 +159,7 @@ class MeetingSession:
             self.vad.reset()
 
         # Start audio capture
-        self._audio_source.start(self._on_audio_chunk)
+        self._start_sources()
 
         # Start processing loop
         self._loop_done.clear()
@@ -159,7 +177,7 @@ class MeetingSession:
                 return
             self._state = "paused"
 
-        self._audio_source.stop()
+        self._stop_sources()
 
         # Commit current segment
         if self._processor:
@@ -179,7 +197,7 @@ class MeetingSession:
         if self.vad:
             self.vad.reset()
 
-        self._audio_source.start(self._on_audio_chunk)
+        self._start_sources()
         print("[MEETING] Resumed")
 
     def stop(self) -> str:
@@ -190,7 +208,7 @@ class MeetingSession:
             self._state = "stopped"
 
         # Stop audio
-        self._audio_source.stop()
+        self._stop_sources()
 
         # Wait for loop to finish
         self._loop_done.wait(timeout=5)
@@ -252,12 +270,35 @@ class MeetingSession:
             f.write(content)
         return path
 
-    # ── Internal: audio callback ─────────────────────────────
+    # ── Internal: audio source helpers ─────────────────────────
 
-    def _on_audio_chunk(self, chunk: np.ndarray) -> None:
-        """Called by AudioSource when new audio arrives."""
+    def _start_sources(self) -> None:
+        """Start audio capture source(s)."""
+        if self._dual_channel:
+            self._mic_source.start(self._on_mic_chunk)
+            self._sys_source.start(self._on_sys_chunk)
+        else:
+            self._audio_source.start(self._on_mic_chunk)
+
+    def _stop_sources(self) -> None:
+        """Stop audio capture source(s)."""
+        if self._dual_channel:
+            self._mic_source.stop()
+            self._sys_source.stop()
+        else:
+            self._audio_source.stop()
+
+    # ── Internal: audio callbacks ────────────────────────────
+
+    def _on_mic_chunk(self, chunk: np.ndarray) -> None:
+        """Called by mic AudioSource when new audio arrives."""
         with self._frames_lock:
-            self._frames.append(chunk)
+            self._mic_frames.append(chunk)
+
+    def _on_sys_chunk(self, chunk: np.ndarray) -> None:
+        """Called by system AudioSource when new audio arrives."""
+        with self._frames_lock:
+            self._sys_frames.append(chunk)
 
     # ── Internal: main processing loop ───────────────────────
 
@@ -271,8 +312,15 @@ class MeetingSession:
             self._loop_done.set()
 
     def _meeting_loop_impl(self) -> None:
-        """Inner meeting loop — feeds audio to processor, handles VAD."""
-        last_frame_idx = 0
+        """Inner meeting loop — feeds audio to processor, handles VAD.
+
+        In dual-channel mode, compares mic and system audio RMS energy
+        each iteration.  When both sources have data (overlap), only the
+        louder source is fed to Whisper; the quieter one is discarded.
+        Tie-breaks favour the microphone (local speaker priority).
+        """
+        last_mic_idx = 0
+        last_sys_idx = 0
         vad_skip_count = 0
 
         while self.state == "recording":
@@ -281,22 +329,45 @@ class MeetingSession:
             if self.state != "recording":
                 break
 
-            # Collect new frames
+            # Collect new frames from both buffers
             with self._frames_lock:
-                n = len(self._frames)
-                if n <= last_frame_idx:
-                    continue
-                new_frames = self._frames[last_frame_idx:n]
-                last_frame_idx = n
+                mic_n = len(self._mic_frames)
+                sys_n = len(self._sys_frames)
+                mic_new = self._mic_frames[last_mic_idx:mic_n] if mic_n > last_mic_idx else []
+                sys_new = self._sys_frames[last_sys_idx:sys_n] if sys_n > last_sys_idx else []
+                last_mic_idx = mic_n
+                last_sys_idx = sys_n
+
+            if not mic_new and not sys_new:
+                continue
+
+            # Build chunks from each source
+            mic_chunk = np.concatenate(mic_new, axis=0).squeeze() if mic_new else None
+            sys_chunk = np.concatenate(sys_new, axis=0).squeeze() if sys_new else None
+
+            # Overlap priority selection
+            if mic_chunk is not None and sys_chunk is not None:
+                mic_rms = np.sqrt(np.mean(mic_chunk.astype(np.float32) ** 2))
+                sys_rms = np.sqrt(np.mean(sys_chunk.astype(np.float32) ** 2))
+                if sys_rms > mic_rms:
+                    chosen = sys_chunk
+                    logger.debug("overlap: sys wins (mic=%.1f sys=%.1f)", mic_rms, sys_rms)
+                else:
+                    # mic wins on tie (local speaker priority)
+                    chosen = mic_chunk
+                    logger.debug("overlap: mic wins (mic=%.1f sys=%.1f)", mic_rms, sys_rms)
+            elif mic_chunk is not None:
+                chosen = mic_chunk
+            else:
+                chosen = sys_chunk
 
             # Convert and feed to processor
-            audio_chunk = np.concatenate(new_frames, axis=0).squeeze()
-            audio_float = audio_chunk.astype(np.float32) / 32768.0
+            audio_float = chosen.astype(np.float32) / 32768.0
             self._processor.insert_audio_chunk(audio_float)
 
             # VAD processing
             if self.vad:
-                self.vad.process_chunk(audio_chunk)
+                self.vad.process_chunk(chosen)
 
                 # Extended silence -> paragraph break (segment commit)
                 if self.vad.is_extended_silence(self.extended_silence_ms):
@@ -311,7 +382,7 @@ class MeetingSession:
                         continue
 
                 # VAD pre-filter: skip transcription during pure silence
-                if not self.vad.is_speech(audio_chunk):
+                if not self.vad.is_speech(chosen):
                     vad_skip_count += 1
                     if vad_skip_count % 20 == 0:
                         print(f"[MEETING] VAD skip (silence): {vad_skip_count} chunks")

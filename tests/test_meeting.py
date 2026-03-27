@@ -123,7 +123,10 @@ class TestMixedAudioSource:
         mixed = MixedAudioSource([mock])
 
         mixed.start(lambda chunk: received.append(chunk))
-        time.sleep(0.15)
+        # Condition-based wait instead of fixed sleep (fixes flaky CI runs)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(received) == 0:
+            time.sleep(0.05)
         mixed.stop()
 
         assert len(received) > 0
@@ -394,25 +397,25 @@ class TestSystemAudioSource:
 class TestMeetingSessionWithSystemAudio:
 
     def test_capture_system_audio_flag(self):
-        """MeetingSession with capture_system_audio creates SystemAudioSource."""
+        """MeetingSession with capture_system_audio uses dual-channel mode."""
         backend = MockBackend()
         session = MeetingSession(
             backend=backend,
             capture_system_audio=True,
         )
-        # Should have a MixedAudioSource
-        assert isinstance(session._audio_source, MixedAudioSource)
-        sources = session._audio_source._sources
-        # Always has at least MicrophoneSource
-        assert any(isinstance(s, MicrophoneSource) for s in sources)
-        # If helper binary is available, SystemAudioSource should be present
-        sys_sources = [s for s in sources if isinstance(s, SystemAudioSource)]
-        if sys_sources:
-            assert sys_sources[0].available
+        # Should have separate mic and sys sources (dual-channel)
+        # or fall back to single source if SystemAudioHelper unavailable
+        if session._dual_channel:
+            assert isinstance(session._mic_source, MicrophoneSource)
+            assert isinstance(session._sys_source, SystemAudioSource)
+            assert session._sys_source.available
+        else:
+            # Helper not available — fell back to mic-only
+            assert isinstance(session._audio_source, MicrophoneSource)
 
     def test_no_system_audio_by_default(self):
         """MeetingSession without flag should not have SystemAudioSource."""
         backend = MockBackend()
         session = MeetingSession(backend=backend)
-        sources = session._audio_source._sources
-        assert not any(isinstance(s, SystemAudioSource) for s in sources)
+        assert not session._dual_channel
+        assert isinstance(session._audio_source, MicrophoneSource)
