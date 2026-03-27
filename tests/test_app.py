@@ -144,7 +144,7 @@ def test_icon_states():
     import app
     source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     assert '🟠' in source
-    assert '🔴' not in source
+    assert '🔴' in source   # Meeting Mode recording icon
     assert '💬' in source
     assert '🎙' in source
     assert '🌐' in source
