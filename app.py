@@ -12,6 +12,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
 __version__ = "0.5.2"
 
 import json
+import logging
 import threading
 import os
 import time
@@ -104,6 +105,9 @@ from vad import VoiceActivityDetector
 from online_processor import OnlineASRProcessor
 from overlay import create_overlay, update_overlay, destroy_overlay
 from subtitle_export import export_srt, save_enhanced_history
+from meeting import MeetingSession
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────
 SAMPLE_RATE = 16000
@@ -228,6 +232,9 @@ class TranscriberApp(rumps.App):
         self.live_mode      = cfg.get("live_mode", False)
         self.save_audio     = cfg.get("save_audio", False)
 
+        # Meeting mode state
+        self._meeting_session: MeetingSession | None = None
+
         idle_icon = "🌐" if self.translate_mode else "🎙"
         super().__init__(idle_icon, quit_button="Quit")
 
@@ -251,6 +258,8 @@ class TranscriberApp(rumps.App):
         save_audio_label = "On" if self.save_audio else "Off"
         self.item_save_audio = rumps.MenuItem(f"{save_audio_prefix} Save Audio: {save_audio_label}", callback=self._toggle_save_audio)
 
+        self.item_meeting = rumps.MenuItem("   Meeting Mode: Off", callback=self._toggle_meeting_mode)
+
         self.menu = [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -260,10 +269,12 @@ class TranscriberApp(rumps.App):
             rumps.separator,
             self.item_live,
             self.item_save_audio,
+            self.item_meeting,
             rumps.separator,
             rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
             rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
             rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
+            rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
             rumps.MenuItem("Hold Right Option to record"),
             rumps.separator,
         ]
@@ -382,6 +393,86 @@ class TranscriberApp(rumps.App):
         self._save_config()
         print(f"[INFO] Save audio {'enabled' if self.save_audio else 'disabled'}")
 
+    def _toggle_meeting_mode(self, _):
+        """Start or stop Meeting Mode."""
+        if self._meeting_session and self._meeting_session.is_recording:
+            self._stop_meeting()
+        else:
+            self._start_meeting()
+
+    def _start_meeting(self):
+        """Start a new meeting recording session."""
+        if self.recording:
+            print("[WARN] Cannot start meeting while hold-to-record is active")
+            return
+
+        # Wait for backend
+        if not self._backend_ready.wait(timeout=15):
+            print("[WARN] Backend warmup timed out for meeting")
+            self._backend = MLXWhisperBackend(model_repo=self.current_model)
+
+        self._meeting_session = MeetingSession(
+            backend=self._backend,
+            vad=self._vad if self._vad_available else None,
+            min_chunk_size=MIN_CHUNK_SIZE,
+            max_buffer_s=MAX_BUFFER_S,
+            language=None,
+            on_update=self._meeting_overlay_update,
+            capture_system_audio=True,
+        )
+
+        # Show overlay
+        AppHelper.callAfter(self._create_overlay)
+
+        self._meeting_session.start()
+        self.title = "🔴"
+        self.item_meeting.title = "✅ Meeting Mode: Recording"
+        self._set_status("Meeting recording...")
+        print("[INFO] Meeting Mode started")
+
+    def _stop_meeting(self):
+        """Stop the current meeting session."""
+        if not self._meeting_session:
+            return
+
+        transcript = self._meeting_session.stop()
+
+        # Destroy overlay
+        if self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
+
+        self.title = self._idle_icon
+        self.item_meeting.title = "   Meeting Mode: Off"
+
+        seg_count = len(self._meeting_session.segments)
+        self._set_status(f"Meeting saved ({seg_count} segments)")
+        print(f"[INFO] Meeting Mode stopped — {seg_count} segments")
+
+        # Copy transcript to clipboard
+        if transcript:
+            pyperclip.copy(transcript)
+            print("[INFO] Meeting transcript copied to clipboard")
+
+        self._meeting_session = None
+
+    def _meeting_overlay_update(self, confirmed, unconfirmed, segments):
+        """Callback from MeetingSession to update overlay."""
+        # Prepend committed segment text for context
+        seg_text = "\n".join(s.text for s in segments[-2:]) if segments else ""
+        if seg_text:
+            full_confirmed = seg_text + "\n" + confirmed
+        else:
+            full_confirmed = confirmed
+
+        overlay_key = (full_confirmed, unconfirmed)
+        if overlay_key != self._last_overlay_key and self._overlay_panel:
+            self._last_overlay_key = overlay_key
+            AppHelper.callAfter(
+                lambda c=full_confirmed, u=unconfirmed: update_overlay(
+                    self._overlay_panel, self._overlay_text, c, u
+                )
+            )
+
     def _cycle_model(self):
         current_idx = next(
             i for i, v in enumerate(MODEL_OPTIONS.values()) if v == self.current_model
@@ -443,8 +534,14 @@ class TranscriberApp(rumps.App):
             if vk == 1:   # S key
                 self._toggle_live_mode(None)
                 return
+            if vk == 15:  # R key
+                self._toggle_meeting_mode(None)
+                return
 
         if key == keyboard.Key.alt_r and not self.recording:
+            # Block hold-to-record during active meeting
+            if self._meeting_session and self._meeting_session.is_recording:
+                return
             threading.Thread(target=self._start_recording, daemon=True).start()
 
     def _on_release(self, key):
@@ -511,7 +608,7 @@ class TranscriberApp(rumps.App):
                 self.stream.close()
                 self.stream = None
         except Exception as e:
-            print(f"[ERROR] Stream cleanup failed: {e}")
+            logger.error("Stream cleanup failed: %s", e)
 
         # ── 2. Destroy overlay IMMEDIATELY so user sees instant response ──
         if self._overlay_panel:
@@ -522,14 +619,14 @@ class TranscriberApp(rumps.App):
         # The live loop checks self.recording and will exit after its current
         # inference completes; the final transcription runs in a queue anyway.
         if not self._live_loop_done.wait(timeout=3):
-            print("[WARN] Live loop still running (mid-inference) — proceeding")
+            logger.warning("Live loop still running (mid-inference) — proceeding")
 
         # Force-confirm remaining words from processor
         try:
             if self._processor:
                 self._processor.segment_close()
         except Exception as e:
-            print(f"[ERROR] Processor cleanup failed: {e}")
+            logger.error("Processor cleanup failed: %s", e)
 
         if not self.frames:
             self.title = self._idle_icon
@@ -558,7 +655,7 @@ class TranscriberApp(rumps.App):
         try:
             self._live_loop_impl(proc)
         except Exception as e:
-            print(f"[ERROR] Live loop crashed: {e}")
+            logger.error("Live loop crashed: %s", e, exc_info=True)
         finally:
             self._live_loop_done.set()
 
@@ -597,7 +694,7 @@ class TranscriberApp(rumps.App):
                 if self._vad.is_speech_end() and seg_duration > 5.0:
                     segment_text = proc.segment_close()
                     if segment_text:
-                        print(f"[INFO] VAD segment committed: {len(segment_text)} chars")
+                        logger.info("VAD segment committed: %d chars", len(segment_text))
                         self._log_subtitle(segment_text, seg_duration)
                     self._vad.reset()
 
@@ -626,12 +723,13 @@ class TranscriberApp(rumps.App):
             if proc.last_debug:
                 debug = proc.last_debug
                 conf_tail = confirmed[-40:] if confirmed else "(empty)"
-                print(f"[LIVE] iter={debug.get('iter', '?')} "
-                      f"buf={debug.get('buffer_s', '?')}s "
-                      f"inf={debug.get('inference_ms', '?')}ms "
-                      f"conf={debug.get('confirmed_words', 0)} "
-                      f"new={debug.get('newly_confirmed', 0)} "
-                      f"| {conf_tail}")
+                logger.debug(
+                    "LIVE iter=%s buf=%ss inf=%sms conf=%s new=%s | %s",
+                    debug.get('iter', '?'), debug.get('buffer_s', '?'),
+                    debug.get('inference_ms', '?'),
+                    debug.get('confirmed_words', 0),
+                    debug.get('newly_confirmed', 0), conf_tail,
+                )
 
             # Update overlay (dual-color: white confirmed, gray unconfirmed)
             overlay_key = (confirmed, unconfirmed)
@@ -701,7 +799,7 @@ class TranscriberApp(rumps.App):
         # (concurrent Metal inferences cause assertion failures / crashes)
         done_event = getattr(self, "_live_loop_done", None)
         if done_event and not done_event.wait(timeout=15):
-            print("[WARN] Live loop did not exit in time — proceeding anyway")
+            logger.warning("Live loop did not exit in time — proceeding anyway")
 
         audio = np.concatenate(frames, axis=0).squeeze()
         audio_float = audio.astype(np.float32) / 32768.0

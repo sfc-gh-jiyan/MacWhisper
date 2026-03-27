@@ -15,10 +15,13 @@ This gives us:
 
 from __future__ import annotations
 
+import logging
 import time
 import numpy as np
 
 from asr_backend import ASRBackend, TranscriptionResult
+
+logger = logging.getLogger(__name__)
 from text_utils import (
     BILINGUAL_PROMPT, convert_t2s, normalize_punctuation,
     strip_trailing_repetition, hallucination_reason,
@@ -211,11 +214,22 @@ class OnlineASRProcessor:
         # Extract word timestamps
         raw_words = self._extract_words(result)
 
+        # Log inference results for debugging language/translation issues
+        logger.debug(
+            "iter=%d buf=%.1fs inf=%dms lang=%s words=%d raw=%.80s",
+            self._iter_count, buffer_duration, inference_ms,
+            result.language, len(raw_words),
+            result.text.replace("\n", "\\n")[:80],
+        )
+
         # Anti-hallucination layer 3: discard if word count is unreasonable
         # Normal speech is ~3-5 words/sec; >12 words/sec is hallucination
         max_reasonable_words = max(10, int(buffer_duration * 12))
         if len(raw_words) > max_reasonable_words:
-            print(f"[WARN] Excessive words: {len(raw_words)} for {buffer_duration:.1f}s audio — discarding")
+            logger.warning(
+                "Excessive words: %d for %.1fs audio — discarding",
+                len(raw_words), buffer_duration,
+            )
             self._last_process_time = time.time()
             confirmed_text = "".join(w[2] for w in self.committed)
             unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
@@ -315,6 +329,12 @@ class OnlineASRProcessor:
         self.committed.extend(unconfirmed)
         full_text = "".join(w[2] for w in self.committed)
 
+        logger.debug(
+            "segment_close: force_confirmed=%d total_committed=%d text_len=%d text=%.80s",
+            len(unconfirmed), len(self.committed), len(full_text),
+            full_text.replace("\n", "\\n")[:80],
+        )
+
         # Save committed text for post-commit echo detection
         self._last_committed_raw = full_text
 
@@ -363,8 +383,15 @@ class OnlineASRProcessor:
         if committed_text:
             # Use last 200 chars of committed text as context
             suffix = committed_text[-200:]
-            return suffix + BILINGUAL_PROMPT
-        return BILINGUAL_PROMPT
+            prompt = suffix + BILINGUAL_PROMPT
+        else:
+            prompt = BILINGUAL_PROMPT
+        logger.debug(
+            "prompt len=%d committed_chars=%d prompt=%.120s",
+            len(prompt), len(committed_text),
+            prompt.replace("\n", "\\n")[:120],
+        )
+        return prompt
 
     def _extract_words(self, result: TranscriptionResult) -> list[tuple[float, float, str]]:
         """Extract (start, end, word) tuples from transcription result."""
@@ -374,6 +401,12 @@ class OnlineASRProcessor:
                 text = normalize_punctuation(convert_t2s(w.word))
                 if text.strip():
                     words.append((w.start, w.end, text))
+                elif w.word.strip():
+                    # Word became empty after normalization — log for diagnosis
+                    logger.debug("Dropped word after normalize: %r", w.word)
+            # Log segment-level newlines or suspicious content
+            if "\n" in seg.text:
+                logger.debug("Segment contains newline: %r", seg.text[:60])
         # Fallback: if no word timestamps, treat entire text as one "word"
         if not words and result.text.strip():
             text = normalize_punctuation(convert_t2s(result.text.strip()))
