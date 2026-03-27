@@ -72,9 +72,22 @@ class VoiceActivityDetector:
             audio_f32 = audio_chunk.astype(np.float32)
 
         audio_f32 = audio_f32.squeeze()
-        tensor = torch.from_numpy(audio_f32)
-        confidence = self._model(tensor, self.sample_rate).item()
-        return confidence >= self.threshold
+
+        # Silero VAD requires exactly 512 samples at 16kHz.
+        # Split the chunk into 512-sample windows; return True if any has speech.
+        window = 512
+        if len(audio_f32) < window:
+            # Pad short chunks with zeros
+            padded = np.zeros(window, dtype=np.float32)
+            padded[:len(audio_f32)] = audio_f32
+            audio_f32 = padded
+
+        for start in range(0, len(audio_f32) - window + 1, window):
+            tensor = torch.from_numpy(audio_f32[start:start + window])
+            confidence = self._model(tensor, self.sample_rate).item()
+            if confidence >= self.threshold:
+                return True
+        return False
 
     def _rms_is_speech(self, audio_chunk: np.ndarray,
                        threshold: float) -> bool:
@@ -111,6 +124,20 @@ class VoiceActivityDetector:
         """Return True if enough silence has accumulated to mark speech end."""
         silence_ms = int(self._silence_samples * 1000 / self.sample_rate)
         return silence_ms >= self.min_silence_ms
+
+    def is_extended_silence(self, threshold_ms: int = 2000) -> bool:
+        """Return True if silence exceeds a longer threshold.
+
+        Used by Meeting Mode for paragraph breaks (longer than
+        is_speech_end which is for segment commits at ~800ms).
+        """
+        silence_ms = int(self._silence_samples * 1000 / self.sample_rate)
+        return silence_ms >= threshold_ms
+
+    def is_active_speech(self) -> bool:
+        """Return True if continuous speech meets the minimum speech threshold."""
+        speech_ms = int(self._speech_samples * 1000 / self.sample_rate)
+        return speech_ms >= self.min_speech_ms
 
     def reset(self):
         """Reset internal state for a new recording session."""
