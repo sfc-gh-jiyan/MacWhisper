@@ -1,0 +1,100 @@
+[
+  {
+    "name": "integration_alternating",
+    "description": "Quick integration: two short WAVs played sequentially (no overlap)",
+    "mic_wav": "20260323_232421.wav",
+    "system_wav": "20260324_070721.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 12,
+    "tier": "integration"
+  },
+  {
+    "name": "integration_overlapping",
+    "description": "Quick integration: two short WAVs with 5s overlap",
+    "mic_wav": "20260324_071124.wav",
+    "system_wav": "20260324_072124.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 8,
+    "tier": "integration"
+  },
+  {
+    "name": "e2e_alternating",
+    "description": "E2E quality: two long WAVs played sequentially (mic finishes before system starts)",
+    "mic_wav": "20260322_183751.wav",
+    "system_wav": "20260323_232537.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 37,
+    "mode": "alternating",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_overlapping",
+    "description": "E2E quality: two long WAVs with significant time overlap",
+    "mic_wav": "20260322_180525.wav",
+    "system_wav": "20260322_183751.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 15,
+    "mode": "overlapping",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_gap",
+    "description": "E2E quality: 10s silence gap between mic and system audio — tests segment splitting",
+    "mic_wav": "20260323_232537.wav",
+    "system_wav": "20260323_232653.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 43,
+    "mode": "gap",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_english",
+    "description": "E2E quality: two pure-English WAVs, alternating — tests English-only recognition",
+    "mic_wav": "20260324_100933.wav",
+    "system_wav": "20260324_140941.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 83,
+    "mode": "alternating",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_mixed_lang",
+    "description": "E2E quality: Chinese mic + English system — tests mixed-language recognition",
+    "mic_wav": "20260322_183751.wav",
+    "system_wav": "20260324_140941.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 37,
+    "mode": "alternating",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_long_overlap",
+    "description": "E2E stress: two 80s+ WAVs with heavy overlap — pressure test for concurrent speech",
+    "mic_wav": "20260322_212421.wav",
+    "system_wav": "20260323_233833.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 10,
+    "mode": "overlapping",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_short_burst",
+    "description": "E2E quality: two ~32s WAVs alternating quickly — tests fast segment switching",
+    "mic_wav": "20260323_232653.wav",
+    "system_wav": "20260324_142130.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 33,
+    "mode": "alternating",
+    "tier": "e2e"
+  },
+  {
+    "name": "e2e_english_overlap",
+    "description": "E2E quality: two English WAVs overlapping — tests English concurrent speech",
+    "mic_wav": "20260324_152017.wav",
+    "system_wav": "20260324_222856.wav",
+    "mic_offset_s": 0,
+    "system_offset_s": 20,
+    "mode": "overlapping",
+    "tier": "e2e"
+  }
+]

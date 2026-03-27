@@ -28,6 +28,17 @@ from asr_backend import MLXWhisperBackend
 from online_processor import OnlineASRProcessor, SAMPLE_RATE
 from text_utils import OVERLAP_STRIP_CHARS
 
+# Shared metrics (canonical implementations live in eval_metrics.py)
+from tests.eval_metrics import (
+    normalize as _normalize,
+    tokenize_mixed as _tokenize_mixed,
+    split_sentences as _split_sentences,
+    char_overlap as _char_overlap,
+    compute_wer as _compute_wer,
+    compute_recall as _compute_recall,
+    tier as _tier,
+)
+
 # ── Constants ─────────────────────────────────────────────────
 
 BLOCKSIZE = 1024
@@ -147,92 +158,9 @@ def generate_offline_baseline(audio_float, model=DEFAULT_MODEL):
 
 # ── Evaluation ────────────────────────────────────────────────
 
-def _split_sentences(text):
-    """Split text into non-empty sentences."""
-    parts = re.split(r'(?<=[。！？.!?\n])', text)
-    return [s.strip() for s in parts if len(s.strip()) > 2]
 
-
-def _normalize(text):
-    """Lowercase, strip punctuation/space for fuzzy comparison."""
-    return ''.join(
-        ch.lower() for ch in text
-        if ch not in OVERLAP_STRIP_CHARS
-    )
-
-
-def _tokenize_mixed(text):
-    """Tokenize mixed CJK/Latin text: CJK chars individually, Latin words as tokens."""
-    tokens = []
-    current_latin = []
-    for ch in text.lower():
-        if ch in OVERLAP_STRIP_CHARS:
-            if current_latin:
-                tokens.append(''.join(current_latin))
-                current_latin = []
-            continue
-        # CJK character ranges
-        if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf':
-            if current_latin:
-                tokens.append(''.join(current_latin))
-                current_latin = []
-            tokens.append(ch)
-        else:
-            current_latin.append(ch)
-    if current_latin:
-        tokens.append(''.join(current_latin))
-    return tokens
-
-
-def _char_overlap(display, ground_truth):
-    """Character-level overlap via LCS: ratio of GT chars found in display."""
-    d = _normalize(display)
-    g = _normalize(ground_truth)
-    if not g:
-        return 1.0
-    m, n = len(g), len(d)
-    prev = [0] * (n + 1)
-    for i in range(1, m + 1):
-        curr = [0] * (n + 1)
-        for j in range(1, n + 1):
-            if g[i - 1] == d[j - 1]:
-                curr[j] = prev[j - 1] + 1
-            else:
-                curr[j] = max(prev[j], curr[j - 1])
-        prev = curr
-    return round(prev[n] / m, 3)
-
-
-def _compute_wer(hypothesis, reference):
-    """Compute WER using jiwer. Returns WER as float (0.0 = perfect)."""
-    try:
-        import jiwer
-    except ImportError:
-        return -1.0  # jiwer not installed
-
-    # Tokenize for mixed CJK/Latin
-    ref_tokens = _tokenize_mixed(reference)
-    hyp_tokens = _tokenize_mixed(hypothesis)
-
-    if not ref_tokens:
-        return 0.0 if not hyp_tokens else 1.0
-
-    # jiwer expects space-separated strings
-    ref_str = ' '.join(ref_tokens)
-    hyp_str = ' '.join(hyp_tokens)
-
-    wer = jiwer.wer(ref_str, hyp_str)
-    return round(wer, 3)
-
-
-def _compute_recall(hypothesis, reference):
-    """Word-level recall: fraction of reference tokens found in hypothesis."""
-    ref_tokens = _tokenize_mixed(reference)
-    hyp_tokens = set(_tokenize_mixed(hypothesis))
-    if not ref_tokens:
-        return 1.0
-    found = sum(1 for t in ref_tokens if t in hyp_tokens)
-    return round(found / len(ref_tokens), 3)
+# NOTE: _split_sentences, _normalize, _tokenize_mixed, _char_overlap,
+# _compute_wer, _compute_recall, _tier are now imported from eval_metrics.py
 
 
 def _compute_avg_latency(snapshots):
@@ -277,27 +205,6 @@ def _compute_avg_latency(snapshots):
     p95_idx = min(int(len(latencies) * 0.95), len(latencies) - 1)
     return round(avg, 1), round(latencies[p95_idx], 1)
 
-
-def _tier(value, fail_thresh, warn_thresh, pass_thresh, higher_is_better=True):
-    """Classify a metric into FAIL/WARN/PASS/EXCELLENT tier."""
-    if higher_is_better:
-        if value < fail_thresh:
-            return "FAIL"
-        elif value < warn_thresh:
-            return "WARN"
-        elif value < pass_thresh:
-            return "PASS"
-        else:
-            return "EXCELLENT"
-    else:  # lower is better (e.g., WER, latency)
-        if value > fail_thresh:
-            return "FAIL"
-        elif value > warn_thresh:
-            return "WARN"
-        elif value > pass_thresh:
-            return "PASS"
-        else:
-            return "EXCELLENT"
 
 
 def evaluate(snapshots, final_confirmed, ground_truth, offline_baseline=None):
