@@ -218,6 +218,7 @@ class TranscriberApp(rumps.App):
             "current_model": self.current_model,
             "live_mode": self.live_mode,
             "save_audio": self.save_audio,
+            "log_level": self.log_level,
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f)
@@ -231,6 +232,7 @@ class TranscriberApp(rumps.App):
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Small (Fast)"])
         self.live_mode      = cfg.get("live_mode", False)
         self.save_audio     = cfg.get("save_audio", False)
+        self.log_level      = cfg.get("log_level", "WARNING")
 
         # Meeting mode state
         self._meeting_session: MeetingSession | None = None
@@ -930,6 +932,30 @@ def _check_audio_device():
 
 
 if __name__ == "__main__":
+    # Read log_level from config (before app init, since basicConfig must be early)
+    _cfg_log_level = "WARNING"
+    try:
+        with open(CONFIG_PATH) as _f:
+            _cfg_log_level = json.load(_f).get("log_level", "WARNING")
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    _file_level = getattr(logging, _cfg_log_level.upper(), logging.WARNING)
+
+    # Configure logging — configurable level to file, WARNING to console
+    _log_file = os.path.join(LOG_DIR, "macwhisper.log")
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logging.basicConfig(
+        level=_file_level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[
+            logging.FileHandler(_log_file, encoding="utf-8"),
+            logging.StreamHandler(),  # WARNING+ to console (default)
+        ],
+    )
+    # Console handler only shows WARNING+
+    logging.getLogger().handlers[-1].setLevel(logging.WARNING)
+
     _check_audio_device()
     try:
         TranscriberApp().run()

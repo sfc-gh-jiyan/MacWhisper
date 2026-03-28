@@ -84,6 +84,7 @@ def test_config_save(tmp_config):
     inst.current_model = "mlx-community/whisper-medium-mlx"
     inst.live_mode = True
     inst.save_audio = False
+    inst.log_level = "WARNING"
     inst._save_config()
     saved = json.loads(tmp_config.read_text())
     assert saved["translate_mode"] is True
