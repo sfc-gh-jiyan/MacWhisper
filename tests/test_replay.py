@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import wave
 
@@ -76,7 +77,17 @@ def load_wav_as_float32(wav_path):
 
 def replay_wav(audio_float, sample_rate, model=DEFAULT_MODEL,
                min_chunk_size=MIN_CHUNK_SIZE, max_buffer_s=MAX_BUFFER_S):
-    """Feed audio through OnlineASRProcessor at real-time pace.
+    """Feed audio through OnlineASRProcessor at real-time pace (dual-thread).
+
+    Architecture mirrors app.py's live subtitle loop:
+      Thread A (feeder): pushes 1024-sample chunks at real-time pace into a
+        shared frame list — same role as sd.InputStream callback in app.py.
+      Thread B (main): polls for new frames every 50ms, batch-feeds them to
+        the processor, then calls process_iter() — same as _live_loop_impl.
+
+    This ensures buffer dynamics, trim timing, and inference frequency
+    match real usage (unlike the old single-thread approach where inference
+    blocked audio feeding).
 
     Returns:
         snapshots: list of dicts with confirmed/unconfirmed text at each iteration
@@ -101,25 +112,63 @@ def replay_wav(audio_float, sample_rate, model=DEFAULT_MODEL,
         language=None,
     )
 
-    snapshots = []
+    # Shared frame buffer (mirrors app.py's self.frames)
+    frames = []
+    frames_lock = threading.Lock()
+    feeder_done = threading.Event()
+
     chunk_samples = BLOCKSIZE
     total_samples = len(audio_float)
-    pos = 0
 
+    # ── Feeder thread: pushes audio at real-time pace ──
+    def feeder():
+        pos = 0
+        while pos < total_samples:
+            end = min(pos + chunk_samples, total_samples)
+            chunk = audio_float[pos:end]
+            with frames_lock:
+                frames.append(chunk)
+            pos = end
+            time.sleep(FRAME_DURATION)
+        feeder_done.set()
+
+    # ── Main processing loop (mirrors app.py _live_loop_impl) ──
+    snapshots = []
     t0 = time.time()
 
-    while pos < total_samples:
-        # Feed one chunk
-        end = min(pos + chunk_samples, total_samples)
-        chunk = audio_float[pos:end]
-        proc.insert_audio_chunk(chunk)
-        pos = end
+    feeder_thread = threading.Thread(target=feeder, daemon=True)
+    feeder_thread.start()
 
-        # Run process_iter on each chunk (processor's own throttle handles timing)
+    last_frame_idx = 0
+
+    while True:
+        # Brief yield — processor's internal throttle handles timing
+        # (matches app.py's sleep(0.05) in _live_loop_impl)
+        time.sleep(0.05)
+
+        # Check for new frames
+        with frames_lock:
+            n = len(frames)
+        if n <= last_frame_idx:
+            if feeder_done.is_set():
+                break
+            continue
+
+        # Batch-collect new frames (mirrors app.py lines 684-690)
+        with frames_lock:
+            new_frames = frames[last_frame_idx:n]
+        last_frame_idx = n
+
+        # Feed all new frames to processor at once
+        audio_chunk = np.concatenate(new_frames, axis=0)
+        proc.insert_audio_chunk(audio_chunk)
+
+        # Run one processing iteration (LocalAgreement)
         result = proc.process_iter()
         if result is not None:
             confirmed, unconfirmed = result
-            audio_s = pos / sample_rate
+            # audio_s: how much audio has been fed so far
+            audio_s = last_frame_idx * chunk_samples / sample_rate
             snapshots.append({
                 "audio_s": round(audio_s, 2),
                 "wall_s": round(time.time() - t0, 2),
@@ -130,11 +179,23 @@ def replay_wav(audio_float, sample_rate, model=DEFAULT_MODEL,
                 "debug": dict(proc.last_debug),
             })
 
-        # Real-time pacing
-        time.sleep(FRAME_DURATION)
-
-    # Let last inference complete
-    time.sleep(3)
+    # Drain: keep calling process_iter until no more results
+    # (final audio already in buffer, just needs processing)
+    for _ in range(20):
+        result = proc.process_iter()
+        if result is not None:
+            confirmed, unconfirmed = result
+            audio_s = total_samples / sample_rate
+            snapshots.append({
+                "audio_s": round(audio_s, 2),
+                "wall_s": round(time.time() - t0, 2),
+                "confirmed": confirmed,
+                "unconfirmed": unconfirmed,
+                "confirmed_len": len(confirmed),
+                "unconfirmed_len": len(unconfirmed),
+                "debug": dict(proc.last_debug),
+            })
+        time.sleep(0.2)
 
     # Final: force-close segment to confirm all remaining words
     final_confirmed = proc.segment_close()
