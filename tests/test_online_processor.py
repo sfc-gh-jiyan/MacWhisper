@@ -141,10 +141,43 @@ class TestHypothesisBuffer:
         confirmed = buf.flush()
         assert confirmed == []
 
+    def test_sliding_window_alignment(self):
+        """When buffer prefix shifts (simulating pre-inference trim), words that
+        appear at a different position in new_words should still be confirmed
+        if they match old unconfirmed words.
 
-# ══════════════════════════════════════════════════════════
-# OnlineASRProcessor tests
-# ══════════════════════════════════════════════════════════
+        This is the core scenario in dual-thread Meeting Mode: pre-inference
+        trim shifts the audio start each iteration, so Whisper returns different
+        prefixes but the overlapping middle portion stays stable.
+        """
+        from online_processor import HypothesisBuffer
+
+        buf = HypothesisBuffer()
+        # Iter 1: "A B C D" — stored
+        buf.insert([(0, 1, "A"), (1, 2, "B"), (2, 3, "C"), (3, 4, "D")])
+        assert buf.flush() == []
+
+        # Iter 2: trim shifted start → "C D E F" — "C D" overlaps old unconfirmed
+        buf.insert([(0, 1, "C"), (1, 2, "D"), (2, 3, "E"), (3, 4, "F")])
+        confirmed = buf.flush()
+        texts = [w[2] for w in confirmed]
+        assert "C" in texts and "D" in texts, \
+            f"Sliding window should confirm overlapping words, got: {texts}"
+        # "A" and "B" should NOT be confirmed (no match in new_words)
+        assert "A" not in texts and "B" not in texts
+
+    def test_sliding_window_no_false_match(self):
+        """Single word overlap should not trigger confirmation (need >= 2)."""
+        from online_processor import HypothesisBuffer
+
+        buf = HypothesisBuffer()
+        buf.insert([(0, 1, "X"), (1, 2, "Y"), (2, 3, "Z")])
+        buf.flush()
+        # Only "Z" overlaps — should NOT confirm (need 2+ consecutive)
+        buf.insert([(0, 1, "A"), (1, 2, "Z"), (2, 3, "B")])
+        confirmed = buf.flush()
+        assert confirmed == [], \
+            f"Single word overlap should not confirm, got: {[w[2] for w in confirmed]}"
 
 class TestOnlineASRProcessor:
     """Test the main processor that orchestrates backend + buffer + VAD."""

@@ -47,8 +47,11 @@ class HypothesisBuffer:
     def insert(self, new_words: list[tuple[float, float, str]], offset: float = 0.0):
         """Insert a new transcription result and compare with previous.
 
-        Words at matching positions that are identical across two iterations
-        are moved to committed. Changed words stay in buffer.
+        Uses sliding-window alignment: instead of requiring position-0 match,
+        searches for the best overlap between old unconfirmed words and the
+        new transcription. This handles pre-inference trim shifting the audio
+        start — Whisper sees different prefixes each iteration, but the
+        overlapping portion in the middle stays stable and can be confirmed.
         """
         # Apply time offset
         new_words = [(s + offset, e + offset, w) for s, e, w in new_words]
@@ -58,31 +61,60 @@ class HypothesisBuffer:
             self.buffer = list(new_words)
             return
 
-        # Compare new_words with self.buffer word by word
-        # Find the longest matching prefix
-        min_len = min(len(self.buffer), len(new_words))
-        match_end = 0
-        for i in range(min_len):
-            if self.buffer[i][2].strip() == new_words[i][2].strip():
-                match_end = i + 1
-            else:
-                break
-
-        # Mismatch-aware committed tracking: if position 0 doesn't match,
-        # content has changed completely (e.g., after audio trim shifted
-        # what Whisper sees). Clear committed tracking so new words can
-        # be confirmed from position 0 on the next matching iteration.
-        # When prefix still matches, keep tracking — prevents duplicates.
-        if match_end == 0 and min_len > 0:
-            self.committed_in_buffer = []
-
-        # Matched words → confirmed (newly confirmed only)
+        # Extract unconfirmed words from previous buffer
         already_committed = len(self.committed_in_buffer)
-        for i in range(already_committed, match_end):
-            self.new.append(new_words[i])
-            self.committed_in_buffer.append(new_words[i])
+        old_unconfirmed = self.buffer[already_committed:]
+        old_texts = [w[2].strip() for w in old_unconfirmed]
+        new_texts = [w[2].strip() for w in new_words]
 
-        # Update buffer to new words for next comparison
+        # Find best alignment: search for overlapping words between
+        # old unconfirmed and new_words. Try all (old_start, new_start) pairs,
+        # find the longest consecutive match of >= 2 words.
+        best_old_start = -1
+        best_new_start = -1
+        best_match_len = 0
+
+        if old_texts:
+            for i in range(len(old_texts)):
+                for j in range(len(new_texts)):
+                    if old_texts[i] != new_texts[j]:
+                        continue
+                    # Found a potential start — count consecutive matches
+                    match_len = 0
+                    while (i + match_len < len(old_texts)
+                           and j + match_len < len(new_texts)
+                           and old_texts[i + match_len] == new_texts[j + match_len]):
+                        match_len += 1
+                    if match_len > best_match_len:
+                        best_old_start = i
+                        best_new_start = j
+                        best_match_len = match_len
+                # Stop after first old_start that gives a match >= 2
+                if best_match_len >= 2:
+                    break
+
+        # Require at least 2 consecutive matching words to confirm
+        # (prevents false positives from coincidental single-word matches).
+        # Exception: if old_unconfirmed has only 1 word, 1 match is enough.
+        min_required = min(2, len(old_texts))
+        if best_match_len >= min_required:
+            # Alignment found: confirm matched words from new_words
+            for k in range(best_match_len):
+                w = new_words[best_new_start + k]
+                self.new.append(w)
+
+        # Update buffer to new words for next comparison.
+        # committed_in_buffer tracks how many leading words in buffer are
+        # "done" (either confirmed or before the confirmed region). This
+        # ensures peek_unconfirmed() returns only the true tail, and the
+        # next insert() only searches the genuinely new portion.
+        if best_match_len >= min_required:
+            confirmed_end = best_new_start + best_match_len
+            self.committed_in_buffer = list(new_words[:confirmed_end])
+        else:
+            # No alignment — keep old committed count if buffer prefix
+            # still matches (handles stable prefix case), else clear.
+            self.committed_in_buffer = []
         self.buffer = list(new_words)
 
     def flush(self) -> list[tuple[float, float, str]]:
@@ -299,6 +331,16 @@ class OnlineASRProcessor:
 
         # Flush confirmed words
         newly_confirmed = self.transcript_buffer.flush()
+
+        # Dedup: sliding window alignment may re-confirm words that are
+        # already in self.committed (e.g., after trim+reset, or when the same
+        # overlapping region matches in consecutive iterations). Drop if the
+        # newly confirmed text appears as a substring in committed text.
+        if newly_confirmed and self.committed:
+            new_text = "".join(w[2] for w in newly_confirmed)
+            committed_text = "".join(w[2] for w in self.committed)
+            if new_text in committed_text:
+                newly_confirmed = []
 
         # Post-commit echo detection: if newly confirmed words just repeat
         # the tail of the previous segment's committed text, skip them.
