@@ -460,6 +460,7 @@ def test_audio_history_saves_wav(tmp_path):
     with patch("app.AUDIO_DIR", audio_dir), \
          patch("app.TRANSCRIPT_LOG", transcript_log), \
          patch("app._DATA_DIR", data_dir), \
+         patch("app.MEETINGS_DIR", data_dir), \
          patch.object(inst, "_auto_paste"):
         app._ensure_history_dirs()
         inst._do_transcribe(frames)
@@ -505,6 +506,7 @@ def test_transcript_log_appends_jsonl(tmp_path):
     with patch("app.AUDIO_DIR", audio_dir), \
          patch("app.TRANSCRIPT_LOG", transcript_log), \
          patch("app._DATA_DIR", data_dir), \
+         patch("app.MEETINGS_DIR", data_dir), \
          patch.object(inst, "_auto_paste"):
         app._ensure_history_dirs()
         inst._do_transcribe(frames)
