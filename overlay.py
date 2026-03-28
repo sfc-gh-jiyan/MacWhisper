@@ -145,7 +145,7 @@ def update_overlay(panel, text_view, confirmed: str, unconfirmed: str, mode: str
     label_font = NSFont.systemFontOfSize_weight_(11, 0.4)  # semibold small
     if mode == "meeting":
         label_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.9, 0.25, 0.25, 0.9)
-        label_text = "● Meeting Recording\n"
+        label_text = "● Meeting Recording — Ctrl+Shift+R to stop\n"
     else:
         label_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.5, 0.15, 0.9)
         label_text = "● Push to Talk\n"
