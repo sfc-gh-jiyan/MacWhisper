@@ -99,6 +99,9 @@ def create_overlay(mode: str = "talk"):
     content.addSubview_(scroll_view)
     panel.orderFrontRegardless()
 
+    # Render initial label immediately (don't wait for first transcription)
+    update_overlay(panel, text_view, "", "", mode=mode)
+
     return panel, text_view
 
 
