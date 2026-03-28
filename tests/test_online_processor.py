@@ -154,7 +154,7 @@ class TestOnlineASRProcessor:
         from online_processor import OnlineASRProcessor
 
         backend = MockASRBackend()
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.7)
         proc.insert_audio_chunk(make_audio(0.3))
         result = proc.process_iter()
@@ -168,7 +168,7 @@ class TestOnlineASRProcessor:
         backend.add_result("今天天气", [(  "今天", 0.0, 0.5), ("天气", 0.5, 1.0)])
         backend.add_result("今天天气很好", [("今天", 0.0, 0.5), ("天气", 0.5, 1.0), ("很好", 1.0, 1.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -194,7 +194,7 @@ class TestOnlineASRProcessor:
         backend = MockASRBackend()
         backend.add_result("测试内容", [("测试", 0.0, 0.5), ("内容", 0.5, 1.0)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5, max_buffer_s=5.0)
         proc.throttle = False
 
@@ -216,7 +216,7 @@ class TestOnlineASRProcessor:
         backend.add_result("你好世界", [("你好", 0, 0.5), ("世界", 0.5, 1.0)])
         backend.add_result("你好世界再见", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("再见", 1.0, 1.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -236,7 +236,7 @@ class TestOnlineASRProcessor:
         backend = MockASRBackend()
         backend.add_result("你好世界", [("你好", 0, 0.5), ("世界", 0.5, 1.0)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -256,7 +256,7 @@ class TestOnlineASRProcessor:
         backend.add_result("你好", [("你", 0, 0.5), ("好", 0.5, 1.0)])
         backend.add_result("你好", [("你", 0, 0.5), ("好", 0.5, 1.0)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -277,7 +277,7 @@ class TestOnlineASRProcessor:
         backend.add_result("今天很好", [("今天", 0, 0.3), ("很", 0.3, 0.6), ("好", 0.6, 1.0)])
         backend.add_result("今天很好啊", [("今天", 0, 0.3), ("很", 0.3, 0.6), ("好啊", 0.6, 1.2)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -311,7 +311,7 @@ class TestOnlineASRProcessor:
         backend.add_result("新的内容", [("新的", 0, 0.5), ("内容", 0.5, 1.0)])
         backend.add_result("新的内容来了", [("新的", 0, 0.5), ("内容", 0.5, 1.0), ("来了", 1.0, 1.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5, max_buffer_s=3.0)
         proc.throttle = False
 
@@ -357,7 +357,7 @@ class TestOnlineASRProcessor:
         backend.add_result("你好世界新词", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("新词", 1.0, 1.5)])
         backend.add_result("你好世界新词", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("新词", 1.0, 1.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5, max_buffer_s=3.0)
         proc.throttle = False
 
@@ -398,7 +398,7 @@ class TestOnlineASRProcessor:
         backend.add_result("Thank you for watching.", [("Thank", 0, 0.3), ("you", 0.3, 0.5),
                            ("for", 0.5, 0.7), ("watching.", 0.7, 1.0)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -430,7 +430,7 @@ class TestOnlineASRProcessor:
         # After normalize_punctuation, both become "你好，" and " 世界。"
         backend.add_result("你好, 世界.", [("你好,", 0, 0.5), (" 世界.", 0.5, 1.0)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -464,7 +464,7 @@ class TestOnlineASRProcessor:
         backend.add_result("你好世界新内容", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("新内容", 1.0, 1.5)])
         backend.add_result("你好世界新内容", [("你好", 0, 0.5), ("世界", 0.5, 1.0), ("新内容", 1.0, 1.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -508,7 +508,7 @@ class TestOnlineASRProcessor:
         backend.add_result("今天天气很好明天", [("今天", 0.1, 0.4), ("天气", 0.4, 0.7), ("很好", 0.7, 1.1), ("明天", 1.1, 1.5)])
         backend.add_result("今天天气很好明天", [("今天", 0.1, 0.4), ("天气", 0.4, 0.7), ("很好", 0.7, 1.1), ("明天", 1.1, 1.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 
@@ -546,7 +546,7 @@ class TestOnlineASRProcessor:
         backend.add_result("测试", [("测试", 0, 0.5)])
         backend.add_result("测试", [("测试", 0, 0.5)])
 
-        proc = OnlineASRProcessor(backend=backend, vad=None,
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
                                   min_chunk_size=0.5)
         proc.throttle = False
 

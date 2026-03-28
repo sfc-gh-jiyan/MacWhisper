@@ -507,6 +507,10 @@ class TestRMSPrioritySelection:
         session, mic_src, sys_src, backend = self._make_dual_session()
 
         session.start()
+        time.sleep(0.05)
+        # Skip first-iteration 2s guard so short test can trigger inference
+        if session._processor:
+            session._processor._iter_count = 1
         # Let mic generate data, sys generates too but we just verify
         # the session processes without error
         time.sleep(0.5)
@@ -521,6 +525,10 @@ class TestRMSPrioritySelection:
 
         # Start session, then stop mic immediately so only sys provides data
         session.start()
+        time.sleep(0.05)
+        # Skip first-iteration 2s guard so short test can trigger inference
+        if session._processor:
+            session._processor._iter_count = 1
         time.sleep(0.1)
         mic_src.stop()
         time.sleep(0.5)
@@ -622,6 +630,10 @@ class TestRMSPrioritySelection:
         session._audio_source = None
 
         session.start()
+        time.sleep(0.05)
+        # Skip first-iteration 2s guard so short test can trigger inference
+        if session._processor:
+            session._processor._iter_count = 1
         time.sleep(0.5)
         transcript = session.stop()
 
@@ -687,6 +699,10 @@ class TestRMSPrioritySelection:
         session._audio_source = None
 
         session.start()
+        time.sleep(0.05)
+        # Skip first-iteration 2s guard so short test can trigger inference
+        if session._processor:
+            session._processor._iter_count = 1
         time.sleep(0.5)
         transcript = session.stop()
 

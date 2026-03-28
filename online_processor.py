@@ -113,6 +113,7 @@ class OnlineASRProcessor:
         backend: ASRBackend,
         vad=None,
         min_chunk_size: float = 0.7,
+        min_first_buffer_s: float = 2.0,
         max_buffer_s: float = 20.0,
         buffer_trimming: str = "segment",
         language: str | None = None,
@@ -121,6 +122,7 @@ class OnlineASRProcessor:
         self.backend = backend
         self.vad = vad
         self.min_chunk_size = min_chunk_size
+        self.min_first_buffer_s = min_first_buffer_s
         self.max_buffer_s = max_buffer_s
         self.buffer_trimming = buffer_trimming
         self.language = language
@@ -166,6 +168,10 @@ class OnlineASRProcessor:
 
         # Not enough audio yet
         if buffer_duration < self.min_chunk_size:
+            return None
+
+        # First iteration needs more audio for reliable language detection
+        if self._iter_count == 0 and buffer_duration < self.min_first_buffer_s:
             return None
 
         # Throttle: ensure at least min_chunk_size between iterations
