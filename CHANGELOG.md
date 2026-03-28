@@ -4,6 +4,58 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0] — 2026-03-27
+
+### Added
+- Meeting Mode: mic + system audio dual-channel capture via ScreenCaptureKit
+- Overlap handling: RMS energy comparison selects the louder source when both channels are active
+- Dual-mode overlay: Push to Talk (orange stripe) vs Meeting Recording (red stripe)
+- Overlay shows mode label immediately on panel creation (no waiting for first transcription)
+- Structured debug logging across entire transcription pipeline (online_processor, meeting, app)
+- `log_level` configurable via `~/.macwhisper/config.json` (not exposed in menu UI)
+- Three-level test Makefile (unit / integration / all)
+- Dual-channel A/B comparison test coverage
+
+### Fixed
+- Meeting SRT/words history redirected to meetings directory
+- Test output isolation to prevent pollution of `~/.macwhisper/`
+- OnlineASRProcessor post-commit echo duplication
+
+## [0.5.2] — 2026-03-25
+
+### Fixed
+- .app launcher preserves bundle identity for menu bar icon and hotkeys
+- NSBundle swizzle for Homebrew Python menu bar icon
+
+## [0.5.1] — 2026-03-24
+
+### Fixed
+- Add LSUIElement to fix missing menu bar icon from .app launch
+- Memory leaks, context-aware punctuation, launcher reliability
+
+## [0.5.0] — 2026-03-24
+
+### Added
+- Anti-hallucination defense (excessive word count detection + filtering)
+- Instant overlay display
+- Save Audio toggle in menu
+
+### Fixed
+- Stop-recording button not working
+
+## [0.4.6] — 2026-03-24
+
+### Fixed
+- Crash on Option key release
+- Display latency optimization
+- Punctuation consistency
+
+## [0.4.5] — 2026-03-24
+
+### Changed
+- LocalAgreement architecture refactor
+- Enhanced replay evaluation system
+
 ## [0.4.0] — 2025-03-23
 
 ### Added
