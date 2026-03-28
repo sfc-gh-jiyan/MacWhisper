@@ -199,11 +199,17 @@ class OnlineASRProcessor:
         # Build dynamic prompt from committed text
         prompt = self._build_prompt()
 
-        # Run ASR — emergency cap if buffer grew far beyond max during
-        # a previous blocking inference. Normal trimming happens in
-        # _maybe_trim_buffer() after inference. This only triggers when
-        # the buffer is >2x the max (i.e., lots of audio accumulated
-        # while we were blocked).
+        # Run ASR — pre-inference trim: keep buffer within max_buffer_s
+        # to avoid sending oversized buffers (which accumulate during slow
+        # inference). The 2x emergency cap below handles extreme cases.
+        buffer_duration = len(self.audio_buffer) / self.sample_rate
+        if buffer_duration > self.max_buffer_s:
+            excess = len(self.audio_buffer) - int(self.max_buffer_s * self.sample_rate)
+            self.audio_buffer = self.audio_buffer[excess:]
+            self.buffer_time_offset += excess / self.sample_rate
+
+        # Emergency cap if buffer grew far beyond max during
+        # a previous blocking inference (>2x the max).
         max_samples = int(self.max_buffer_s * 2 * self.sample_rate)
         if len(self.audio_buffer) > max_samples:
             target_samples = int(self.max_buffer_s * self.sample_rate)
@@ -218,8 +224,19 @@ class OnlineASRProcessor:
                     self.transcript_buffer.committed_in_buffer.append(w)
                     self.transcript_buffer.buffer.append(w)
 
+        # Strip trailing silence before inference to prevent hallucination
+        # on silent tails. Only affects what we send to Whisper, not the
+        # actual buffer (so timestamps stay aligned).
+        inference_audio = self.audio_buffer
+        _window = int(0.1 * self.sample_rate)  # 100ms windows
+        while len(inference_audio) > _window * 3:
+            tail_rms = float(np.sqrt(np.mean(inference_audio[-_window:] ** 2)))
+            if tail_rms >= 0.003:
+                break
+            inference_audio = inference_audio[:-_window]
+
         result = self.backend.transcribe(
-            self.audio_buffer,
+            inference_audio,
             language=self.language,
             initial_prompt=prompt,
             task="transcribe",
