@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -684,6 +685,121 @@ def print_batch_summary(all_results):
     return pass_count == n
 
 
+# ── Markdown report ──────────────────────────────────────────
+
+def generate_markdown_report(snapshots, scores, ground_truth, final_confirmed,
+                             audio_file, duration, elapsed, diagnose=False):
+    """Generate a markdown report string with full quality + diagnostic info."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tiers = scores.get("tiers", {})
+    tier_icon = {"FAIL": "FAIL", "WARN": "WARN", "PASS": "PASS", "EXCELLENT": "EXCELLENT"}
+
+    lines = []
+    lines.append(f"# Subtitle QA Report")
+    lines.append(f"")
+    lines.append(f"- **Date**: {ts}")
+    lines.append(f"- **Audio**: `{audio_file}` ({duration:.1f}s)")
+    lines.append(f"- **Replay time**: {elapsed:.0f}s wall-clock")
+    lines.append(f"- **Model**: {DEFAULT_MODEL}")
+    lines.append(f"- **Overall**: **{scores.get('tier', '?')}**")
+    lines.append(f"")
+
+    # Quality metrics table
+    lines.append(f"## Quality Metrics")
+    lines.append(f"")
+    lines.append(f"| Metric | Value | Tier | Thresholds |")
+    lines.append(f"|--------|------:|------|------------|")
+
+    has_gt = bool(ground_truth and ground_truth.strip())
+    if has_gt:
+        lines.append(f"| WER | {scores['wer']:.1%} | {tiers.get('wer','?')} | F>30% W>15% P>5% E<5% |")
+        lines.append(f"| Char overlap | {scores['char_overlap']:.1%} | {tiers.get('overlap','?')} | F<60% W<75% P<90% E>90% |")
+        lines.append(f"| Recall | {scores['recall']:.1%} | {tiers.get('recall','?')} | F<70% W<85% P<95% E>95% |")
+        lines.append(f"| Completeness | {scores['completeness']:.0%} | - | sentence-level |")
+    else:
+        lines.append(f"| WER | n/a | - | no ground truth |")
+        lines.append(f"| Char overlap | n/a | - | no ground truth |")
+        lines.append(f"| Recall | n/a | - | no ground truth |")
+
+    lines.append(f"| Duplications | {scores['duplications']} | {tiers.get('dups','?')} | F>=3 W>=1 P=0 |")
+    lines.append(f"| Stability jumps | {scores['stability_jumps']} | {tiers.get('jumps','?')} | F>10 W>5 P>1 E<=1 |")
+    lines.append(f"| Avg latency | {scores['avg_latency']:.1f}s | {tiers.get('latency','?')} | F>5s W>3s P>1s E<1s |")
+    lines.append(f"| P95 latency | {scores['p95_latency']:.1f}s | - | |")
+    lines.append(f"| Max freeze | {scores.get('max_freeze_s',0):.1f}s | {tiers.get('max_freeze','?')} | F>5s W>3s P>1.5s E<1.5s |")
+    lines.append(f"| Freeze count | {scores.get('freeze_count',0)} | - | gaps > 1.5s |")
+    lines.append(f"| Avg inference | {scores.get('avg_inference_ms',0)}ms | - | |")
+    lines.append(f"| Max inference | {scores.get('max_inference_ms',0)}ms | {tiers.get('max_inference','?')} | F>3s W>1.5s P>800ms E<800ms |")
+    lines.append(f"| P95 inference | {scores.get('p95_inference_ms',0)}ms | - | |")
+    lines.append(f"| Trim count | {scores.get('trim_count',0)} | - | |")
+    if scores.get('offline_wer_delta', 0) != 0:
+        lines.append(f"| Offline delta | {scores['offline_wer_delta']:+.1%} | - | streaming - offline |")
+    lines.append(f"")
+
+    # Text comparison
+    lines.append(f"## Transcription Output ({len(final_confirmed)} chars)")
+    lines.append(f"")
+    lines.append(f"```")
+    lines.append(final_confirmed if final_confirmed else "(empty)")
+    lines.append(f"```")
+    lines.append(f"")
+
+    if has_gt:
+        lines.append(f"## Ground Truth ({len(ground_truth)} chars)")
+        lines.append(f"")
+        lines.append(f"```")
+        lines.append(ground_truth)
+        lines.append(f"```")
+        lines.append(f"")
+
+    # Diagnostic sections
+    if diagnose and snapshots:
+        # Freeze events
+        freezes = _analyze_freezes(snapshots, threshold_s=1.5)
+        lines.append(f"## Freeze Events")
+        lines.append(f"")
+        if freezes:
+            lines.append(f"| # | From | To | Gap | Buffer | Inference |")
+            lines.append(f"|---|-----:|---:|----:|-------:|----------:|")
+            for i, f in enumerate(freezes):
+                lines.append(f"| {i+1} | {f['from_wall_s']:.1f}s | {f['to_wall_s']:.1f}s | "
+                             f"{f['gap_s']:.1f}s | {f['buffer_at_start']:.1f}s | {f['inference_ms']}ms |")
+        else:
+            lines.append(f"No freezes detected (no gaps > 1.5s).")
+        lines.append(f"")
+
+        # Inference histogram
+        inf_stats = _analyze_inference(snapshots)
+        lines.append(f"## Inference Timing")
+        lines.append(f"")
+        lines.append(f"- Avg: {inf_stats['avg_ms']}ms, Max: {inf_stats['max_ms']}ms, "
+                     f"P95: {inf_stats['p95_ms']}ms ({inf_stats['count']} iterations)")
+        lines.append(f"")
+        if inf_stats["histogram"]:
+            lines.append(f"| Bucket | Count | % |")
+            lines.append(f"|--------|------:|--:|")
+            total = inf_stats["count"]
+            for bucket, count in inf_stats["histogram"].items():
+                pct = count / total * 100 if total else 0
+                lines.append(f"| {bucket} | {count} | {pct:.0f}% |")
+        lines.append(f"")
+
+        # Buffer trims
+        trims = _analyze_trims(snapshots)
+        lines.append(f"## Buffer Trims")
+        lines.append(f"")
+        if trims:
+            lines.append(f"| # | Audio | From | To | MaxEff | Retained |")
+            lines.append(f"|---|------:|-----:|---:|-------:|---------:|")
+            for i, t in enumerate(trims):
+                lines.append(f"| {i+1} | {t['audio_s']:.1f}s | {t['from_s']:.1f}s | "
+                             f"{t['to_s']:.1f}s | {t['effective_max']:.1f}s | {t['retained_s']:.1f}s |")
+        else:
+            lines.append(f"No trims occurred (buffer stayed within limit).")
+        lines.append(f"")
+
+    return "\n".join(lines)
+
+
 # ── Main ──────────────────────────────────────────────────────
 
 def main():
@@ -706,6 +822,8 @@ def main():
                         help="Skip offline baseline generation (faster)")
     parser.add_argument("--diagnose", action="store_true",
                         help="Deep diagnostic: per-second timeline, freeze detection, inference histogram")
+    parser.add_argument("--report-dir", default="",
+                        help="Save markdown report to this directory")
     args = parser.parse_args()
 
     # Load pairs
@@ -715,12 +833,23 @@ def main():
                                   max_duration=max_dur)
 
     if not pairs:
-        print("[WARN] No matching WAV + transcript pairs found.")
-        print(f"       Audio dir:    {AUDIO_DIR}")
-        print(f"       Transcripts:  {TRANSCRIPT_LOG}")
+        # Fallback: load WAV directly without ground truth
         if args.wav:
-            print(f"       Filter: --wav {args.wav}")
-        return
+            wav_path = os.path.join(AUDIO_DIR, args.wav)
+            if os.path.isfile(wav_path):
+                with wave.open(wav_path) as wf:
+                    dur = wf.getnframes() / wf.getframerate()
+                pairs = [{"audio_file": args.wav, "wav_path": wav_path,
+                          "ground_truth": "", "duration_s": dur}]
+                print(f"[INFO] No ground truth for {args.wav} — running diagnostics only")
+            else:
+                print(f"[ERROR] WAV not found: {wav_path}")
+                return
+        else:
+            print("[WARN] No matching WAV + transcript pairs found.")
+            print(f"       Audio dir:    {AUDIO_DIR}")
+            print(f"       Transcripts:  {TRANSCRIPT_LOG}")
+            return
 
     # Select recordings
     pairs.sort(key=lambda p: -p["duration_s"])
@@ -773,6 +902,20 @@ def main():
 
         if args.diagnose:
             print_diagnostic_report(snapshots, audio_file, duration)
+
+        # Save markdown report if requested
+        if args.report_dir:
+            md = generate_markdown_report(
+                snapshots, scores, pair["ground_truth"], final_confirmed,
+                audio_file, duration, elapsed, diagnose=args.diagnose,
+            )
+            os.makedirs(args.report_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = os.path.splitext(audio_file)[0]
+            report_path = os.path.join(args.report_dir, f"{ts}_subtitle_qa_{base_name}.md")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(md)
+            print(f"\n  Report saved to {report_path}")
 
         all_results.append(scores)
 

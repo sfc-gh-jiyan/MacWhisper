@@ -12,3 +12,5 @@ history/
 Plans/
 INTERNAL_*.md
 sweep_params.py
+.cortex/
+tests/TestReport/
