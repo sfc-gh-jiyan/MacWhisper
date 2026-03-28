@@ -404,7 +404,7 @@ def _compute_freeze_metrics(snapshots):
 
 # ── Load test corpus ──────────────────────────────────────────
 
-def load_transcript_pairs(filter_wav=None, min_duration=0):
+def load_transcript_pairs(filter_wav=None, min_duration=0, max_duration=0):
     """Load WAV + transcript pairs from history."""
     if not os.path.exists(TRANSCRIPT_LOG):
         print(f"[ERROR] No transcript log at {TRANSCRIPT_LOG}")
@@ -429,6 +429,8 @@ def load_transcript_pairs(filter_wav=None, min_duration=0):
             if filter_wav and audio_file != filter_wav:
                 continue
             if duration < min_duration:
+                continue
+            if max_duration > 0 and duration > max_duration:
                 continue
 
             wav_path = os.path.join(AUDIO_DIR, audio_file)
@@ -692,6 +694,8 @@ def main():
                         help="Run the N longest recordings (default: 1)")
     parser.add_argument("--min-duration", type=float, default=31,
                         help="Minimum recording duration in seconds (default: 31)")
+    parser.add_argument("--max-duration", type=float, default=0,
+                        help="Maximum recording duration in seconds (0 = no limit)")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help=f"Model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--min-chunk", type=float, default=MIN_CHUNK_SIZE,
@@ -706,7 +710,9 @@ def main():
 
     # Load pairs
     min_dur = 0 if args.wav else args.min_duration
-    pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=min_dur)
+    max_dur = 0 if args.wav else args.max_duration
+    pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=min_dur,
+                                  max_duration=max_dur)
 
     if not pairs:
         print("[WARN] No matching WAV + transcript pairs found.")
