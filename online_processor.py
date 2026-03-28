@@ -68,6 +68,14 @@ class HypothesisBuffer:
             else:
                 break
 
+        # Mismatch-aware committed tracking: if position 0 doesn't match,
+        # content has changed completely (e.g., after audio trim shifted
+        # what Whisper sees). Clear committed tracking so new words can
+        # be confirmed from position 0 on the next matching iteration.
+        # When prefix still matches, keep tracking — prevents duplicates.
+        if match_end == 0 and min_len > 0:
+            self.committed_in_buffer = []
+
         # Matched words → confirmed (newly confirmed only)
         already_committed = len(self.committed_in_buffer)
         for i in range(already_committed, match_end):
@@ -87,17 +95,6 @@ class HypothesisBuffer:
         """Return words in buffer that haven't been confirmed yet."""
         n_committed = len(self.committed_in_buffer)
         return self.buffer[n_committed:]
-
-    def clear_committed(self):
-        """Clear committed tracking but keep buffer for next comparison.
-
-        Use after audio trim shifts word positions: the old committed_in_buffer
-        indices are stale (those words' audio was discarded), but we want to
-        keep self.buffer so the next insert() can still compare against it.
-        Without this, committed_in_buffer count blocks newly matching words
-        from being confirmed (range(already_committed, match_end) is empty).
-        """
-        self.committed_in_buffer = []
 
     def reset(self):
         """Reset buffer state for a new segment."""
@@ -218,12 +215,9 @@ class OnlineASRProcessor:
             excess = len(self.audio_buffer) - int(self.max_buffer_s * self.sample_rate)
             self.audio_buffer = self.audio_buffer[excess:]
             self.buffer_time_offset += excess / self.sample_rate
-            # Clear stale committed tracking (word indices shifted) but keep
-            # buffer for comparison — so next insert() can still match words.
-            # Do NOT full-reset: pre-inference trim fires every iteration in
-            # dual-thread mode, and resetting buffer would prevent LocalAgreement
-            # from ever confirming words.
-            self.transcript_buffer.clear_committed()
+            # Do NOT touch HypothesisBuffer here. Pre-inference trim fires
+            # every iteration in dual-thread mode. insert() handles shifted
+            # content via mismatch-aware committed tracking reset.
 
         # Emergency cap if buffer grew far beyond max during
         # a previous blocking inference (>2x the max).
@@ -233,8 +227,7 @@ class OnlineASRProcessor:
             excess = len(self.audio_buffer) - target_samples
             self.audio_buffer = self.audio_buffer[excess:]
             self.buffer_time_offset += excess / self.sample_rate
-            # Same rationale as above — clear_committed, not full reset.
-            self.transcript_buffer.clear_committed()
+            # Same rationale — do not touch HypothesisBuffer.
 
         # Strip trailing silence before inference to prevent hallucination
         # on silent tails. Only affects what we send to Whisper, not the
@@ -306,22 +299,6 @@ class OnlineASRProcessor:
 
         # Flush confirmed words
         newly_confirmed = self.transcript_buffer.flush()
-
-        # Dedup: after pre-inference trim clears committed_in_buffer tracking,
-        # Whisper may re-produce words already in self.committed. The newly
-        # confirmed list may start with a prefix that duplicates the committed
-        # tail. Strip that prefix.
-        if newly_confirmed and self.committed:
-            # Find how many leading newly_confirmed words match committed tail
-            tail = self.committed[-len(newly_confirmed):]
-            skip = 0
-            for i, w in enumerate(newly_confirmed):
-                if i < len(tail) and w[2].strip() == tail[i][2].strip():
-                    skip += 1
-                else:
-                    break
-            if skip:
-                newly_confirmed = newly_confirmed[skip:]
 
         # Post-commit echo detection: if newly confirmed words just repeat
         # the tail of the previous segment's committed text, skip them.

@@ -111,8 +111,8 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────
 SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 0.5          # seconds — LocalAgreement confirmation latency ≈ 2x this
-MAX_BUFFER_S = 5.0            # audio buffer cap (seconds) — keeps inference <600ms
+MIN_CHUNK_SIZE = 1.0          # seconds — LocalAgreement confirmation latency ≈ 2x this
+MAX_BUFFER_S = 8.0            # audio buffer cap (seconds) — balance inference speed vs context
 
 _DATA_DIR = os.path.expanduser("~/.macwhisper")
 CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
