@@ -49,7 +49,7 @@ class VoiceActivityDetector:
             print(f"[WARN] Silero VAD unavailable, using RMS fallback: {e}")
             self._use_silero = False
 
-    def is_speech(self, audio_chunk: np.ndarray, rms_threshold: float = 100.0) -> bool:
+    def is_speech(self, audio_chunk: np.ndarray, rms_threshold: float = 300.0) -> bool:
         """Check if an audio chunk contains speech.
 
         Args:
