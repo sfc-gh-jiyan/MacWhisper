@@ -207,6 +207,9 @@ class OnlineASRProcessor:
             excess = len(self.audio_buffer) - int(self.max_buffer_s * self.sample_rate)
             self.audio_buffer = self.audio_buffer[excess:]
             self.buffer_time_offset += excess / self.sample_rate
+            # Reset HypothesisBuffer — word positions shifted.
+            # Do NOT pre-populate (same rationale as _maybe_trim_buffer).
+            self.transcript_buffer.reset()
 
         # Emergency cap if buffer grew far beyond max during
         # a previous blocking inference (>2x the max).
@@ -216,13 +219,9 @@ class OnlineASRProcessor:
             excess = len(self.audio_buffer) - target_samples
             self.audio_buffer = self.audio_buffer[excess:]
             self.buffer_time_offset += excess / self.sample_rate
-            # Reset HypothesisBuffer — word positions shifted
+            # Reset HypothesisBuffer — word positions shifted.
+            # Do NOT pre-populate (same rationale as _maybe_trim_buffer).
             self.transcript_buffer.reset()
-            # Re-populate with committed words in retained region
-            for w in self.committed:
-                if w[0] >= self.buffer_time_offset - 0.2:
-                    self.transcript_buffer.committed_in_buffer.append(w)
-                    self.transcript_buffer.buffer.append(w)
 
         # Strip trailing silence before inference to prevent hallucination
         # on silent tails. Only affects what we send to Whisper, not the
@@ -372,17 +371,11 @@ class OnlineASRProcessor:
         # Save committed text for post-commit echo detection
         self._last_committed_raw = full_text
 
-        # Reset for next segment (keep committed words for history)
+        # Reset for next segment (keep committed words for history).
+        # Do NOT pre-populate — same rationale as _maybe_trim_buffer:
+        # fresh start prevents stale words from blocking LocalAgreement.
         self.transcript_buffer.reset()
         self.last_unconfirmed = []
-
-        # Pre-populate HypothesisBuffer with committed words still in
-        # retained audio region — prevents re-confirmation of old words
-        # (same pattern as _maybe_trim_buffer)
-        for w in self.committed:
-            if w[0] >= self.buffer_time_offset - 0.2:
-                self.transcript_buffer.committed_in_buffer.append(w)
-                self.transcript_buffer.buffer.append(w)
 
         return full_text
 
@@ -452,18 +445,20 @@ class OnlineASRProcessor:
     def _maybe_trim_buffer(self):
         """Trim audio buffer if it exceeds max_buffer_s.
 
-        Uses adaptive threshold: if last inference was slow (>800ms),
+        Uses adaptive threshold: if last inference was slow (>1500ms),
         trim more aggressively to keep inference fast. If inference was
-        very slow (>2s), force trim to 3s regardless.
+        very slow (>3s), force trim to 3s regardless.
         """
         buffer_duration = len(self.audio_buffer) / self.sample_rate
 
-        # Adaptive: if inference was slow, use a tighter limit
+        # Adaptive: if inference was slow, use a tighter limit.
+        # Thresholds are conservative — medium model normally takes 550-650ms,
+        # so only truly slow inference triggers aggressive trim.
         effective_max = self.max_buffer_s
-        if self._last_inference_ms > 2000:
+        if self._last_inference_ms > 3000:
             # Very slow — emergency trim to 3s
             effective_max = 3.0
-        elif self._last_inference_ms > 800:
+        elif self._last_inference_ms > 1500:
             # Moderately slow — trim to 60% of current buffer
             effective_max = min(effective_max, buffer_duration * 0.6)
             effective_max = max(effective_max, 3.0)  # never trim below 3s
@@ -502,16 +497,11 @@ class OnlineASRProcessor:
         # Reset HypothesisBuffer after trim — word positions change completely
         # so old buffer comparison would never match. Committed words are safe
         # in self.committed already.
+        # NOTE: do NOT pre-populate buffer after reset. The trimmed audio will
+        # produce entirely new word sequences from Whisper, so pre-populated
+        # old words would never match and LocalAgreement would stall forever.
+        # Fresh start costs 1 iter of confirm latency but prevents deadlock.
         self.transcript_buffer.reset()
-
-        # Pre-populate committed_in_buffer with committed words that fall
-        # within the retained audio region. This prevents the HypothesisBuffer
-        # from re-confirming words that were already committed before the trim.
-        retained_start = trim_time
-        for w in self.committed:
-            if w[0] >= retained_start - 0.2:  # word start >= retained region
-                self.transcript_buffer.committed_in_buffer.append(w)
-                self.transcript_buffer.buffer.append(w)
 
     def _find_trim_point(self) -> float:
         """Find a good trim point in committed text (sentence boundary).

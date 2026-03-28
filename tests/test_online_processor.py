@@ -311,11 +311,12 @@ class TestOnlineASRProcessor:
         backend.add_result("新的内容", [("新的", 0, 0.5), ("内容", 0.5, 1.0)])
         backend.add_result("新的内容来了", [("新的", 0, 0.5), ("内容", 0.5, 1.0), ("来了", 1.0, 1.5)])
 
+        # max_buffer_s=5.0 so Phase 1 (4s total) doesn't trigger trim
         proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
-                                  min_chunk_size=0.5, max_buffer_s=3.0)
+                                  min_chunk_size=0.5, max_buffer_s=5.0)
         proc.throttle = False
 
-        # Phase 1: confirm initial words
+        # Phase 1: confirm initial words (4s total, under max_buffer_s=5)
         proc.insert_audio_chunk(make_speech_audio(2.0))
         proc.process_iter()
         proc.insert_audio_chunk(make_speech_audio(2.0))
@@ -324,8 +325,8 @@ class TestOnlineASRProcessor:
         confirmed_before_trim = r2[0]
         assert "你好" in confirmed_before_trim
 
-        # Phase 2: add enough audio to trigger trim (>3s already + more)
-        proc.insert_audio_chunk(make_speech_audio(3.0))
+        # Phase 2: add enough audio to trigger trim (>5s already + more)
+        proc.insert_audio_chunk(make_speech_audio(4.0))
         r3 = proc.process_iter()
         # After trim, still getting results (not stalled)
         assert r3 is not None
@@ -537,6 +538,63 @@ class TestOnlineASRProcessor:
                 f"Echo word '{word}' appeared {counts.get(word, 0)} times (expected 1)"
         # "明天" is new — should be committed
         assert "明天" in committed_texts, "New word '明天' should be committed"
+
+    def test_trim_stall_with_unstable_transcription(self):
+        """After trim, unstable transcription (different text each iter) must not
+        permanently stall LocalAgreement.
+
+        Regression: when HypothesisBuffer was pre-populated with committed words
+        after trim, but Whisper produced entirely different text for the trimmed
+        audio, position-0 mismatch caused `break` in insert() → match_end=0
+        forever. Fix: don't pre-populate after reset.
+        """
+        from online_processor import OnlineASRProcessor
+
+        backend = MockASRBackend()
+        # Phase 1: two identical → confirm "你好世界"
+        backend.add_result("你好世界", [("你好", 0, 0.5), ("世界", 0.5, 1.0)])
+        backend.add_result("你好世界", [("你好", 0, 0.5), ("世界", 0.5, 1.0)])
+        # Phase 2: after trim, unstable results (simulates Chinese-English switching)
+        backend.add_result("现代人的数字生活", [("现代人", 0, 0.5), ("的", 0.5, 0.7), ("数字", 0.7, 1.0), ("生活", 1.0, 1.3)])
+        backend.add_result("That is the past", [("That", 0, 0.3), ("is", 0.3, 0.5), ("the", 0.5, 0.7), ("past", 0.7, 1.0)])
+        backend.add_result("保持生活的balance", [("保持", 0, 0.4), ("生活", 0.4, 0.7), ("的", 0.7, 0.8), ("balance", 0.8, 1.2)])
+        # Phase 3: eventually stabilizes
+        backend.add_result("越来越难", [("越来越", 0, 0.5), ("难", 0.5, 0.8)])
+        backend.add_result("越来越难", [("越来越", 0, 0.5), ("难", 0.5, 0.8)])
+
+        # max_buffer_s=5.0 so Phase 1 (4s total) doesn't trigger trim;
+        # Phase 2 (4s + 6s = 10s) forces trim to kick in.
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
+                                  min_chunk_size=0.5, max_buffer_s=5.0)
+        proc.throttle = False
+
+        # Phase 1: confirm initial words (4s total, under max_buffer_s=5)
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        r2 = proc.process_iter()
+        assert r2 is not None
+        confirmed_phase1 = r2[0]
+        assert "你好" in confirmed_phase1
+
+        # Phase 2: add enough audio to trigger trim + unstable iterations
+        for _ in range(3):
+            proc.insert_audio_chunk(make_speech_audio(3.0))
+            proc.process_iter()
+
+        # Phase 3: stable results → should confirm new words
+        # After trim + reset, HypothesisBuffer fresh-starts: first identical
+        # result is stored, second confirms. We give 3 iterations to be safe.
+        for _ in range(3):
+            proc.insert_audio_chunk(make_speech_audio(2.0))
+            proc.process_iter()
+
+        confirmed_final = "".join(w[2] for w in proc.committed)
+        unconfirmed_final = "".join(w[2] for w in proc.last_unconfirmed)
+        total = confirmed_final + unconfirmed_final
+        # Key: "越来越" or "难" should appear (LocalAgreement recovered)
+        assert "越来越" in total or "难" in total, \
+            f"LocalAgreement should recover after unstable period, got: '{total}'"
 
     def test_echo_detection_debug_field(self):
         """last_debug should include echo_dropped count."""
