@@ -9,15 +9,19 @@ from __future__ import annotations
 import re
 
 
-def create_overlay():
+def create_overlay(mode: str = "talk"):
     """Create an NSPanel with NSTextView for dual-color subtitle display.
+
+    Args:
+        mode: "talk" for Push to Talk, "meeting" for Meeting Recording.
+              Each mode gets a colored left accent stripe.
 
     Returns:
         (panel, text_view) tuple, or (None, None) if no screen available.
     """
     from AppKit import (
         NSPanel, NSColor, NSFont, NSScreen, NSMakeRect,
-        NSBackingStoreBuffered, NSTextView, NSScrollView,
+        NSBackingStoreBuffered, NSTextView, NSScrollView, NSView,
     )
 
     NSWindowStyleMaskBorderless = 0
@@ -51,9 +55,24 @@ def create_overlay():
     content = panel.contentView()
     content_frame = content.frame()
 
+    # Left accent stripe — orange-red for talk, red for meeting
+    stripe_w = 3
+    if mode == "meeting":
+        stripe_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.9, 0.2, 0.2, 1.0)
+    else:
+        stripe_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.5, 0.15, 1.0)
+    stripe = NSView.alloc().initWithFrame_(
+        NSMakeRect(0, 0, stripe_w, content_frame.size.height)
+    )
+    stripe.setWantsLayer_(True)
+    stripe.layer().setBackgroundColor_(stripe_color.CGColor())
+    stripe.setAutoresizingMask_(0x10)  # flexible height
+    content.addSubview_(stripe)
+
     # Use NSTextView (instead of NSTextField) for attributed string support
+    text_x = stripe_w  # shift right when stripe is present
     scroll_view = NSScrollView.alloc().initWithFrame_(
-        NSMakeRect(0, 0, content_frame.size.width, content_frame.size.height)
+        NSMakeRect(text_x, 0, content_frame.size.width - text_x, content_frame.size.height)
     )
     scroll_view.setHasVerticalScroller_(False)
     scroll_view.setHasHorizontalScroller_(False)
@@ -62,7 +81,7 @@ def create_overlay():
     scroll_view.setAutoresizingMask_(0x12)  # width + height flexible
 
     text_view = NSTextView.alloc().initWithFrame_(
-        NSMakeRect(20, 0, content_frame.size.width - 40, content_frame.size.height)
+        NSMakeRect(20, 0, content_frame.size.width - text_x - 40, content_frame.size.height)
     )
     text_view.setEditable_(False)
     text_view.setSelectable_(False)
@@ -83,7 +102,7 @@ def create_overlay():
     return panel, text_view
 
 
-def update_overlay(panel, text_view, confirmed: str, unconfirmed: str):
+def update_overlay(panel, text_view, confirmed: str, unconfirmed: str, mode: str = "talk"):
     """Update overlay with dual-color text.
 
     Args:
@@ -91,6 +110,7 @@ def update_overlay(panel, text_view, confirmed: str, unconfirmed: str):
         text_view: NSTextView instance.
         confirmed: Already confirmed text (displayed in white).
         unconfirmed: Not yet confirmed tail (displayed in gray).
+        mode: "talk" or "meeting" — controls the label line.
     """
     from AppKit import (
         NSColor, NSFont, NSScreen, NSMakeRect,
@@ -117,6 +137,23 @@ def update_overlay(panel, text_view, confirmed: str, unconfirmed: str):
 
     # Build attributed string
     attr_str = NSMutableAttributedString.alloc().init()
+
+    # Mode label line — orange-red for talk, red for meeting
+    label_font = NSFont.systemFontOfSize_weight_(11, 0.4)  # semibold small
+    if mode == "meeting":
+        label_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.9, 0.25, 0.25, 0.9)
+        label_text = "● Meeting Recording\n"
+    else:
+        label_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.5, 0.15, 0.9)
+        label_text = "● Push to Talk\n"
+    label_attrs = {
+        NSForegroundColorAttributeName: label_color,
+        NSFontAttributeName: label_font,
+    }
+    label_as = NSAttributedString.alloc().initWithString_attributes_(
+        label_text, label_attrs
+    )
+    attr_str.appendAttributedString_(label_as)
 
     if confirmed_fmt:
         confirmed_attrs = {

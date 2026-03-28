@@ -105,7 +105,7 @@ from vad import VoiceActivityDetector
 from online_processor import OnlineASRProcessor
 from overlay import create_overlay, update_overlay, destroy_overlay
 from subtitle_export import export_srt, save_enhanced_history
-from meeting import MeetingSession
+from meeting import MeetingSession, MEETINGS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -422,7 +422,7 @@ class TranscriberApp(rumps.App):
         )
 
         # Show overlay
-        AppHelper.callAfter(self._create_overlay)
+        AppHelper.callAfter(lambda: self._create_overlay(mode="meeting"))
 
         self._meeting_session.start()
         self.title = "🔴"
@@ -469,7 +469,7 @@ class TranscriberApp(rumps.App):
             self._last_overlay_key = overlay_key
             AppHelper.callAfter(
                 lambda c=full_confirmed, u=unconfirmed: update_overlay(
-                    self._overlay_panel, self._overlay_text, c, u
+                    self._overlay_panel, self._overlay_text, c, u, mode="meeting"
                 )
             )
 
@@ -857,7 +857,7 @@ class TranscriberApp(rumps.App):
         # Save enhanced history with word-level timestamps
         all_words = result.all_words()
         save_enhanced_history(
-            history_dir=_DATA_DIR,
+            history_dir=MEETINGS_DIR,
             audio_file=os.path.basename(wav_path) if wav_path else None,
             words=all_words,
             text=text,
@@ -884,8 +884,8 @@ class TranscriberApp(rumps.App):
 
     # ── Live Subtitles — overlay ──────────────────────────────
 
-    def _create_overlay(self):
-        panel, text_view = create_overlay()
+    def _create_overlay(self, mode: str = "talk"):
+        panel, text_view = create_overlay(mode=mode)
         if panel:
             self._overlay_panel = panel
             self._overlay_text = text_view
