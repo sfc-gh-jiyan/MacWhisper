@@ -596,6 +596,67 @@ class TestOnlineASRProcessor:
         assert "越来越" in total or "难" in total, \
             f"LocalAgreement should recover after unstable period, got: '{total}'"
 
+    def test_pre_inference_trim_does_not_block_confirmation(self):
+        """Pre-inference trim firing every iteration must not prevent confirmation.
+
+        Regression: in dual-thread Meeting Mode, buffer always exceeds max_buffer_s
+        because audio accumulates during inference. Pre-inference trim fires every
+        iteration. If it does a full reset(), HypothesisBuffer can never compare
+        2 consecutive results → zero confirmation after initial burst.
+
+        Fix: pre-inference trim uses clear_committed() (keeps buffer for comparison)
+        + dedup in process_iter prevents re-confirming already-committed words.
+        """
+        from online_processor import OnlineASRProcessor
+
+        backend = MockASRBackend()
+        # Sentence 1: confirmed normally (buffer still small)
+        backend.add_result("今天天气很好", [("今天", 0, 0.5), ("天气", 0.5, 1.0), ("很好", 1.0, 1.5)])
+        backend.add_result("今天天气很好", [("今天", 0, 0.5), ("天气", 0.5, 1.0), ("很好", 1.0, 1.5)])
+        # Sentence 2: new content after buffer exceeds max → pre-inference trim fires
+        # These iterations all have buffer > max_buffer_s, so trim fires each time
+        backend.add_result("我们去公园", [("我们", 0, 0.4), ("去", 0.4, 0.6), ("公园", 0.6, 1.0)])
+        backend.add_result("我们去公园", [("我们", 0, 0.4), ("去", 0.4, 0.6), ("公园", 0.6, 1.0)])
+        # Sentence 3: even more content, trim continues firing
+        backend.add_result("散步聊天", [("散步", 0, 0.5), ("聊天", 0.5, 1.0)])
+        backend.add_result("散步聊天", [("散步", 0, 0.5), ("聊天", 0.5, 1.0)])
+
+        # Small max_buffer_s=2.0 to ensure pre-inference trim fires frequently
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
+                                  min_chunk_size=0.5, max_buffer_s=2.0)
+        proc.throttle = False
+
+        # Phase 1: buffer under max, confirm sentence 1
+        proc.insert_audio_chunk(make_speech_audio(1.5))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        r = proc.process_iter()
+        assert r is not None
+        assert "今天" in r[0], f"Sentence 1 should be confirmed, got: {r[0]}"
+
+        # Phase 2: buffer now exceeds max (2.5s total > 2.0), trim fires
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        proc.process_iter()  # trim fires, then Whisper → "我们去公园" stored
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        proc.process_iter()  # trim fires, "我们去公园" matches → confirmed
+
+        # Phase 3: more speech, trim keeps firing
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        proc.process_iter()
+
+        total_text = "".join(w[2] for w in proc.committed)
+
+        # Key assertions:
+        # 1. Words from sentences 2 and 3 should be confirmed (not blocked by trim)
+        assert "我们" in total_text or "公园" in total_text, \
+            f"Sentence 2 should be confirmed despite pre-inference trim, got: '{total_text}'"
+        # 2. No duplicates from sentence 1
+        count_today = total_text.count("今天")
+        assert count_today <= 1, \
+            f"'今天' appears {count_today} times — dedup should prevent re-confirmation"
+
     def test_echo_detection_debug_field(self):
         """last_debug should include echo_dropped count."""
         from online_processor import OnlineASRProcessor
