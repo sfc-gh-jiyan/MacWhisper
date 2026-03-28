@@ -212,6 +212,9 @@ def evaluate(snapshots, final_confirmed, ground_truth, offline_baseline=None):
     """Evaluate replay quality against ground truth.
 
     Returns dict with all metrics from INTERNAL_subtitle_research.md §7.6.
+    When *ground_truth* is empty, text-quality metrics (WER, overlap, recall,
+    completeness) are skipped and the judgment is based solely on performance
+    metrics (latency, freezes, inference timing, stability, duplications).
     """
     if not snapshots and not final_confirmed:
         return {"total_iters": 0, "completeness": 0.0, "char_overlap": 0.0,
@@ -220,22 +223,23 @@ def evaluate(snapshots, final_confirmed, ground_truth, offline_baseline=None):
                 "offline_wer_delta": 0, "tier": "FAIL", "pass": False}
 
     display = final_confirmed
-    norm_display = _normalize(display)
+    has_gt = bool(ground_truth and ground_truth.strip())
 
-    # ── Completeness (sentence-level) ──
-    gt_sents = _split_sentences(ground_truth)
-    found = sum(1 for s in gt_sents
-                if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
-    completeness = round(found / len(gt_sents), 2) if gt_sents else 1.0
-
-    # ── Character overlap (LCS-based) ──
-    overlap = _char_overlap(display, ground_truth)
-
-    # ── WER/CER (standard metric via jiwer) ──
-    wer = _compute_wer(display, ground_truth)
-
-    # ── Recall (word-level coverage) ──
-    recall = _compute_recall(display, ground_truth)
+    # ── Text-quality metrics (only when ground truth available) ──
+    if has_gt:
+        norm_display = _normalize(display)
+        gt_sents = _split_sentences(ground_truth)
+        found = sum(1 for s in gt_sents
+                    if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
+        completeness = round(found / len(gt_sents), 2) if gt_sents else 1.0
+        overlap = _char_overlap(display, ground_truth)
+        wer = _compute_wer(display, ground_truth)
+        recall = _compute_recall(display, ground_truth)
+    else:
+        completeness = -1.0  # sentinel: not evaluated
+        overlap = -1.0
+        wer = -1.0
+        recall = -1.0
 
     # ── Duplications ──
     display_sents = _split_sentences(display)
@@ -263,20 +267,20 @@ def evaluate(snapshots, final_confirmed, ground_truth, offline_baseline=None):
 
     # ── Offline baseline delta ──
     offline_wer_delta = 0.0
-    if offline_baseline:
+    if offline_baseline and has_gt:
         offline_wer = _compute_wer(offline_baseline, ground_truth)
         if offline_wer >= 0 and wer >= 0:
             offline_wer_delta = round(wer - offline_wer, 3)
 
     # ── Tiered judgment (from research report §7.6) ──
-    tiers = {
-        "wer":       _tier(wer, 0.30, 0.15, 0.05, higher_is_better=False),
-        "overlap":   _tier(overlap, 0.60, 0.75, 0.90, higher_is_better=True),
-        "recall":    _tier(recall, 0.70, 0.85, 0.95, higher_is_better=True),
-        "dups":      _tier(dup_count, 3, 1, 0.5, higher_is_better=False),
-        "jumps":     _tier(jumps, 10, 5, 1, higher_is_better=False),
-        "latency":   _tier(avg_latency, 5, 3, 1, higher_is_better=False),
-    }
+    tiers = {}
+    if has_gt:
+        tiers["wer"] = _tier(wer, 0.30, 0.15, 0.05, higher_is_better=False)
+        tiers["overlap"] = _tier(overlap, 0.60, 0.75, 0.90, higher_is_better=True)
+        tiers["recall"] = _tier(recall, 0.70, 0.85, 0.95, higher_is_better=True)
+    tiers["dups"] = _tier(dup_count, 3, 1, 0.5, higher_is_better=False)
+    tiers["jumps"] = _tier(jumps, 10, 5, 1, higher_is_better=False)
+    tiers["latency"] = _tier(avg_latency, 5, 3, 1, higher_is_better=False)
 
     # ── Freeze / inference metrics ──
     freeze_metrics = _compute_freeze_metrics(snapshots)
@@ -504,17 +508,26 @@ def print_report(snapshots, final_confirmed, ground_truth, scores,
     status = scores["tier"]
 
     gt_sents = _split_sentences(ground_truth)
-    norm_display = _normalize(final_confirmed)
-    found_count = sum(1 for s in gt_sents
-                      if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
+    has_gt = bool(ground_truth and ground_truth.strip())
+    if has_gt:
+        norm_display = _normalize(final_confirmed)
+        found_count = sum(1 for s in gt_sents
+                          if len(_normalize(s)) < 4 or _normalize(s) in norm_display)
+    else:
+        found_count = 0
 
     print(f"  {chr(9492)}{'─'*42}")
     print(f"\n  Quality Metrics (tiered per research report):")
     print(f"  {'Metric':<16} {'Value':>8}  {'Tier':<10}  Thresholds")
     print(f"  {'─'*16} {'─'*8}  {'─'*10}  {'─'*30}")
-    print(f"  {'WER':<16} {scores['wer']:>7.1%}  {tiers.get('wer','?'):<10}  F>30% W>15% P>5% E<5%")
-    print(f"  {'Char overlap':<16} {scores['char_overlap']:>7.1%}  {tiers.get('overlap','?'):<10}  F<60% W<75% P<90% E>90%")
-    print(f"  {'Recall':<16} {scores['recall']:>7.1%}  {tiers.get('recall','?'):<10}  F<70% W<85% P<95% E>95%")
+    if has_gt:
+        print(f"  {'WER':<16} {scores['wer']:>7.1%}  {tiers.get('wer','?'):<10}  F>30% W>15% P>5% E<5%")
+        print(f"  {'Char overlap':<16} {scores['char_overlap']:>7.1%}  {tiers.get('overlap','?'):<10}  F<60% W<75% P<90% E>90%")
+        print(f"  {'Recall':<16} {scores['recall']:>7.1%}  {tiers.get('recall','?'):<10}  F<70% W<85% P<95% E>95%")
+    else:
+        print(f"  {'WER':<16} {'n/a':>8}  {'-':<10}  no ground truth")
+        print(f"  {'Char overlap':<16} {'n/a':>8}  {'-':<10}  no ground truth")
+        print(f"  {'Recall':<16} {'n/a':>8}  {'-':<10}  no ground truth")
     print(f"  {'Duplications':<16} {scores['duplications']:>8d}  {tiers.get('dups','?'):<10}  F>=3 W>=1 P=0")
     print(f"  {'Stability':<16} {scores['stability_jumps']:>8d}  {tiers.get('jumps','?'):<10}  F>10 W>5 P>1 E<=1")
     print(f"  {'Avg latency':<16} {scores['avg_latency']:>6.1f}s  {tiers.get('latency','?'):<10}  F>5s W>3s P>1s E<1s")
@@ -524,7 +537,10 @@ def print_report(snapshots, final_confirmed, ground_truth, scores,
     print(f"  {'Avg inference':<16} {scores.get('avg_inference_ms',0):>5d}ms  {'':10}")
     print(f"  {'Max inference':<16} {scores.get('max_inference_ms',0):>5d}ms  {tiers.get('max_inference','?'):<10}  F>3s W>1.5s P>800ms E<800ms")
     print(f"  {'Trim count':<16} {scores.get('trim_count',0):>8d}")
-    print(f"  {'Completeness':<16} {scores['completeness']:>7.0%}  {'':10}  ({found_count}/{len(gt_sents)} sentences)")
+    if has_gt:
+        print(f"  {'Completeness':<16} {scores['completeness']:>7.0%}  {'':10}  ({found_count}/{len(gt_sents)} sentences)")
+    else:
+        print(f"  {'Completeness':<16} {'n/a':>8}  {'-':<10}  no ground truth")
     if scores.get('offline_wer_delta', 0) != 0:
         print(f"  {'Offline delta':<16} {scores['offline_wer_delta']:>+7.1%}  {'':10}  (streaming WER - offline WER)")
     print(f"\n  Overall: {status}")
@@ -655,6 +671,7 @@ def print_batch_summary(all_results):
     pass_count = 0
     total_overlap = 0
     total_wer = 0
+    gt_count = 0
     for r in all_results:
         af = r["audio_file"]
         dur = r["duration_s"]
@@ -668,17 +685,26 @@ def print_batch_summary(all_results):
         passed = r["pass"]
         if passed:
             pass_count += 1
-        total_overlap += ov
-        total_wer += max(wer, 0)
+        has_gt = wer >= 0 and ov >= 0
+        if has_gt:
+            total_overlap += ov
+            total_wer += wer
+            gt_count += 1
 
-        print(f"  {af:<24}  {dur:4.0f}s  {wer:5.1%}  {ov:7.1%}  {recall:6.1%}  "
+        wer_s = f"{wer:5.1%}" if has_gt else "  n/a"
+        ov_s = f"{ov:7.1%}" if has_gt else "    n/a"
+        rec_s = f"{recall:6.1%}" if has_gt else "   n/a"
+        print(f"  {af:<24}  {dur:4.0f}s  {wer_s}  {ov_s}  {rec_s}  "
               f"{dups:4d}  {jumps:5d}  {avg_lat:3.0f}s  {tier:<10}")
 
     n = len(all_results)
-    avg_overlap = total_overlap / n if n else 0
-    avg_wer = total_wer / n if n else 0
-    print(f"\n  Average WER:     {avg_wer:.1%}")
-    print(f"  Average overlap: {avg_overlap:.1%}")
+    if gt_count:
+        avg_wer = total_wer / gt_count
+        avg_overlap = total_overlap / gt_count
+        print(f"\n  Average WER:     {avg_wer:.1%}")
+        print(f"  Average overlap: {avg_overlap:.1%}")
+    else:
+        print(f"\n  (no ground truth — text-quality averages skipped)")
     print(f"  Pass rate:       {pass_count}/{n}")
     print(f"{'=' * 80}")
 
@@ -820,6 +846,8 @@ def main():
                         help=f"max_buffer_s for processor (default: {MAX_BUFFER_S})")
     parser.add_argument("--no-offline", action="store_true",
                         help="Skip offline baseline generation (faster)")
+    parser.add_argument("--named-only", action="store_true",
+                        help="Only use named WAV files (exclude timestamp-dated files like 20260328_*.wav)")
     parser.add_argument("--diagnose", action="store_true",
                         help="Deep diagnostic: per-second timeline, freeze detection, inference histogram")
     parser.add_argument("--report-dir", default="",
@@ -831,6 +859,10 @@ def main():
     max_dur = 0 if args.wav else args.max_duration
     pairs = load_transcript_pairs(filter_wav=args.wav, min_duration=min_dur,
                                   max_duration=max_dur)
+
+    # Filter to named-only files (exclude 20XXXXXX_*.wav dated files)
+    if args.named_only:
+        pairs = [p for p in pairs if not re.match(r"^\d{8}_", p["audio_file"])]
 
     if not pairs:
         # Fallback: load WAV directly without ground truth
@@ -845,6 +877,25 @@ def main():
             else:
                 print(f"[ERROR] WAV not found: {wav_path}")
                 return
+        elif args.named_only:
+            # Scan audio dir for named (non-dated) WAV files
+            for f in sorted(os.listdir(AUDIO_DIR)):
+                if not f.endswith(".wav") or re.match(r"^\d{8}_", f):
+                    continue
+                wav_path = os.path.join(AUDIO_DIR, f)
+                with wave.open(wav_path) as wf:
+                    dur = wf.getnframes() / wf.getframerate()
+                if min_dur and dur < min_dur:
+                    continue
+                if max_dur and dur > max_dur:
+                    continue
+                pairs.append({"audio_file": f, "wav_path": wav_path,
+                              "ground_truth": "", "duration_s": dur})
+            if pairs:
+                print(f"[INFO] Found {len(pairs)} named WAV file(s) — running diagnostics only")
+            else:
+                print("[WARN] No named WAV files found matching duration criteria.")
+                return
         else:
             print("[WARN] No matching WAV + transcript pairs found.")
             print(f"       Audio dir:    {AUDIO_DIR}")
@@ -857,6 +908,9 @@ def main():
         selected = pairs[:1]
     elif args.top > 0:
         selected = pairs[:args.top]
+    elif args.named_only:
+        # Run all named files that passed duration filters
+        selected = pairs
     else:
         # Default: latest >31s recording
         selected = [max(pairs, key=lambda p: p["audio_file"])]

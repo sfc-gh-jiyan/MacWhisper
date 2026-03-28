@@ -12,11 +12,11 @@ smoke:
 	  -m "not slow and not hardware" -q
 
 # ── Level 2: Subtitle QA (~1-2 min) ──────────────────────
-# Replay Google_sample.wav with full diagnostic report.
+# Replay named sample WAVs (non-dated, 30-70s) with diagnostic report.
 # Checks: latency, freezes, inference timing, stability.
 qa:
-	$(PYTHON) tests/test_replay.py --wav Google_sample.wav --diagnose \
-	  --report-dir $(REPORT_DIR) --no-offline
+	$(PYTHON) tests/test_replay.py --named-only --min-duration 30 --max-duration 70 \
+	  --diagnose --report-dir $(REPORT_DIR) --no-offline
 
 # ── Level 3: Standard test (~5 min) ──────────────────────
 # Requires mlx_whisper model. Run before every commit.
