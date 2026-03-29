@@ -521,17 +521,17 @@ class OnlineASRProcessor:
 
         buffer_duration = len(self.audio_buffer) / self.sample_rate
 
-        # Adaptive: if inference was slow, use a tighter limit.
-        # Thresholds are conservative — medium model normally takes 550-650ms,
-        # so only truly slow inference triggers aggressive trim.
+        # Only trim when buffer genuinely exceeds max_buffer_s.
+        # Pre-inference trim (line ~246) already keeps buffer within
+        # max_buffer_s before each inference. This post-inference trim
+        # handles edge cases where audio accumulated during a slow call.
+        #
+        # Previous adaptive thresholds (trim to 3s when inference > 3000ms)
+        # were too aggressive: a single GPU spike would slash the threshold,
+        # triggering trim → reset LocalAgreement → massive confirmation loss.
+        # Run 4 (best: 277/245 chars, 0 trims) vs Run 9 (129/173, 2 trims)
+        # showed that fewer trims = more confirmed text.
         effective_max = self.max_buffer_s
-        if self._last_inference_ms > 3000:
-            # Very slow — emergency trim to 3s
-            effective_max = 3.0
-        elif self._last_inference_ms > 1500:
-            # Moderately slow — trim to 60% of current buffer
-            effective_max = min(effective_max, buffer_duration * 0.6)
-            effective_max = max(effective_max, 3.0)  # never trim below 3s
 
         if buffer_duration <= effective_max:
             self._last_trim_info = None
