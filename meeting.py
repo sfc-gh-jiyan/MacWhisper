@@ -215,9 +215,8 @@ class MeetingSession:
 
         # Commit final segment
         if self._processor:
-            text = self._processor.segment_close()
-            if text.strip():
-                self._commit_segment(text)
+            if self._processor.committed or self._processor.transcript_buffer.peek_unconfirmed():
+                self._close_and_trim_segment()
             self._processor.reset()
             self._processor = None
 
@@ -369,16 +368,22 @@ class MeetingSession:
             if self.vad:
                 self.vad.process_chunk(chosen)
 
+                # Safety: force segment break if current segment exceeds 30s.
+                # Natural speech rarely has 2s clean silence, so the extended-
+                # silence trigger alone can produce unbounded segments (56s+).
+                # A 30s cap keeps segments manageable and limits accumulation
+                # of transcription errors within a single segment.
+                MAX_SEGMENT_DURATION_S = 30.0
+                seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
+                if seg_duration > MAX_SEGMENT_DURATION_S and self._processor.committed:
+                    self._close_and_trim_segment()
+                    continue
+
                 # Extended silence -> paragraph break (segment commit)
                 if self.vad.is_extended_silence(self.extended_silence_ms):
                     seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
                     if seg_duration > 1.0 and self._processor.committed:
-                        text = self._processor.segment_close()
-                        if text.strip():
-                            self._commit_segment(text)
-                        # Clear committed words so next segment starts fresh
-                        self._processor.committed = []
-                        self.vad.reset()
+                        self._close_and_trim_segment()
                         continue
 
                 # VAD pre-filter: skip transcription during pure silence
@@ -429,6 +434,45 @@ class MeetingSession:
         self._segments.append(segment)
         print(f"[MEETING] Segment #{len(self._segments)}: "
               f"{len(text)} chars at {elapsed:.0f}s")
+
+    def _close_and_trim_segment(self) -> None:
+        """Close current segment, trim audio buffer, and reset for next segment.
+
+        This is the standard segment-break sequence used by both extended-silence
+        detection and the max-segment-duration safety net.
+
+        After segment_close(), the audio buffer still contains all old audio.
+        Without trimming, the next process_iter() would re-transcribe it,
+        causing: (1) echo detection dropping legitimate new confirmations
+        (content loss), and (2) near-duplicate text slipping past echo
+        detection (duplication).  Trimming the buffer to the segment's end
+        time eliminates both problems at the source.
+        """
+        text = self._processor.segment_close()
+        if text.strip():
+            self._commit_segment(text)
+
+        # Trim audio buffer up to the last committed word's end time.
+        # Keep only audio that arrived after the segment ended.
+        if self._processor.committed:
+            seg_end = self._processor.committed[-1][1]
+            trim_samples = int(
+                (seg_end - self._processor.buffer_time_offset) * SAMPLE_RATE
+            )
+            trim_samples = min(trim_samples, len(self._processor.audio_buffer))
+            if trim_samples > 0:
+                self._processor.audio_buffer = self._processor.audio_buffer[trim_samples:]
+                self._processor.buffer_time_offset = seg_end
+
+        # Clear committed words so next segment starts fresh.
+        self._processor.committed = []
+        # Clear echo state: old audio is trimmed, so there's nothing to
+        # echo-detect against. Without this, the retained _last_committed_raw
+        # would cause echo detection to drop legitimate new words.
+        self._processor._last_committed_raw = ""
+
+        if self.vad:
+            self.vad.reset()
 
     # ── Internal: transcript formatting ──────────────────────
 
