@@ -223,7 +223,7 @@ class TestDualChannelPipeline:
         """MeetingSession processes dual-channel WAV input and produces transcript."""
         s, mic_path, sys_path = self._get_scenario()
 
-        backend = MockBackend(responses=[f"segment{i}" for i in range(200)])
+        backend = MockBackend(responses=["hello world"] * 200)
         mic_src = WavFileSource(mic_path, speed=0)
         sys_src = WavFileSource(sys_path, offset_s=s["system_offset_s"], speed=0)
         mixed = MixedAudioSource([mic_src, sys_src])
@@ -330,7 +330,7 @@ class TestOverlappingChannels:
         """MeetingSession doesn't crash when both sources deliver audio simultaneously."""
         s, mic_path, sys_path = self._get_scenario()
 
-        backend = MockBackend(responses=[f"word{i}" for i in range(300)])
+        backend = MockBackend(responses=["hello world"] * 300)
         mic_src = WavFileSource(mic_path, speed=0)
         # Small offset so they overlap significantly
         sys_src = WavFileSource(sys_path, offset_s=s["system_offset_s"], speed=0)
@@ -386,7 +386,7 @@ class TestDualChannelPipelineV2:
 
     def _make_dual_session(self, mic_path, sys_path, offset_s=0):
         """Create a MeetingSession in dual-channel mode with WavFileSources."""
-        backend = MockBackend(responses=[f"segment{i}" for i in range(200)])
+        backend = MockBackend(responses=["hello world"] * 200)
         mic_src = WavFileSource(mic_path, speed=0)
         sys_src = WavFileSource(sys_path, offset_s=offset_s, speed=0)
 

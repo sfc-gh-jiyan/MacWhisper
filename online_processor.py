@@ -220,9 +220,13 @@ class OnlineASRProcessor:
         if self._iter_count == 0 and buffer_duration < self.min_first_buffer_s:
             return None
 
-        # Skip inference if buffer tail is silent (prevents hallucination on silence)
+        # Skip inference if buffer tail is silent (prevents hallucination on silence).
+        # Only apply when the buffer is short (< max_buffer_s). When the buffer
+        # is large (e.g. speed=0 test delivery dumps entire WAV at once), the
+        # tail is always the recording's silent ending, which would permanently
+        # block inference even though the buffer is full of speech.
         tail_samples = int(0.5 * self.sample_rate)
-        if len(self.audio_buffer) > tail_samples:
+        if buffer_duration < self.max_buffer_s and len(self.audio_buffer) > tail_samples:
             tail_rms = float(np.sqrt(np.mean(self.audio_buffer[-tail_samples:] ** 2)))
             if tail_rms < 0.003:  # ~100 in int16 scale
                 logger.debug("skip: buffer tail silent (rms=%.5f)", tail_rms)
