@@ -153,7 +153,7 @@ class OnlineASRProcessor:
         backend: ASRBackend,
         vad=None,
         min_chunk_size: float = 0.7,
-        min_first_buffer_s: float = 2.0,
+        min_first_buffer_s: float = 1.5,
         max_buffer_s: float = 20.0,
         buffer_trimming: str = "segment",
         language: str | None = None,
@@ -384,25 +384,36 @@ class OnlineASRProcessor:
 
         # Post-commit echo detection: if newly confirmed words just repeat
         # the tail of the previous segment's committed text, skip them.
+        #
+        # Fixed: limit tail to 80 chars to prevent false positives on long
+        # committed text. Use word-level prefix match instead of cumulative
+        # substring match — the old `running in tail` approach falsely
+        # matched common Chinese characters ("的","是") against a long tail,
+        # causing echo_dropped=15 in a single iteration (massive content loss).
         echo_dropped = 0
         if newly_confirmed and self._last_committed_raw:
             new_text = "".join(w[2] for w in newly_confirmed)
-            # Check if the new text is a substring of the committed tail
-            tail = self._last_committed_raw[-len(new_text) - 20:]
+            # Only compare against the last 80 chars of committed text
+            tail = self._last_committed_raw[-80:]
             if new_text in tail:
+                # Full echo: entire newly_confirmed is a substring of tail
                 echo_dropped = len(newly_confirmed)
                 newly_confirmed = []
             else:
-                # Partial echo: drop leading words that match committed tail
-                kept = []
-                running = ""
-                for w in newly_confirmed:
-                    running += w[2]
-                    if running in tail:
-                        echo_dropped += 1
-                    else:
-                        kept.append(w)
-                newly_confirmed = kept
+                # Word-level prefix echo: compare trailing words of tail
+                # against leading words of newly_confirmed. Only strip
+                # matching prefix, keep everything after.
+                tail_words = [w.strip() for w in tail.split() if w.strip()]
+                new_words = [w[2].strip() for w in newly_confirmed]
+                best_prefix = 0
+                if tail_words and new_words:
+                    max_check = min(len(tail_words), len(new_words))
+                    for k in range(1, max_check + 1):
+                        if tail_words[-k:] == new_words[:k]:
+                            best_prefix = k
+                if best_prefix > 0:
+                    echo_dropped = best_prefix
+                    newly_confirmed = newly_confirmed[best_prefix:]
             if echo_dropped:
                 # Clear echo state once non-echo content arrives
                 # (only clear after full echo is consumed)
@@ -427,9 +438,13 @@ class OnlineASRProcessor:
         self._last_process_time = time.time()
 
         # Debug info
+        # buffer_s: record actual buffer size sent to Whisper (post pre-inference trim),
+        # not the pre-trim value which is misleadingly large when audio accumulates
+        # during slow inference.
+        actual_buffer_s = len(self.audio_buffer) / self.sample_rate
         self.last_debug = {
             "iter": self._iter_count,
-            "buffer_s": round(buffer_duration, 1),
+            "buffer_s": round(actual_buffer_s, 1),
             "inference_ms": inference_ms,
             "raw_text": raw_text[:50],
             "confirmed_words": len(self.committed_history),

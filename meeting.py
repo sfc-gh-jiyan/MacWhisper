@@ -408,7 +408,8 @@ class MeetingSession:
             # Notify overlay
             if self._on_update:
                 try:
-                    self._on_update(confirmed, unconfirmed, self._segments)
+                    debug = self._processor.last_debug if self._processor else {}
+                    self._on_update(confirmed, unconfirmed, self._segments, debug)
                 except Exception:
                     pass
 

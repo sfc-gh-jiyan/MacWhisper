@@ -463,7 +463,7 @@ class TranscriberApp(rumps.App):
 
         self._meeting_session = None
 
-    def _meeting_overlay_update(self, confirmed, unconfirmed, segments):
+    def _meeting_overlay_update(self, confirmed, unconfirmed, segments, debug=None):
         """Callback from MeetingSession to update overlay."""
         # Prepend committed segment text for context
         seg_text = "\n".join(s.text for s in segments[-2:]) if segments else ""
@@ -480,6 +480,9 @@ class TranscriberApp(rumps.App):
                     self._overlay_panel, self._overlay_text, c, u, mode="meeting"
                 )
             )
+
+        # Log to subtitles.jsonl (same format as Live Subtitles)
+        self._log_subtitle_live(confirmed, unconfirmed, debug or {}, mode="meeting")
 
     def _cycle_model(self):
         current_idx = next(
@@ -704,6 +707,10 @@ class TranscriberApp(rumps.App):
                     if segment_text:
                         logger.info("VAD segment committed: %d chars", len(segment_text))
                         self._log_subtitle(segment_text, seg_duration)
+                    # Clear echo state — old segment text is committed, new words
+                    # should not be echo-checked against it (same as Meeting Mode's
+                    # _close_and_trim_segment).
+                    proc._last_committed_raw = ""
                     self._vad.reset()
 
             # Show current state BEFORE blocking inference so overlay
@@ -765,12 +772,12 @@ class TranscriberApp(rumps.App):
         with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def _log_subtitle_live(self, confirmed, unconfirmed, debug):
+    def _log_subtitle_live(self, confirmed, unconfirmed, debug, mode="live"):
         """Log a live subtitle iteration to subtitle log."""
         _ensure_history_dirs()
         entry = {
             "timestamp": datetime.datetime.now().isoformat(),
-            "type": "live_iter",
+            "type": f"{mode}_iter",
             "confirmed": confirmed[-100:] if confirmed else "",
             "unconfirmed": unconfirmed[-50:] if unconfirmed else "",
             "debug": debug,
