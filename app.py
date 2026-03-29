@@ -632,12 +632,22 @@ class TranscriberApp(rumps.App):
         if not self._live_loop_done.wait(timeout=3):
             logger.warning("Live loop still running (mid-inference) — proceeding")
 
-        # Force-confirm remaining words from processor
+        # Force-confirm remaining words from processor and capture
+        # the complete real-time text (concrete evidence of what the
+        # subtitle window displayed during this session).
+        realtime_text = ""
         try:
             if self._processor:
                 self._processor.segment_close()
+                realtime_text = "".join(
+                    w[2] for w in self._processor.committed_history
+                )
         except Exception as e:
             logger.error("Processor cleanup failed: %s", e)
+
+        # Log session_end with complete real-time text to subtitles.jsonl
+        if realtime_text:
+            self._log_subtitle_session_end(realtime_text)
 
         if not self.frames:
             self.title = self._idle_icon
@@ -646,7 +656,7 @@ class TranscriberApp(rumps.App):
 
         self.title = "💬"
         self._set_status("Transcribing...")
-        self.transcribe_queue.put(list(self.frames))
+        self.transcribe_queue.put((list(self.frames), realtime_text))
         self.frames = []  # release memory immediately
 
     # ── Live Subtitles — unified loop (replaces old chunk + worker) ──
@@ -678,6 +688,7 @@ class TranscriberApp(rumps.App):
             self._vad.reset()
 
         last_frame_idx = 0
+        last_segment_close_time = 0.0
 
         while self.recording:
             # Brief yield — processor's internal throttle handles timing
@@ -702,8 +713,10 @@ class TranscriberApp(rumps.App):
             if use_vad:
                 self._vad.process_chunk(audio_chunk)
                 seg_duration = len(proc.audio_buffer) / SAMPLE_RATE
-                if self._vad.is_speech_end() and seg_duration > 5.0:
+                time_since_close = time.time() - last_segment_close_time
+                if self._vad.is_speech_end() and seg_duration > 5.0 and time_since_close > 3.0:
                     segment_text = proc.segment_close()
+                    last_segment_close_time = time.time()
                     if segment_text:
                         logger.info("VAD segment committed: %d chars", len(segment_text))
                         self._log_subtitle(segment_text, seg_duration)
@@ -785,13 +798,35 @@ class TranscriberApp(rumps.App):
         with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def _log_subtitle_session_end(self, realtime_text):
+        """Log session_end with complete real-time text to subtitles.jsonl.
+
+        This is the 'concrete evidence' — the full text that was displayed
+        in the subtitle window across the entire Push-to-Talk session.
+        """
+        _ensure_history_dirs()
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "type": "session_end",
+            "realtime_text": realtime_text,
+            "char_count": len(realtime_text),
+        }
+        with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        logger.info("Session end logged: %d chars of real-time text", len(realtime_text))
+
     # ── Transcription (hold-to-record final pass) ──────────────
 
     def _transcription_worker(self):
         while True:
-            frames = self.transcribe_queue.get()
+            item = self.transcribe_queue.get()
+            # Unpack: new format is (frames, realtime_text), legacy is just frames
+            if isinstance(item, tuple) and len(item) == 2:
+                frames, realtime_text = item
+            else:
+                frames, realtime_text = item, ""
             try:
-                self._do_transcribe(frames)
+                self._do_transcribe(frames, realtime_text=realtime_text)
             except Exception as e:
                 print(f"[ERROR] Transcription failed: {e}")
             finally:
@@ -803,12 +838,18 @@ class TranscriberApp(rumps.App):
                 self.title = self._idle_icon
                 self._set_status("Ready")
 
-    def _do_transcribe(self, frames):
+    def _do_transcribe(self, frames, realtime_text=""):
         """Final transcription pass using the ASR backend.
 
         This runs after recording stops. For short recordings or when
         live mode is off, this is the only transcription. For live mode,
         this provides a final high-quality pass over the full audio.
+
+        Args:
+            frames: List of audio frames (int16 numpy arrays).
+            realtime_text: Complete text from real-time subtitle display
+                (committed_history). Saved alongside offline text for
+                comparison / concrete evidence.
         """
         # Ensure live loop has fully exited before starting Metal inference
         # (concurrent Metal inferences cause assertion failures / crashes)
@@ -881,7 +922,7 @@ class TranscriberApp(rumps.App):
             language=result.language,
         )
 
-        # Log transcription result (legacy format for compatibility)
+        # Log transcription result with both offline and real-time text
         log_entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "audio_file": os.path.basename(wav_path) if wav_path else None,
@@ -890,6 +931,8 @@ class TranscriberApp(rumps.App):
             "duration_s": round(duration, 1),
             "text": text,
         }
+        if realtime_text:
+            log_entry["realtime_text"] = realtime_text
         with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
         print(f"[INFO] Logged transcript: {TRANSCRIPT_LOG}")
