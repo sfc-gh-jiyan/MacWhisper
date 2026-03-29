@@ -346,16 +346,37 @@ class OnlineASRProcessor:
 
         # Dedup: sliding window alignment may re-confirm words that are
         # already in self.committed (e.g., after trim+reset, or when the same
-        # overlapping region matches in consecutive iterations). Drop if the
-        # newly confirmed text appears as a substring in committed text.
+        # overlapping region matches in consecutive iterations).
+        #
+        # Two checks:
+        # 1. Exact substring: drop if newly_confirmed text is entirely
+        #    within committed text (pure re-confirmation).
+        # 2. Overlap prefix: if newly_confirmed starts with the tail of
+        #    committed text, strip the overlapping prefix and keep only
+        #    genuinely new words. This catches the common pattern where
+        #    Whisper re-confirms "最近我进行大量的" + adds "coding" — the
+        #    old part is already committed, only "coding" is new.
+        #
         # NOTE: use self.committed (active words), NOT committed_history.
-        # committed_history retains all words including pre-trim ones, so
-        # post-trim re-confirmations would be falsely rejected.
         if newly_confirmed and self.committed:
             new_text = "".join(w[2] for w in newly_confirmed)
             committed_text = "".join(w[2] for w in self.committed)
             if new_text in committed_text:
                 newly_confirmed = []
+            else:
+                # Overlap prefix dedup: find how many leading words of
+                # newly_confirmed match the tail of committed.
+                # Compare word texts (stripped) to handle punctuation variations.
+                committed_words = [w[2].strip() for w in self.committed]
+                new_words_text = [w[2].strip() for w in newly_confirmed]
+                # Try matching new_words[0..k] against committed[-k..]
+                max_overlap = min(len(committed_words), len(new_words_text))
+                best_overlap = 0
+                for k in range(1, max_overlap + 1):
+                    if committed_words[-k:] == new_words_text[:k]:
+                        best_overlap = k
+                if best_overlap > 0:
+                    newly_confirmed = newly_confirmed[best_overlap:]
 
         # Post-commit echo detection: if newly confirmed words just repeat
         # the tail of the previous segment's committed text, skip them.
