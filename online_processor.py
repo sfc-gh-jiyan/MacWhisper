@@ -346,6 +346,23 @@ class OnlineASRProcessor:
         # Flush confirmed words
         newly_confirmed = self.transcript_buffer.flush()
 
+        # Intra-batch dedup: detect repeated prefix WITHIN newly_confirmed.
+        # In bilingual speech, Whisper may produce two translation variants
+        # in the same flush batch, e.g.:
+        #   "在这个会议上 Professor Hannah Yang gave us" +
+        #   "在这个会议上 Professor Hannah Yang 给我们介绍了"
+        # Both share a long prefix. We keep the first occurrence and
+        # truncate at the second repeated prefix start.
+        if len(newly_confirmed) >= 6:
+            nc_texts = [w[2].strip() for w in newly_confirmed]
+            dup_start = self._find_intra_batch_repeat(nc_texts, min_prefix=3)
+            if dup_start > 0:
+                logger.debug(
+                    "Intra-batch dedup: truncating %d→%d words (repeated prefix at %d)",
+                    len(newly_confirmed), dup_start, dup_start,
+                )
+                newly_confirmed = newly_confirmed[:dup_start]
+
         # Dedup: sliding window alignment may re-confirm words that are
         # already in self.committed (e.g., after trim+reset, or when the same
         # overlapping region matches in consecutive iterations).
@@ -461,6 +478,17 @@ class OnlineASRProcessor:
         """
         # Confirm everything still in buffer
         unconfirmed = self.transcript_buffer.peek_unconfirmed()
+
+        # Filter trailing single-CJK-char fragments from unconfirmed tail.
+        # Whisper sometimes splits words across boundaries (e.g., "挑战" →
+        # "挑" confirmed, "战。" unconfirmed). Force-confirming "战。" creates
+        # a meaningless fragment in the output.
+        while unconfirmed:
+            tail_text = unconfirmed[-1][2].strip().rstrip('。！？，、.!?,')
+            if len(tail_text) == 1 and '\u4e00' <= tail_text <= '\u9fff':
+                unconfirmed = unconfirmed[:-1]
+            else:
+                break
         self.committed.extend(unconfirmed)
         self.committed_history.extend(unconfirmed)
         full_text = "".join(w[2] for w in self.committed)
@@ -592,6 +620,37 @@ class OnlineASRProcessor:
                 result.extend(words[i:run_end])
                 i = run_end
         return result
+
+    @staticmethod
+    def _find_intra_batch_repeat(
+        texts: list[str], min_prefix: int = 3
+    ) -> int:
+        """Find a repeated word prefix inside a single confirmed batch.
+
+        When Whisper oscillates between translation variants (e.g., Chinese
+        vs English for the same content), both variants may be flushed in
+        one batch:
+            ["在", "这个", "会议上", "Professor", "Hannah", "Yang", "gave", "us",
+             "在", "这个", "会议上", "Professor", "Hannah", "Yang", "给我们", "介绍了"]
+
+        This function finds the start of the second occurrence of a prefix
+        that already appeared earlier in the batch.
+
+        Returns:
+            Index of the duplicate prefix start (> 0), or 0 if none found.
+        """
+        n = len(texts)
+        if n < min_prefix * 2:
+            return 0
+
+        # For each possible second-start position j, check if
+        # texts[j:j+min_prefix] matches texts[0:min_prefix] (start of batch)
+        # or any earlier position's prefix.
+        first_words = texts[:min_prefix]
+        for j in range(min_prefix, n - min_prefix + 1):
+            if texts[j:j + min_prefix] == first_words:
+                return j
+        return 0
 
     def _maybe_trim_buffer(self):
         """Trim audio buffer if it exceeds max_buffer_s.
