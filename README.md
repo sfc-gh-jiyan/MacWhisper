@@ -9,12 +9,14 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 ## Features
 
 - **Hold-to-record** — Hold Right Option key to record, release to transcribe and auto-paste
+- **Live Subtitles** — Real-time floating overlay showing confirmed (white) and unconfirmed (gray) text as you speak
+- **Meeting Mode** — Continuous recording with automatic segmentation, dual-channel mic + system audio capture, Markdown/JSON/SRT export
 - **Bilingual support** — Chinese, English, and mixed Chinese-English speech
 - **Translate mode** — Toggle translation to English for any spoken language
 - **3 model sizes** — Switch between Small, Medium, and Large models on the fly
 - **Menu bar status** — 🎙 Ready / 🔴 Recording / 💬 Transcribing / 🌐 Translate mode
-- **Keyboard shortcuts** — `Ctrl+Shift+M` to cycle models, `Ctrl+Shift+T` to toggle translation
-- **Persistent settings** — Model choice and translate mode survive app restarts
+- **Keyboard shortcuts** — `Ctrl+Shift+M` models, `Ctrl+Shift+T` translate, `Ctrl+Shift+S` live subtitles, `Ctrl+Shift+R` meeting mode
+- **Persistent settings** — Model choice and all toggles survive app restarts
 - **100% local** — All processing on Apple Silicon GPU, no data leaves your machine
 
 ## Requirements
@@ -94,8 +96,10 @@ A microphone icon (🎙) appears in your menu bar. That's it — you're ready.
 | Action | How |
 |---|---|
 | **Record & transcribe** | Hold **Right Option**, speak, release |
-| **Switch model** | Click menu bar icon, or **Ctrl+Shift+M** |
-| **Toggle translation** | Click menu bar icon, or **Ctrl+Shift+T** |
+| **Live Subtitles** | **Ctrl+Shift+S** or menu toggle |
+| **Meeting Mode** | **Ctrl+Shift+R** or menu toggle |
+| **Switch model** | **Ctrl+Shift+M** or menu |
+| **Toggle translation** | **Ctrl+Shift+T** or menu |
 | **Quit** | Click menu bar icon → Quit |
 
 ### Menu Bar Icons
@@ -138,12 +142,15 @@ All three models were tested with the same bilingual Chinese-English script:
 
 ## Configuration
 
-Settings are stored in `~/.macwhisper_config.json`:
+Settings are stored in `~/.macwhisper/config.json`:
 
 ```json
 {
   "translate_mode": false,
-  "current_model": "mlx-community/whisper-medium-mlx"
+  "current_model": "mlx-community/whisper-medium-mlx",
+  "live_mode": false,
+  "save_audio": false,
+  "log_level": "WARNING"
 }
 ```
 
