@@ -331,6 +331,13 @@ class OnlineASRProcessor:
             unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
             return (confirmed_text, unconfirmed_text)
 
+        # Strip word-level repetitions before LocalAgreement.
+        # Whisper hallucination loops produce "四四四四..." or "雪。雪。雪。..."
+        # where the same word repeats 40-80 times. strip_trailing_repetition()
+        # operates on raw_text but raw_words is extracted from the original
+        # result before stripping, so repetitive words survive into here.
+        raw_words = self._strip_word_repetitions(raw_words)
+
         # Insert into HypothesisBuffer for LocalAgreement
         self.transcript_buffer.insert(raw_words, offset=self.buffer_time_offset)
 
@@ -501,6 +508,52 @@ class OnlineASRProcessor:
             end = result.segments[-1].end if result.segments else 0.0
             words.append((start, end, text))
         return words
+
+    @staticmethod
+    def _strip_word_repetitions(
+        words: list[tuple[float, float, str]],
+        max_repeat: int = 3,
+    ) -> list[tuple[float, float, str]]:
+        """Remove consecutive repeated words that indicate hallucination loops.
+
+        Whisper decoder loops produce sequences like "四四四四..." (77×) or
+        "雪。雪。雪。..." (41×). This strips runs of ≥ max_repeat identical
+        words down to a single occurrence, preserving the first word's
+        timestamps.
+
+        Comparison is case-insensitive and strip-punctuation to catch
+        variations like "雪。" vs "雪," which are the same hallucination.
+        """
+        if len(words) < max_repeat:
+            return words
+
+        strip_chars = set(' \t\n，。！？、,.!?-\u3000')
+
+        def _norm(text: str) -> str:
+            return ''.join(c.lower() for c in text if c not in strip_chars)
+
+        result = []
+        i = 0
+        while i < len(words):
+            norm_i = _norm(words[i][2])
+            # Count consecutive identical words
+            run_end = i + 1
+            while run_end < len(words) and _norm(words[run_end][2]) == norm_i:
+                run_end += 1
+            run_len = run_end - i
+            if run_len >= max_repeat:
+                # Hallucination loop: keep only the first occurrence
+                result.append(words[i])
+                logger.debug(
+                    "Stripped word repetition: %r × %d",
+                    words[i][2], run_len,
+                )
+                i = run_end
+            else:
+                # Normal: keep all words in this short run
+                result.extend(words[i:run_end])
+                i = run_end
+        return result
 
     def _maybe_trim_buffer(self):
         """Trim audio buffer if it exceeds max_buffer_s.
