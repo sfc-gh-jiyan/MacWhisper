@@ -14,3 +14,19 @@ INTERNAL_*.md
 sweep_params.py
 .cortex/
 tests/TestReport/
+
+# Build artifacts
+*.tar.gz
+*.sha256
+swift/SystemAudioHelper/.build/
+
+# IDE / workspace
+MacWhisper.code-workspace
+
+# Experimental / unused launchers
+launcher.c
+launcher.swift
+setup.py
+
+# Runtime data
+meetings/

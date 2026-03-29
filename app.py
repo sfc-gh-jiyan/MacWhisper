@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.5.2
+MacWhisper - macOS Menu Bar App  v0.6.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 import json
 import logging
@@ -229,7 +229,7 @@ class TranscriberApp(rumps.App):
         _migrate_old_data()
         cfg = self._load_config()
         self.translate_mode = cfg.get("translate_mode", False)
-        self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Small (Fast)"])
+        self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Medium (Accurate)"])
         self.live_mode      = cfg.get("live_mode", False)
         self.save_audio     = cfg.get("save_audio", False)
         self.log_level      = cfg.get("log_level", "WARNING")

@@ -4,21 +4,35 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.6.0] — 2026-03-27
+## [0.6.0] — 2026-03-29
 
 ### Added
-- Meeting Mode: mic + system audio dual-channel capture via ScreenCaptureKit
-- Overlap handling: RMS energy comparison selects the louder source when both channels are active
-- Dual-mode overlay: Push to Talk (orange stripe) vs Meeting Recording (red stripe)
-- Overlay shows mode label immediately on panel creation (no waiting for first transcription)
-- Structured debug logging across entire transcription pipeline (online_processor, meeting, app)
-- `log_level` configurable via `~/.macwhisper/config.json` (not exposed in menu UI)
+- **Meeting Mode**: continuous recording with automatic segmentation, real-time overlay, Markdown/JSON/SRT export
+  - Mic + system audio dual-channel capture via ScreenCaptureKit
+  - Overlap handling: RMS energy comparison selects the louder source
+  - Dual-mode overlay: Push to Talk (orange) vs Meeting Recording (red)
+  - VAD-driven paragraph breaks on extended silence (2s)
+  - Max segment duration safety net (30s wall-clock)
+- Word-level hallucination loop filter: collapses consecutive identical words (>=3) before LocalAgreement
+- Overlap-aware prefix dedup: strips re-confirmed leading words from newly confirmed output
+- `committed_history` (append-only) split from `committed` (trim-aware) for correct output across trim/segment boundaries
+- Trim cooldown (2 iterations) after buffer trim to let LocalAgreement stabilize
+- Structured debug logging across transcription pipeline
+- `log_level` configurable via `~/.macwhisper/config.json`
 - Three-level test Makefile (unit / integration / all)
-- Dual-channel A/B comparison test coverage
+
+### Changed
+- Default model changed from Small to **Medium (Accurate)**
+- Audio buffer trimmed after segment close — eliminates content loss from echo detection and near-duplicate text from re-transcription
 
 ### Fixed
-- Meeting SRT/words history redirected to meetings directory
-- Test output isolation to prevent pollution of `~/.macwhisper/`
+- Meeting segment timestamps showing identical values (used committed_history instead of committed)
+- Overlay not closing when Meeting Mode stops (reordered to destroy overlay before blocking stop)
+- Trim loop: 9 trims to same position (committed cleanup after trim + cooldown)
+- Adaptive trim over-reaction to GPU spikes removed — confirmed text +115% (Run 10: 297/318 chars)
+- Dedup false positive after trim (use committed, not committed_history)
+- Content loss after segment close (echo detection dropping legitimate re-confirmations)
+- Sentence-level duplication (5 per session -> 1) via overlap prefix dedup
 - OnlineASRProcessor post-commit echo duplication
 
 ## [0.5.2] — 2026-03-25
