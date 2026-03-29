@@ -702,8 +702,8 @@ class TranscriberApp(rumps.App):
 
             # Show current state BEFORE blocking inference so overlay
             # stays responsive while Whisper is processing
-            if self._overlay_panel and (proc.committed or proc.last_unconfirmed):
-                pre_conf = "".join(w[2] for w in proc.committed)
+            if self._overlay_panel and (proc.committed_history or proc.last_unconfirmed):
+                pre_conf = "".join(w[2] for w in proc.committed_history)
                 pre_unconf = "".join(w[2] for w in proc.last_unconfirmed)
                 pre_key = (pre_conf, pre_unconf)
                 if pre_key != self._last_overlay_key:

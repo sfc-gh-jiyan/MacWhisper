@@ -175,6 +175,11 @@ class OnlineASRProcessor:
         # Transcript state
         self.transcript_buffer = HypothesisBuffer()
         self.committed: list[tuple[float, float, str]] = []
+        # committed_history: append-only full history of all confirmed words.
+        # Unlike self.committed (which gets trimmed by _maybe_trim_buffer),
+        # this list never loses words. Used for output text, SRT export,
+        # prompt building, and dedup checks.
+        self.committed_history: list[tuple[float, float, str]] = []
         self.last_unconfirmed: list[tuple[float, float, str]] = []
         self._committed_end_time: float = 0.0  # end time of last committed word
         self._last_committed_raw: str = ""  # for post-commit echo detection
@@ -185,6 +190,7 @@ class OnlineASRProcessor:
         self.throttle: bool = True  # can disable for testing
         self._last_inference_ms: int = 0  # track last inference time for adaptive trimming
         self._last_trim_info: dict | None = None  # set by _maybe_trim_buffer
+        self._trim_cooldown: int = 0  # iterations to skip _maybe_trim_buffer after trim
 
         # Debug info (for logging)
         self.last_debug: dict = {}
@@ -221,7 +227,7 @@ class OnlineASRProcessor:
             if tail_rms < 0.003:  # ~100 in int16 scale
                 logger.debug("skip: buffer tail silent (rms=%.5f)", tail_rms)
                 self._last_process_time = time.time()
-                confirmed_text = "".join(w[2] for w in self.committed)
+                confirmed_text = "".join(w[2] for w in self.committed_history)
                 unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
                 return (confirmed_text, unconfirmed_text)
 
@@ -259,7 +265,6 @@ class OnlineASRProcessor:
             excess = len(self.audio_buffer) - target_samples
             self.audio_buffer = self.audio_buffer[excess:]
             self.buffer_time_offset += excess / self.sample_rate
-            # Same rationale — do not touch HypothesisBuffer.
 
         # Strip trailing silence before inference to prevent hallucination
         # on silent tails. Only affects what we send to Whisper, not the
@@ -302,12 +307,12 @@ class OnlineASRProcessor:
                 len(raw_words), buffer_duration,
             )
             self._last_process_time = time.time()
-            confirmed_text = "".join(w[2] for w in self.committed)
+            confirmed_text = "".join(w[2] for w in self.committed_history)
             unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
             self.last_debug = {
                 "iter": self._iter_count, "buffer_s": round(buffer_duration, 1),
                 "inference_ms": inference_ms, "raw_text": "(word count discard)",
-                "confirmed_words": len(self.committed),
+                "confirmed_words": len(self.committed_history),
                 "unconfirmed_words": len(self.last_unconfirmed),
                 "newly_confirmed": 0, "trim": self._last_trim_info,
             }
@@ -322,7 +327,7 @@ class OnlineASRProcessor:
         if not raw_text or hallucination_reason(raw_text):
             self._last_process_time = time.time()
             # Return current state (don't reset display to empty)
-            confirmed_text = "".join(w[2] for w in self.committed)
+            confirmed_text = "".join(w[2] for w in self.committed_history)
             unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
             return (confirmed_text, unconfirmed_text)
 
@@ -336,6 +341,9 @@ class OnlineASRProcessor:
         # already in self.committed (e.g., after trim+reset, or when the same
         # overlapping region matches in consecutive iterations). Drop if the
         # newly confirmed text appears as a substring in committed text.
+        # NOTE: use self.committed (active words), NOT committed_history.
+        # committed_history retains all words including pre-trim ones, so
+        # post-trim re-confirmations would be falsely rejected.
         if newly_confirmed and self.committed:
             new_text = "".join(w[2] for w in newly_confirmed)
             committed_text = "".join(w[2] for w in self.committed)
@@ -370,14 +378,15 @@ class OnlineASRProcessor:
                     self._last_committed_raw = ""
 
         self.committed.extend(newly_confirmed)
+        self.committed_history.extend(newly_confirmed)
         if newly_confirmed:
             self._committed_end_time = newly_confirmed[-1][1]  # end time
 
         # Get unconfirmed tail
         self.last_unconfirmed = self.transcript_buffer.peek_unconfirmed()
 
-        # Build text outputs
-        confirmed_text = "".join(w[2] for w in self.committed)
+        # Build text outputs (use committed_history for complete output)
+        confirmed_text = "".join(w[2] for w in self.committed_history)
         unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
 
         # Buffer trimming: keep buffer bounded
@@ -391,7 +400,7 @@ class OnlineASRProcessor:
             "buffer_s": round(buffer_duration, 1),
             "inference_ms": inference_ms,
             "raw_text": raw_text[:50],
-            "confirmed_words": len(self.committed),
+            "confirmed_words": len(self.committed_history),
             "unconfirmed_words": len(self.last_unconfirmed),
             "newly_confirmed": len(newly_confirmed),
             "echo_dropped": echo_dropped,
@@ -408,6 +417,7 @@ class OnlineASRProcessor:
         # Confirm everything still in buffer
         unconfirmed = self.transcript_buffer.peek_unconfirmed()
         self.committed.extend(unconfirmed)
+        self.committed_history.extend(unconfirmed)
         full_text = "".join(w[2] for w in self.committed)
 
         logger.debug(
@@ -429,11 +439,11 @@ class OnlineASRProcessor:
 
     def get_confirmed_words(self) -> list[tuple[float, float, str]]:
         """Return all confirmed words with timestamps for SRT export."""
-        return list(self.committed)
+        return list(self.committed_history)
 
     def get_all_words(self) -> list[tuple[float, float, str]]:
         """Return confirmed + unconfirmed words."""
-        return list(self.committed) + list(self.last_unconfirmed)
+        return list(self.committed_history) + list(self.last_unconfirmed)
 
     def reset(self):
         """Full reset for a new recording session."""
@@ -441,6 +451,7 @@ class OnlineASRProcessor:
         self.buffer_time_offset = 0.0
         self.transcript_buffer.reset()
         self.committed = []
+        self.committed_history = []
         self.last_unconfirmed = []
         self._committed_end_time = 0.0
         self._last_committed_raw = ""
@@ -448,13 +459,14 @@ class OnlineASRProcessor:
         self._iter_count = 0
         self._last_inference_ms = 0
         self._last_trim_info = None
+        self._trim_cooldown = 0
         self.last_debug = {}
 
     # ── Internal ─────────────────────────────────────────
 
     def _build_prompt(self) -> str:
         """Build dynamic init_prompt from committed text + bilingual hint."""
-        committed_text = "".join(w[2] for w in self.committed)
+        committed_text = "".join(w[2] for w in self.committed_history)
         if committed_text:
             # Use last 200 chars of committed text as context
             suffix = committed_text[-200:]
@@ -496,7 +508,17 @@ class OnlineASRProcessor:
         Uses adaptive threshold: if last inference was slow (>1500ms),
         trim more aggressively to keep inference fast. If inference was
         very slow (>3s), force trim to 3s regardless.
+
+        Cooldown: after trimming, skip 2 iterations to let LocalAgreement
+        confirm new words and advance _find_trim_point() past the old
+        sentence boundary. Without this, trim loops to the same position.
         """
+        # Cooldown: after a trim, give LocalAgreement time to advance
+        if self._trim_cooldown > 0:
+            self._trim_cooldown -= 1
+            self._last_trim_info = None
+            return
+
         buffer_duration = len(self.audio_buffer) / self.sample_rate
 
         # Adaptive: if inference was slow, use a tighter limit.
@@ -534,6 +556,12 @@ class OnlineASRProcessor:
         old_offset = self.buffer_time_offset
         self.buffer_time_offset = trim_time
 
+        # Remove committed words whose audio has been trimmed away.
+        # This prevents _find_trim_point() from re-finding the same stale
+        # sentence boundary → no more trim loops to the same position.
+        # Safe because committed_history retains the full word history.
+        self.committed = [w for w in self.committed if w[1] > trim_time]
+
         self._last_trim_info = {
             "trimmed": True,
             "from_s": round(old_offset, 1),
@@ -541,6 +569,11 @@ class OnlineASRProcessor:
             "effective_max": round(effective_max, 1),
             "retained_s": round(len(self.audio_buffer) / self.sample_rate, 1),
         }
+
+        # Cooldown: skip 2 iterations of _maybe_trim_buffer so
+        # LocalAgreement can confirm new words and advance past this
+        # sentence boundary before we consider trimming again.
+        self._trim_cooldown = 2
 
         # Reset HypothesisBuffer after trim — word positions change completely
         # so old buffer comparison would never match. Committed words are safe

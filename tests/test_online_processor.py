@@ -408,7 +408,7 @@ class TestOnlineASRProcessor:
         proc.process_iter()
 
         # Check: no duplicates in committed words
-        committed_texts = [w[2] for w in proc.committed]
+        committed_texts = [w[2] for w in proc.committed_history]
         # Count occurrences — "你好" should appear at most once
         from collections import Counter
         counts = Counter(committed_texts)
@@ -520,7 +520,7 @@ class TestOnlineASRProcessor:
         proc.process_iter()
 
         # Check: no duplicates in committed words
-        committed_texts = [w[2] for w in proc.committed]
+        committed_texts = [w[2] for w in proc.committed_history]
         from collections import Counter
         counts = Counter(committed_texts)
         for word, count in counts.items():
@@ -563,7 +563,7 @@ class TestOnlineASRProcessor:
         assert r4 is not None
 
         # "今天", "天气", "很好" should appear exactly once
-        committed_texts = [w[2] for w in proc.committed]
+        committed_texts = [w[2] for w in proc.committed_history]
         from collections import Counter
         counts = Counter(committed_texts)
         for word in ["今天", "天气", "很好"]:
@@ -622,7 +622,7 @@ class TestOnlineASRProcessor:
             proc.insert_audio_chunk(make_speech_audio(2.0))
             proc.process_iter()
 
-        confirmed_final = "".join(w[2] for w in proc.committed)
+        confirmed_final = "".join(w[2] for w in proc.committed_history)
         unconfirmed_final = "".join(w[2] for w in proc.last_unconfirmed)
         total = confirmed_final + unconfirmed_final
         # Key: "越来越" or "难" should appear (LocalAgreement recovered)
@@ -679,7 +679,7 @@ class TestOnlineASRProcessor:
         proc.insert_audio_chunk(make_speech_audio(2.0))
         proc.process_iter()
 
-        total_text = "".join(w[2] for w in proc.committed)
+        total_text = "".join(w[2] for w in proc.committed_history)
 
         # Key assertions:
         # 1. Words from sentences 2 and 3 should be confirmed (not blocked by trim)
@@ -689,6 +689,66 @@ class TestOnlineASRProcessor:
         count_today = total_text.count("今天")
         assert count_today <= 1, \
             f"'今天' appears {count_today} times — dedup should prevent re-confirmation"
+
+    def test_trim_cleans_committed_prevents_loop(self):
+        """After _maybe_trim_buffer, committed (active) list must not contain
+        stale words from before trim_time. This ensures _find_trim_point()
+        finds fresh sentence boundaries instead of looping on the same one.
+
+        Meanwhile, committed_history must retain ALL words (never lose text).
+
+        Regression: Run 5 showed 9 trims in 12s, all to the same 3.3-5.3s
+        position, because committed was never cleaned after trim.
+
+        Fix: _maybe_trim_buffer filters committed after trim. Output uses
+        committed_history (append-only) so no text is lost.
+        """
+        from online_processor import OnlineASRProcessor
+
+        backend = MockASRBackend()
+        # Sentence 1 with period → sentence boundary for trim
+        backend.add_result("你好世界。", [("你好", 0, 0.5), ("世界。", 0.5, 1.0)])
+        backend.add_result("你好世界。", [("你好", 0, 0.5), ("世界。", 0.5, 1.0)])
+        # More results for continued processing
+        backend.add_result("今天好。", [("今天", 0, 0.4), ("好。", 0.4, 0.8)])
+        backend.add_result("今天好。", [("今天", 0, 0.4), ("好。", 0.4, 0.8)])
+        backend.add_result("明天见", [("明天", 0, 0.5), ("见", 0.5, 0.8)])
+        backend.add_result("明天见", [("明天", 0, 0.5), ("见", 0.5, 0.8)])
+
+        # Use larger max_buffer_s so pre-inference trim doesn't fire,
+        # but _maybe_trim_buffer fires when we simulate slow inference
+        proc = OnlineASRProcessor(backend=backend, vad=None, min_first_buffer_s=0,
+                                  min_chunk_size=0.5, max_buffer_s=5.0)
+        proc.throttle = False
+
+        # Confirm sentence 1
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(1.0))
+        proc.process_iter()
+
+        assert any("你好" in w[2] for w in proc.committed_history), \
+            "Sentence 1 should be confirmed"
+
+        # Simulate slow inference → triggers adaptive trim (effective_max=3.0)
+        proc._last_inference_ms = 4000
+
+        # Add enough audio to exceed effective_max of 3.0
+        proc.insert_audio_chunk(make_speech_audio(3.0))
+        proc.process_iter()
+        proc.insert_audio_chunk(make_speech_audio(2.0))
+        proc.process_iter()
+
+        # Key 1: committed_history must retain ALL words (no text loss)
+        history_text = "".join(w[2] for w in proc.committed_history)
+        assert "你好" in history_text, \
+            f"committed_history should retain all words, got: '{history_text}'"
+
+        # Key 2: if _maybe_trim_buffer fired, committed should be cleaned
+        if proc._last_trim_info and proc._last_trim_info.get("trimmed"):
+            stale = [w for w in proc.committed if w[1] <= proc.buffer_time_offset]
+            assert not stale, \
+                f"committed should not contain stale words after trim, got: {stale}"
 
     def test_echo_detection_debug_field(self):
         """last_debug should include echo_dropped count."""

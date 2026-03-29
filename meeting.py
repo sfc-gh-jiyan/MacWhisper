@@ -435,8 +435,8 @@ class MeetingSession:
             parts.append(seg.text)
 
         # Add any uncommitted text from current processor
-        if self._processor and self._processor.committed:
-            current = "".join(w[2] for w in self._processor.committed)
+        if self._processor and self._processor.committed_history:
+            current = "".join(w[2] for w in self._processor.committed_history)
             if current.strip():
                 parts.append(current.strip())
 
