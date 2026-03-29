@@ -577,25 +577,14 @@ class TranscriberApp(rumps.App):
         if self.live_mode:
             AppHelper.callAfter(self._create_overlay)
 
-        # ── 2. Start audio capture IMMEDIATELY ──
-        def callback(indata, frame_count, time_info, status):
-            if self.recording:
-                self.frames.append(indata.copy())
-
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-            blocksize=1024, callback=callback
-        )
-        self.stream.start()
-
-        # ── 3. Wait for pre-warmed backend (usually instant) ──
+        # ── 2. Wait for pre-warmed backend (usually instant) ──
         # Backend was warmed up at app start or model switch.
         # If warmup is still running (rare — app just launched), wait briefly.
         if not self._backend_ready.wait(timeout=15):
             print("[WARN] Backend warmup timed out, creating fresh backend")
             self._backend = MLXWhisperBackend(model_repo=self.current_model)
 
-        # ── 4. Create processor and start live loop ──
+        # ── 3. Create processor and start live loop ──
         self._processor = OnlineASRProcessor(
             backend=self._backend,
             vad=None,
@@ -607,6 +596,23 @@ class TranscriberApp(rumps.App):
         if self.live_mode:
             self._live_loop_done.clear()
             threading.Thread(target=self._live_loop, daemon=True).start()
+
+        # ── 4. Start audio capture LAST ──
+        # IMPORTANT: stream.start() must come AFTER processor creation and
+        # live_loop launch. Previously it was step 2, before the blocking
+        # backend_ready.wait(). This caused audio to accumulate in self.frames
+        # during the wait, flooding the processor with 8s of audio on the
+        # first iteration — pre-inference trim would discard the beginning,
+        # and LocalAgreement couldn't confirm anything for 10+ seconds.
+        def callback(indata, frame_count, time_info, status):
+            if self.recording:
+                self.frames.append(indata.copy())
+
+        self.stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+            blocksize=1024, callback=callback
+        )
+        self.stream.start()
 
     def _stop_and_transcribe(self):
         self.recording = False

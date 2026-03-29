@@ -209,6 +209,18 @@ class OnlineASRProcessor:
         chunk = chunk.squeeze()
         self.audio_buffer = np.concatenate([self.audio_buffer, chunk])
 
+        # Defensive guard: if no inference has run yet and the buffer already
+        # exceeds max_buffer_s, trim to keep only the latest audio. This
+        # prevents "audio flood" on the first iteration (e.g., if frames
+        # accumulated before the live loop started) which would cause
+        # pre-inference trim to discard early speech and freeze LocalAgreement.
+        if self._iter_count == 0:
+            max_samples = int(self.max_buffer_s * self.sample_rate)
+            if len(self.audio_buffer) > max_samples:
+                excess = len(self.audio_buffer) - max_samples
+                self.audio_buffer = self.audio_buffer[excess:]
+                self.buffer_time_offset += excess / self.sample_rate
+
     def process_iter(self) -> tuple[str, str] | None:
         """Run one transcription iteration on the full audio buffer.
 
@@ -408,7 +420,7 @@ class OnlineASRProcessor:
                 newly_confirmed = newly_confirmed[:dup_start]
 
         # Dedup: sliding window alignment may re-confirm words that are
-        # already in self.committed (e.g., after trim+reset, or when the same
+        # already committed (e.g., after trim+reset, or when the same
         # overlapping region matches in consecutive iterations).
         #
         # Two checks:
@@ -420,23 +432,34 @@ class OnlineASRProcessor:
         #    Whisper re-confirms "最近我进行大量的" + adds "coding" — the
         #    old part is already committed, only "coding" is new.
         #
-        # NOTE: use self.committed (active words), NOT committed_history.
-        if newly_confirmed and self.committed:
+        # Check against BOTH self.committed (active words) and the tail of
+        # committed_history. After _maybe_trim_buffer(), self.committed is
+        # pruned but committed_history retains all words. Without the
+        # history check, trimmed-away words could be re-confirmed as "new".
+        if newly_confirmed and (self.committed or self.committed_history):
             new_text = "".join(w[2] for w in newly_confirmed)
             committed_text = "".join(w[2] for w in self.committed)
-            if new_text in committed_text:
+            # Also check against the tail of committed_history (last 50 words)
+            # to catch re-confirmation of words trimmed from self.committed.
+            history_tail = self.committed_history[-50:] if self.committed_history else []
+            history_text = "".join(w[2] for w in history_tail)
+            if new_text in committed_text or new_text in history_text:
                 newly_confirmed = []
             else:
                 # Overlap prefix dedup: find how many leading words of
-                # newly_confirmed match the tail of committed.
+                # newly_confirmed match the tail of committed (or history).
                 # Compare word texts (stripped) to handle punctuation variations.
-                committed_words = [w[2].strip() for w in self.committed]
+                # Use the longer of committed / history_tail for overlap check.
+                if len(history_tail) > len(self.committed):
+                    ref_words = [w[2].strip() for w in history_tail]
+                else:
+                    ref_words = [w[2].strip() for w in self.committed]
                 new_words_text = [w[2].strip() for w in newly_confirmed]
-                # Try matching new_words[0..k] against committed[-k..]
-                max_overlap = min(len(committed_words), len(new_words_text))
+                # Try matching new_words[0..k] against ref[-k..]
+                max_overlap = min(len(ref_words), len(new_words_text))
                 best_overlap = 0
                 for k in range(1, max_overlap + 1):
-                    if committed_words[-k:] == new_words_text[:k]:
+                    if ref_words[-k:] == new_words_text[:k]:
                         best_overlap = k
                 if best_overlap > 0:
                     newly_confirmed = newly_confirmed[best_overlap:]
