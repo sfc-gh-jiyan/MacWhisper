@@ -778,8 +778,8 @@ class TranscriberApp(rumps.App):
         entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "type": f"{mode}_iter",
-            "confirmed": confirmed[-100:] if confirmed else "",
-            "unconfirmed": unconfirmed[-50:] if unconfirmed else "",
+            "confirmed": confirmed or "",
+            "unconfirmed": unconfirmed or "",
             "debug": debug,
         }
         with open(SUBTITLE_LOG, "a", encoding="utf-8") as f:

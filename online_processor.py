@@ -231,9 +231,7 @@ class OnlineASRProcessor:
             if tail_rms < 0.003:  # ~100 in int16 scale
                 logger.debug("skip: buffer tail silent (rms=%.5f)", tail_rms)
                 self._last_process_time = time.time()
-                confirmed_text = "".join(w[2] for w in self.committed_history)
-                unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
-                return (confirmed_text, unconfirmed_text)
+                return None
 
         # Throttle: ensure at least min_chunk_size between iterations
         # (can be disabled for testing via self.throttle = False)
