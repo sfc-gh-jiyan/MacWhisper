@@ -144,6 +144,7 @@ class MeetingSession:
         self._segments = []
         self._mic_frames = []
         self._sys_frames = []
+        self._segment_start_time = time.time()  # wall-clock start of current segment
 
         # Create processor
         self._processor = OnlineASRProcessor(
@@ -373,9 +374,11 @@ class MeetingSession:
                 # silence trigger alone can produce unbounded segments (56s+).
                 # A 30s cap keeps segments manageable and limits accumulation
                 # of transcription errors within a single segment.
+                # NOTE: use wall-clock time, NOT audio_buffer length — the
+                # buffer is capped at max_buffer_s (8s) by pre-inference trim.
                 MAX_SEGMENT_DURATION_S = 30.0
-                seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
-                if seg_duration > MAX_SEGMENT_DURATION_S and self._processor.committed:
+                seg_elapsed = time.time() - self._segment_start_time
+                if seg_elapsed > MAX_SEGMENT_DURATION_S and self._processor.committed:
                     self._close_and_trim_segment()
                     continue
 
@@ -473,6 +476,9 @@ class MeetingSession:
 
         if self.vad:
             self.vad.reset()
+
+        # Reset segment timer for the next segment
+        self._segment_start_time = time.time()
 
     # ── Internal: transcript formatting ──────────────────────
 
