@@ -44,8 +44,8 @@ def test_imports():
 def test_constants():
     import app
     assert app.SAMPLE_RATE == 16000
-    assert app.MIN_CHUNK_SIZE == 0.5
-    assert app.MAX_BUFFER_S == 5.0
+    assert app.MIN_CHUNK_SIZE == 1.0
+    assert app.MAX_BUFFER_S == 8.0
     assert len(app.MODEL_OPTIONS) == 3
     assert "Small (Fast)" in app.MODEL_OPTIONS
 

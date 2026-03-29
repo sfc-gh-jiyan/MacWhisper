@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    name: Verify Install
+    name: Verify & Test
     runs-on: macos-14  # Apple Silicon (M1)
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Version consistency check
         run: |
@@ -35,6 +35,13 @@ jobs:
           python -m venv venv
           venv/bin/pip install --upgrade pip
           venv/bin/pip install -r requirements.txt
+          venv/bin/pip install ruff pytest
+
+      - name: Lint (ruff)
+        run: |
+          venv/bin/ruff check --select=E,F,W --ignore=E501,E402,W293,W291 \
+            app.py online_processor.py meeting.py overlay.py \
+            asr_backend.py audio_capture.py vad.py text_utils.py subtitle_export.py
 
       - name: Import check
         run: |
@@ -45,7 +52,16 @@ jobs:
           "
 
       - name: Syntax check
-        run: venv/bin/python -m py_compile app.py
+        run: |
+          venv/bin/python -m py_compile app.py
+          venv/bin/python -m py_compile online_processor.py
+          venv/bin/python -m py_compile meeting.py
+
+      - name: Smoke tests (pytest)
+        run: |
+          venv/bin/python -m pytest tests/test_app.py tests/test_meeting.py \
+            tests/test_online_processor.py tests/test_meeting_dual.py \
+            -m "not slow and not hardware" -q --tb=short
 
       - name: Script syntax
         run: |
@@ -87,25 +103,23 @@ jobs:
         run: |
           VERSION=${{ steps.meta.outputs.version }}
           TAG="v${VERSION}"
-          cat > /tmp/release_notes.md << 'NOTES'
-          ## MacWhisper $TAG
+          cat > /tmp/release_notes.md <<NOTES
+          ## MacWhisper ${TAG}
 
           ### Install via Homebrew (recommended)
-          ```bash
+          \`\`\`bash
           brew tap sfc-gh-jiyan/macwhisper
           brew install macwhisper-mlx
           macwhisper-mlx-install
-          ```
+          \`\`\`
 
           ### Manual install
-          ```bash
-          curl -L https://github.com/sfc-gh-jiyan/MacWhisper/releases/download/$TAG/MacWhisper-${VERSION}.tar.gz | tar xz
+          \`\`\`bash
+          curl -L https://github.com/sfc-gh-jiyan/MacWhisper/releases/download/${TAG}/MacWhisper-${VERSION}.tar.gz | tar xz
           cd MacWhisper-${VERSION}
           bash install.sh
-          ```
+          \`\`\`
           NOTES
-          # Substitute variables in release notes
-          sed -i '' "s/\$TAG/$TAG/g; s/\${VERSION}/$VERSION/g" /tmp/release_notes.md
 
           gh release create "$TAG" \
             "dist/MacWhisper-${VERSION}.tar.gz" \

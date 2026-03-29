@@ -10,20 +10,22 @@
 class MacwhisperMlx < Formula
   desc "macOS menu bar real-time speech transcription powered by MLX Whisper"
   homepage "https://github.com/sfc-gh-jiyan/MacWhisper"
-  url "https://github.com/sfc-gh-jiyan/MacWhisper/releases/download/v0.4.0/MacWhisper-0.4.0.tar.gz"
-  sha256 "1742f2ce7bee79bc357373c4866f8aff6104e0afd09be55ed889190e5704a954"
+  # NOTE: url and sha256 are auto-updated by CI on release.
+  # These values reflect the latest tagged release for local reference.
+  url "https://github.com/sfc-gh-jiyan/MacWhisper/releases/download/v0.6.0/MacWhisper-0.6.0.tar.gz"
+  sha256 "PLACEHOLDER_UPDATED_BY_CI"
   license "MIT"
 
   depends_on :macos
   depends_on arch: :arm64
-  depends_on "python@3.11"
+  depends_on "python@3.12"
 
   def install
     libexec.install Dir["*"]
 
     # Create virtualenv and install Python deps
     venv = libexec/"venv"
-    system "python3.11", "-m", "venv", venv.to_s
+    system "python3.12", "-m", "venv", venv.to_s
     system venv/"bin/pip", "install", "--upgrade", "pip"
     system venv/"bin/pip", "install", "-r", libexec/"requirements.txt"
 
