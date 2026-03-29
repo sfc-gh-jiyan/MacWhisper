@@ -410,7 +410,11 @@ class MeetingSession:
         """Add a committed segment to the meeting record."""
         elapsed = time.time() - self._meeting_start
         # Estimate segment start from word timestamps
-        words = self._processor.get_confirmed_words() if self._processor else []
+        # Use committed (current segment words), NOT get_confirmed_words()
+        # which returns committed_history (all words since meeting start).
+        # At this point segment_close() has been called but committed hasn't
+        # been cleared yet, so it contains exactly this segment's words.
+        words = list(self._processor.committed) if self._processor else []
 
         start_time = elapsed - len(text) * 0.1  # rough estimate
         if words:

@@ -437,16 +437,22 @@ class TranscriberApp(rumps.App):
         if not self._meeting_session:
             return
 
-        transcript = self._meeting_session.stop()
-
-        # Destroy overlay
+        # 1. Destroy overlay IMMEDIATELY so user sees instant response
+        #    (same pattern as _stop_and_transcribe)
         if self._overlay_panel:
             AppHelper.callAfter(self._destroy_overlay)
+
+        # 2. Stop session with exception protection
+        try:
+            transcript = self._meeting_session.stop()
+        except Exception as e:
+            logger.error("Meeting stop failed: %s", e)
+            transcript = ""
 
         self.title = self._idle_icon
         self.item_meeting.title = "   Meeting Mode: Off"
 
-        seg_count = len(self._meeting_session.segments)
+        seg_count = len(self._meeting_session.segments) if self._meeting_session else 0
         self._set_status(f"Meeting saved ({seg_count} segments)")
         print(f"[INFO] Meeting Mode stopped — {seg_count} segments")
 
