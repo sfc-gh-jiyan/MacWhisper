@@ -1032,6 +1032,34 @@ def main():
                 f.write(md)
             print(f"\n  Report saved to {report_path}")
 
+            # Save subtitles.jsonl (mirrors app.py format for QA 3-layer check)
+            jsonl_path = os.path.join(args.report_dir, f"{ts}_subtitles_{base_name}.jsonl")
+            with open(jsonl_path, "w", encoding="utf-8") as f:
+                for s in snapshots:
+                    entry = {
+                        "timestamp": s["wall_s"],
+                        "type": "live_iter",
+                        "confirmed": s["confirmed"],
+                        "unconfirmed": s["unconfirmed"],
+                        "debug": s.get("debug", {}),
+                    }
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                # segment_commit
+                f.write(json.dumps({
+                    "timestamp": snapshots[-1]["wall_s"] if snapshots else 0,
+                    "type": "segment_commit",
+                    "audio_s": round(duration, 1),
+                    "text": final_confirmed,
+                }, ensure_ascii=False) + "\n")
+                # session_end
+                f.write(json.dumps({
+                    "timestamp": snapshots[-1]["wall_s"] if snapshots else 0,
+                    "type": "session_end",
+                    "realtime_text": final_confirmed,
+                    "char_count": len(final_confirmed),
+                }, ensure_ascii=False) + "\n")
+            print(f"  Subtitles saved to {jsonl_path}")
+
         all_results.append(scores)
 
     # Batch summary

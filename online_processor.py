@@ -112,8 +112,9 @@ class HypothesisBuffer:
             confirmed_end = best_new_start + best_match_len
             self.committed_in_buffer = list(new_words[:confirmed_end])
         else:
-            # No alignment — keep old committed count if buffer prefix
-            # still matches (handles stable prefix case), else clear.
+            # No alignment — discard old unconfirmed and start fresh.
+            # Language pinning in OnlineASRProcessor prevents the bilingual
+            # oscillation that used to cause word loss here.
             self.committed_in_buffer = []
         self.buffer = list(new_words)
 
@@ -191,6 +192,12 @@ class OnlineASRProcessor:
         self._last_inference_ms: int = 0  # track last inference time for adaptive trimming
         self._last_trim_info: dict | None = None  # set by _maybe_trim_buffer
         self._trim_cooldown: int = 0  # iterations to skip _maybe_trim_buffer after trim
+
+        # Language pinning: auto-detect dominant language from first few
+        # iterations, then lock it to prevent Whisper from switching to
+        # translation mode (e.g., outputting English when user speaks Chinese).
+        self._detected_languages: list[str] = []
+        self._language_pinned: bool = False
 
         # Debug info (for logging)
         self.last_debug: dict = {}
@@ -299,6 +306,43 @@ class OnlineASRProcessor:
             result.language, len(raw_words),
             result.text.replace("\n", "\\n")[:80],
         )
+
+        # Language pinning: auto-detect and lock the dominant language.
+        # When language=None, Whisper auto-detects per iteration and may
+        # oscillate between zh/en on bilingual speech, producing English
+        # translations instead of Chinese transcriptions. Once we see 2
+        # consecutive iterations with the same language, pin it.
+        detected_lang = result.language
+        if detected_lang and not self._language_pinned:
+            self._detected_languages.append(detected_lang)
+            if len(self._detected_languages) >= 2:
+                if self._detected_languages[-1] == self._detected_languages[-2]:
+                    self.language = detected_lang
+                    self._language_pinned = True
+                    logger.info(
+                        "Language pinned to '%s' after %d iterations",
+                        detected_lang, self._iter_count,
+                    )
+
+        # Language consistency: discard results where Whisper switched to
+        # a different language than the pinned one (translation artifacts).
+        if self._language_pinned and detected_lang and detected_lang != self.language:
+            logger.debug(
+                "Language mismatch: pinned=%s detected=%s — discarding iter=%d",
+                self.language, detected_lang, self._iter_count,
+            )
+            self._last_process_time = time.time()
+            confirmed_text = "".join(w[2] for w in self.committed_history)
+            unconfirmed_text = "".join(w[2] for w in self.last_unconfirmed)
+            self.last_debug = {
+                "iter": self._iter_count, "buffer_s": round(buffer_duration, 1),
+                "inference_ms": inference_ms,
+                "raw_text": f"(lang mismatch: {detected_lang} != {self.language})",
+                "confirmed_words": len(self.committed_history),
+                "unconfirmed_words": len(self.last_unconfirmed),
+                "newly_confirmed": 0, "trim": self._last_trim_info,
+            }
+            return (confirmed_text, unconfirmed_text)
 
         # Anti-hallucination layer 3: discard if word count is unreasonable
         # Normal speech is ~3-5 words/sec; >12 words/sec is hallucination
@@ -534,6 +578,10 @@ class OnlineASRProcessor:
         self._last_trim_info = None
         self._trim_cooldown = 0
         self.last_debug = {}
+        # Reset language detection for new session (language may differ)
+        self._detected_languages = []
+        self._language_pinned = False
+        self.language = None
 
     # ── Internal ─────────────────────────────────────────
 
