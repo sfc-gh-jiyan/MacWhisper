@@ -70,7 +70,6 @@ class HypothesisBuffer:
         # Find best alignment: search for overlapping words between
         # old unconfirmed and new_words. Try all (old_start, new_start) pairs,
         # find the longest consecutive match of >= 2 words.
-        best_old_start = -1
         best_new_start = -1
         best_match_len = 0
 
@@ -86,7 +85,6 @@ class HypothesisBuffer:
                            and old_texts[i + match_len] == new_texts[j + match_len]):
                         match_len += 1
                     if match_len > best_match_len:
-                        best_old_start = i
                         best_new_start = j
                         best_match_len = match_len
                 # Stop after first old_start that gives a match >= 2

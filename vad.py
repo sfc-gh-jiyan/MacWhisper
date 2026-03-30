@@ -102,7 +102,6 @@ class VoiceActivityDetector:
             {"is_speech": bool, "silence_ms": int, "speech_ms": int}
         """
         chunk_samples = len(audio_chunk.squeeze())
-        chunk_ms = int(chunk_samples * 1000 / self.sample_rate)
 
         if self.is_speech(audio_chunk):
             self._speech_samples += chunk_samples

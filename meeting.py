@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from audio_capture import AudioSource, MicrophoneSource, MixedAudioSource, SystemAudioSource
+from audio_capture import AudioSource, MicrophoneSource, SystemAudioSource
 from asr_backend import ASRBackend, WordTimestamp
 from online_processor import OnlineASRProcessor, SAMPLE_RATE
 from vad import VoiceActivityDetector
@@ -500,8 +500,8 @@ class MeetingSession:
     def _format_markdown(self) -> str:
         """Format transcript as Markdown with timestamps."""
         lines = []
-        lines.append(f"# Meeting Transcript")
-        lines.append(f"")
+        lines.append("# Meeting Transcript")
+        lines.append("")
         lines.append(f"- **Date**: {self._session_id[:8]}")
         lines.append(f"- **Segments**: {len(self._segments)}")
 
@@ -511,15 +511,15 @@ class MeetingSession:
         minutes = int(duration // 60)
         seconds = int(duration % 60)
         lines.append(f"- **Duration**: {minutes}m {seconds}s")
-        lines.append(f"")
-        lines.append(f"---")
-        lines.append(f"")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
 
         for i, seg in enumerate(self._segments, 1):
             ts_min = int(seg.start_time // 60)
             ts_sec = int(seg.start_time % 60)
             lines.append(f"**[{ts_min:02d}:{ts_sec:02d}]** {seg.text}")
-            lines.append(f"")
+            lines.append("")
 
         return "\n".join(lines)
 

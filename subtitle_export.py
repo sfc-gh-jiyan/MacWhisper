@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import datetime
-from dataclasses import asdict
 
 from asr_backend import WordTimestamp
 

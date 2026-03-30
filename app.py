@@ -49,7 +49,7 @@ def _swizzle_main_bundle():
     if _custom is None:
         return
 
-    lib = _objc_lib
+    lib = _objc_lib  # noqa: F821 — defined at module level before this function
     for fn, res, args in [
         ("objc_getClass",         ctypes.c_void_p, [ctypes.c_char_p]),
         ("sel_registerName",      ctypes.c_void_p, [ctypes.c_char_p]),
@@ -98,13 +98,13 @@ from ApplicationServices import AXIsProcessTrusted
 # ── New modular imports ──────────────────────────────────
 from text_utils import (
     BILINGUAL_PROMPT, convert_t2s, strip_trailing_repetition,
-    hallucination_reason, is_hallucination,
+    hallucination_reason,
 )
-from asr_backend import MLXWhisperBackend, WordTimestamp
+from asr_backend import MLXWhisperBackend
 from vad import VoiceActivityDetector
 from online_processor import OnlineASRProcessor
 from overlay import create_overlay, update_overlay, destroy_overlay
-from subtitle_export import export_srt, save_enhanced_history
+from subtitle_export import save_enhanced_history
 from meeting import MeetingSession, MEETINGS_DIR
 
 logger = logging.getLogger(__name__)
