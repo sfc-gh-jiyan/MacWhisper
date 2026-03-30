@@ -4,6 +4,23 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.1] — 2026-03-30
+
+### Fixed
+- **Audio flood on first iteration**: reorder `_start_recording()` so `stream.start()` runs after processor/live_loop creation — prevents audio accumulating during backend warmup (buffer start: 8.0s → 2.5s, content retention: 30% → 75%)
+- **Post-trim re-confirmation dedup**: check `committed_history[-50:]` in addition to `self.committed` so words trimmed by `_maybe_trim_buffer()` are detected as duplicates
+- **Segment commit triple-fire**: 3-second cooldown guard prevents VAD from triggering `segment_close()` multiple times in rapid succession
+- **Bilingual duplicate confirm**: intra-batch dedup detects repeated word prefix within a single `flush()` batch (e.g., two translation variants of the same phrase)
+- **Tail CJK fragment filter**: strip trailing single-CJK-character fragments in `segment_close()` (e.g., "战。" from "挑战")
+- **Language pinning**: auto-detect dominant language from first 2 consecutive same-language iterations, then lock `self.language` to prevent Whisper from oscillating between Chinese transcription and English translation
+- **Defensive buffer guard**: `insert_audio_chunk()` trims buffer to `max_buffer_s` when no inference has run yet (iter_count == 0)
+
+### Added
+- **Session end logging**: capture complete `committed_history` text at recording stop → write to `subtitles.jsonl` as `session_end` entry + include as `realtime_text` in `transcripts.jsonl`
+
+### Changed
+- 14 ruff lint errors fixed (unused imports/variables, f-strings without placeholders)
+
 ## [0.6.0] — 2026-03-29
 
 ### Added

@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.6.0
+MacWhisper - macOS Menu Bar App  v0.6.1
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 import json
 import logging
