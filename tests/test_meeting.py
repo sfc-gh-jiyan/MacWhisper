@@ -799,3 +799,39 @@ class TestRMSPrioritySelection:
         # Main assertion: no crash, session works correctly
         assert isinstance(transcript, str)
         assert backend._call_count > 0
+
+
+class TestMeetingVadSinglePass:
+    """Regression: the meeting loop fed every chunk to the stateful Silero
+    RNN twice (process_chunk + is_speech). Re-feeding corrupts its hidden
+    state — on a real recording it dropped speech detection from 294/478 to
+    124/478 chunks, skipping inference and cutting segments mid-sentence."""
+
+    def test_each_chunk_reaches_vad_model_once(self):
+        calls = []
+
+        class CountingVad:
+            def reset(self):
+                pass
+
+            def process_chunk(self, chunk):
+                calls.append(("process", len(chunk)))
+                return {"is_speech": True, "silence_ms": 0, "speech_ms": 100}
+
+            def is_speech(self, chunk, *a, **k):
+                calls.append(("is_speech", len(chunk)))
+                return True
+
+            def is_extended_silence(self, *a, **k):
+                return False
+
+        backend = MockBackend(responses=["hello world"] * 50)
+        source = MockAudioSource()
+        session = MeetingSession(backend=backend, vad=CountingVad(), audio_source=source)
+        session.start()
+        time.sleep(0.5)  # MockAudioSource generates chunks continuously
+        session.stop()
+
+        assert calls, "VAD was never consulted"
+        assert not [c for c in calls if c[0] == "is_speech"], (
+            "chunk was evaluated twice by the VAD model: %r" % calls[:6])

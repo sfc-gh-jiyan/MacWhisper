@@ -374,7 +374,12 @@ class MeetingSession:
 
             # VAD processing
             if self.vad:
-                self.vad.process_chunk(chosen)
+                # Silero is a stateful RNN: each chunk must reach it exactly
+                # ONCE. Re-evaluating the same chunk (the old is_speech() call
+                # below) corrupted its hidden state and misclassified over
+                # half of real speech as silence.
+                vad_state = self.vad.process_chunk(chosen)
+                chunk_is_speech = vad_state["is_speech"]
 
                 # Safety: force segment break if current segment exceeds 30s.
                 # Natural speech rarely has 2s clean silence, so the extended-
@@ -397,7 +402,7 @@ class MeetingSession:
                         continue
 
                 # VAD pre-filter: skip transcription during pure silence
-                if not self.vad.is_speech(chosen):
+                if not chunk_is_speech:
                     vad_skip_count += 1
                     if vad_skip_count % 20 == 0:
                         print(f"[MEETING] VAD skip (silence): {vad_skip_count} chunks")
