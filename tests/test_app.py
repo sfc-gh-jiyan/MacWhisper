@@ -85,6 +85,7 @@ def test_config_save(tmp_config):
     inst.live_mode = True
     inst.save_audio = False
     inst.log_level = "WARNING"
+    inst.meeting_subtitles = True
     inst._save_config()
     saved = json.loads(tmp_config.read_text())
     assert saved["translate_mode"] is True
@@ -854,3 +855,64 @@ def test_crash_handler_writes_log(tmp_path, monkeypatch):
     content = crash_log.read_text()
     assert "simulated crash" in content
     assert app.__version__ in content
+
+
+# ── Test: Meeting Subtitles toggle (v0.6.2) ───────────────────
+
+def _meeting_app(meeting_subtitles=True, in_meeting=False, panel=None):
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.translate_mode = False
+    inst.current_model = "m"
+    inst.live_mode = False
+    inst.save_audio = False
+    inst.log_level = "WARNING"
+    inst.meeting_subtitles = meeting_subtitles
+    inst.item_meeting_subtitles = MagicMock()
+    inst.status_item = MagicMock()
+    inst._meeting_session = MagicMock() if in_meeting else None
+    inst._overlay_panel = panel
+    inst._overlay_text = None
+    inst._last_overlay_key = ("old", "")
+    return inst
+
+
+def test_meeting_subtitles_saved_to_config(tmp_config):
+    inst = _meeting_app(meeting_subtitles=False)
+    inst._save_config()
+    assert json.loads(tmp_config.read_text())["meeting_subtitles"] is False
+
+
+def test_toggle_meeting_subtitles_idle_only_flips_pref(tmp_config):
+    import app
+    inst = _meeting_app(meeting_subtitles=True)
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        inst._toggle_meeting_subtitles(None)
+    assert inst.meeting_subtitles is False
+    assert inst.item_meeting_subtitles.title == "   Meeting Subtitles: Off"
+    call_after.assert_not_called()
+
+
+def test_toggle_meeting_subtitles_off_during_meeting_hides_overlay(tmp_config):
+    import app
+    inst = _meeting_app(meeting_subtitles=True, in_meeting=True, panel=MagicMock())
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        inst._toggle_meeting_subtitles(None)
+    call_after.assert_called_once_with(inst._destroy_overlay)
+
+
+def test_toggle_meeting_subtitles_on_during_meeting_shows_overlay(tmp_config):
+    import app
+    inst = _meeting_app(meeting_subtitles=False, in_meeting=True, panel=None)
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        inst._toggle_meeting_subtitles(None)
+    assert inst.meeting_subtitles is True
+    assert inst.item_meeting_subtitles.title == "✅ Meeting Subtitles: On"
+    assert inst._last_overlay_key is None  # next update must re-render
+    call_after.assert_called_once()
+
+
+def test_meeting_start_respects_subtitles_pref():
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert "if self.meeting_subtitles:" in source

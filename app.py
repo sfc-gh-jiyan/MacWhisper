@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.6.1
+MacWhisper - macOS Menu Bar App  v0.6.2
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 import json
 import logging
@@ -116,6 +116,7 @@ MAX_BUFFER_S = 8.0            # audio buffer cap (seconds) — balance inference
 
 _DATA_DIR = os.path.expanduser("~/.macwhisper")
 CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
+OVERLAY_FRAME_PATH = os.path.join(_DATA_DIR, "overlay.json")
 LOG_DIR = os.path.join(_DATA_DIR, "logs")
 
 MODEL_OPTIONS = {
@@ -217,6 +218,7 @@ class TranscriberApp(rumps.App):
             "translate_mode": self.translate_mode,
             "current_model": self.current_model,
             "live_mode": self.live_mode,
+            "meeting_subtitles": self.meeting_subtitles,
             "save_audio": self.save_audio,
             "log_level": self.log_level,
         }
@@ -231,6 +233,7 @@ class TranscriberApp(rumps.App):
         self.translate_mode = cfg.get("translate_mode", False)
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Medium (Accurate)"])
         self.live_mode      = cfg.get("live_mode", False)
+        self.meeting_subtitles = cfg.get("meeting_subtitles", True)
         self.save_audio     = cfg.get("save_audio", False)
         self.log_level      = cfg.get("log_level", "WARNING")
 
@@ -262,6 +265,13 @@ class TranscriberApp(rumps.App):
 
         self.item_meeting = rumps.MenuItem("   Meeting Mode: Off", callback=self._toggle_meeting_mode)
 
+        msub_prefix = "✅" if self.meeting_subtitles else "  "
+        msub_label = "On" if self.meeting_subtitles else "Off"
+        self.item_meeting_subtitles = rumps.MenuItem(
+            f"{msub_prefix} Meeting Subtitles: {msub_label}",
+            callback=self._toggle_meeting_subtitles,
+        )
+
         self.menu = [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -272,6 +282,7 @@ class TranscriberApp(rumps.App):
             self.item_live,
             self.item_save_audio,
             self.item_meeting,
+            self.item_meeting_subtitles,
             rumps.separator,
             rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
             rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
@@ -385,6 +396,26 @@ class TranscriberApp(rumps.App):
         self._save_config()
         print(f"[INFO] Live subtitles {'enabled' if self.live_mode else 'disabled'}")
 
+    def _toggle_meeting_subtitles(self, _):
+        """Show/hide the Meeting Mode overlay. Recording is unaffected."""
+        self.meeting_subtitles = not self.meeting_subtitles
+        if self.meeting_subtitles:
+            self.item_meeting_subtitles.title = "✅ Meeting Subtitles: On"
+        else:
+            self.item_meeting_subtitles.title = "   Meeting Subtitles: Off"
+        self._save_config()
+        logger.info("Meeting subtitles %s (meeting active=%s)",
+                    "enabled" if self.meeting_subtitles else "disabled",
+                    self._meeting_session is not None)
+
+        if self._meeting_session is None:
+            return
+        if self.meeting_subtitles and not self._overlay_panel:
+            self._last_overlay_key = None  # force re-render on next update
+            AppHelper.callAfter(lambda: self._create_overlay(mode="meeting"))
+        elif not self.meeting_subtitles and self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
+
     def _toggle_save_audio(self, _):
         self.save_audio = not self.save_audio
         if self.save_audio:
@@ -423,8 +454,9 @@ class TranscriberApp(rumps.App):
             capture_system_audio=True,
         )
 
-        # Show overlay
-        AppHelper.callAfter(lambda: self._create_overlay(mode="meeting"))
+        # Show overlay (unless the user turned Meeting Subtitles off)
+        if self.meeting_subtitles:
+            AppHelper.callAfter(lambda: self._create_overlay(mode="meeting"))
 
         self._meeting_session.start()
         self.title = "🔴"
@@ -949,7 +981,7 @@ class TranscriberApp(rumps.App):
     # ── Live Subtitles — overlay ──────────────────────────────
 
     def _create_overlay(self, mode: str = "talk"):
-        panel, text_view = create_overlay(mode=mode)
+        panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH)
         if panel:
             self._overlay_panel = panel
             self._overlay_text = text_view

@@ -4,6 +4,20 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.2] — 2026-10-18
+
+### Fixed
+- **Overlay jumping between displays**: content updates no longer re-center the panel on `NSScreen.mainScreen()` (the focused display). `update_overlay()` now only changes text — the window never moves or resizes on its own.
+
+### Added
+- **Movable overlay**: drag anywhere on the subtitle window to move it, including to another display
+- **Resizable overlay**: drag edges/corners to resize (min 240×60); text wraps and auto-scrolls to the newest line
+- **Remembered position**: frame persisted per mode (Push to Talk / Meeting) in `~/.macwhisper/overlay.json`; falls back to the default position if the saved display is disconnected
+- **Meeting Subtitles toggle**: new menu item to show/hide the Meeting Mode overlay (default On). Toggling mid-meeting shows/hides it immediately; recording, transcription, and export are unaffected. Saved as `meeting_subtitles` in config.
+
+### Changed
+- Overlay is a non-activating panel: clicking or dragging it never steals focus, so Hold-to-Record auto-paste still targets the active app
+
 ## [0.6.1] — 2026-03-30
 
 ### Fixed
