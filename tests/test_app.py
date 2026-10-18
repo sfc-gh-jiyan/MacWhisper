@@ -916,3 +916,164 @@ def test_meeting_start_respects_subtitles_pref():
     import app
     source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     assert "if self.meeting_subtitles:" in source
+
+
+# ── Test: crash safety (fix/crash-alerts) ─────────────────────
+
+def _bare_app():
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.status_item = MagicMock()
+    inst.recording = False
+    inst.frames = []
+    inst.stream = None
+    inst._stream_lock = threading.Lock()
+    inst._rec_gen = 0
+    inst._reporter = MagicMock()
+    inst._hotkey_stop = threading.Event()
+    return inst
+
+
+def test_set_status_from_background_thread_is_marshalled():
+    import app
+    inst = _bare_app()
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        t = threading.Thread(target=inst._set_status, args=("Ready",))
+        t.start()
+        t.join()
+    call_after.assert_called_once()
+    inst.status_item.title  # untouched by the background thread
+    call_after.call_args[0][0]()  # run it "on main"
+    assert inst.status_item.title == "Status: Ready"
+
+
+def test_set_title_from_background_thread_is_marshalled():
+    import app
+    inst = _bare_app()
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        t = threading.Thread(target=inst._set_title, args=("🔴",))
+        t.start()
+        t.join()
+    call_after.assert_called_once()
+
+
+def test_no_direct_title_writes_left_in_app():
+    """All menu-bar icon writes must go through _set_title (main thread)."""
+    import re
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    direct = re.findall(r"^\s*self\.title\s*=", source, flags=re.M)
+    assert len(direct) == 1  # only inside _set_title itself
+
+
+def test_guarded_hotkey_handler_reports_instead_of_raising():
+    inst = _bare_app()
+
+    def boom(_key):
+        raise RuntimeError("layout engine")
+
+    wrapped = inst._guarded(boom, "hotkey (press)")
+    wrapped("key")  # must NOT raise — raising kills the pynput listener
+    inst._reporter.report.assert_called_once()
+    assert inst._reporter.report.call_args[0][0] == "hotkey (press)"
+
+
+def test_hotkey_listener_restarts_after_it_dies():
+    import app
+    inst = _bare_app()
+    starts = []
+
+    class FakeListener:
+        def __init__(self, **kw):
+            starts.append(kw)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def join(self):
+            if len(starts) >= 2:
+                inst._hotkey_stop.set()
+                return
+            raise RuntimeError("listener crashed")
+
+    with patch.object(app.keyboard, "Listener", FakeListener), \
+         patch.object(app, "HOTKEY_RESTART_DELAY_S", 0):
+        inst._start_hotkey_listener()
+    assert len(starts) == 2
+    inst._reporter.report.assert_called_once()
+
+
+def test_ctrl_shift_hotkeys_run_on_main_thread():
+    import app
+    inst = _bare_app()
+    inst._ctrl_pressed = True
+    inst._shift_pressed = True
+    inst._meeting_session = None
+    inst._toggle_meeting_mode = MagicMock()
+    key = MagicMock()
+    key.vk = 15  # R
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        t = threading.Thread(target=inst._on_press, args=(key,))
+        t.start()
+        t.join()
+    inst._toggle_meeting_mode.assert_not_called()  # not on the listener thread
+    call_after.assert_called_once()
+
+
+def test_fast_release_closes_late_stream():
+    """Option released before the mic stream opened → stream must not leak."""
+    import app
+    inst = _bare_app()
+    fake_stream = MagicMock()
+    inst.recording = False  # already released
+    with patch.object(app.sd, "InputStream", return_value=fake_stream):
+        inst._open_mic_stream(gen=inst._rec_gen)
+    fake_stream.start.assert_not_called()
+    fake_stream.close.assert_called_once()
+    assert inst.stream is None
+
+
+def test_stale_generation_stream_is_closed():
+    import app
+    inst = _bare_app()
+    inst.recording = True
+    inst._rec_gen = 2  # a newer recording already started
+    fake_stream = MagicMock()
+    with patch.object(app.sd, "InputStream", return_value=fake_stream):
+        inst._open_mic_stream(gen=1)
+    fake_stream.close.assert_called_once()
+    assert inst.stream is None
+
+
+def test_open_and_close_mic_stream():
+    import app
+    inst = _bare_app()
+    inst.recording = True
+    fake_stream = MagicMock()
+    with patch.object(app.sd, "InputStream", return_value=fake_stream):
+        inst._open_mic_stream(gen=inst._rec_gen)
+    fake_stream.start.assert_called_once()
+    assert inst.stream is fake_stream
+    inst._close_mic_stream()
+    fake_stream.stop.assert_called_once()
+    fake_stream.close.assert_called_once()
+    assert inst.stream is None
+    inst._close_mic_stream()  # idempotent, no "NoneType has no close"
+
+
+def test_report_error_shows_persistent_alert_on_main():
+    import app
+    inst = _bare_app()
+    with patch.object(app.AppHelper, "callAfter") as call_after, \
+         patch.object(app.error_alert, "show_error_alert") as show, \
+         patch.object(app.rumps, "notification"):
+        t = threading.Thread(target=inst._show_error, args=("T", "line1\nline2"))
+        t.start()
+        t.join()
+        call_after.assert_called_once()
+        call_after.call_args[0][0]()
+    show.assert_called_once()
+    assert show.call_args[0][:2] == ("T", "line1\nline2")

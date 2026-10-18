@@ -210,7 +210,6 @@ def create_overlay(mode: str = "talk", frame_path: str | None = None):
         if b:
             b.setHidden_(True)
 
-    panel.setLevel_(1000)
     panel.setOpaque_(False)
     panel.setBackgroundColor_(
         NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.88)
@@ -223,6 +222,8 @@ def create_overlay(mode: str = "talk", frame_path: str | None = None):
     # Never steal keyboard focus (auto-paste targets the user's app)
     panel.setBecomesKeyOnlyIfNeeded_(True)
     panel.setFloatingPanel_(True)
+    # setFloatingPanel_ resets the level to NSFloatingWindowLevel (3) — set level after it
+    panel.setLevel_(1000)
     panel.setRestorable_(False)
     panel.setCollectionBehavior_(1 << 0 | 1 << 4)
 
