@@ -290,6 +290,35 @@ class TestMeetingSessionState:
                 meeting.MEETINGS_DIR = orig_dir
 
 
+    def test_auto_save_exposes_transcript_path(self):
+        session = self._make_session()
+        session._session_id = "20260326_path"
+        session._segments = [MeetingSegment(text="x", start_time=0.0, end_time=1.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                path = session._auto_save()
+                assert path == os.path.join(tmpdir, "meeting_20260326_path.md")
+                assert session.transcript_path == path
+                assert os.path.isfile(path)
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+    def test_auto_save_failure_leaves_no_path(self):
+        session = self._make_session()
+        session._session_id = "x"
+        import meeting
+        orig_dir = meeting.MEETINGS_DIR
+        meeting.MEETINGS_DIR = "/dev/null/not-a-dir"
+        try:
+            assert session._auto_save() is None  # must not raise
+            assert session.transcript_path is None
+        finally:
+            meeting.MEETINGS_DIR = orig_dir
+
+
 class TestMeetingSegment:
 
     def test_dataclass_fields(self):

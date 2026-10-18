@@ -572,10 +572,21 @@ class TranscriberApp(rumps.App):
         self._set_status(f"Meeting saved ({seg_count} segments)")
         print(f"[INFO] Meeting Mode stopped — {seg_count} segments")
 
-        # Copy transcript to clipboard
-        if transcript:
+        # Meetings are long (20-30 min): copy the transcript FILE PATH, not the
+        # full text. Fall back to the text only if the file could not be saved.
+        path = getattr(self._meeting_session, "transcript_path", None)
+        if path:
+            pyperclip.copy(path)
+            logger.info("Meeting transcript path copied to clipboard: %s", path)
+            self._notify("MacWhisper — Meeting saved",
+                         "Transcript file path copied to clipboard", path)
+        elif transcript:
             pyperclip.copy(transcript)
-            print("[INFO] Meeting transcript copied to clipboard")
+            self._reporter.report(
+                "saving the meeting transcript file — the full text was copied "
+                "to the clipboard instead, paste it somewhere now",
+                OSError("meeting transcript file was not written"),
+            )
 
         self._meeting_session = None
 

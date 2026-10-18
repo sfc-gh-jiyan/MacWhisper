@@ -1109,3 +1109,47 @@ def test_guarded_real_method_signature():
         bound = meth.__get__(inst)
         n = len(inspect.signature(bound).parameters)
         assert n == 1
+
+
+# ── Test: meeting stop copies transcript file path ────────────
+
+def _stopping_app(transcript_path, transcript="full meeting text"):
+    import app
+    inst = _bare_app()
+    inst._overlay_panel = None
+    inst._idle_icon = "🎙"
+    inst.item_meeting = MagicMock()
+    session = MagicMock()
+    session.stop.return_value = transcript
+    session.transcript_path = transcript_path
+    session.segments = [1, 2, 3]
+    inst._meeting_session = session
+    inst._set_title = MagicMock()
+    inst._notify = MagicMock()
+    return inst
+
+
+def test_meeting_stop_copies_file_path_not_text():
+    import app
+    inst = _stopping_app("/Users/x/.macwhisper/meetings/meeting_1.md")
+    with patch.object(app.pyperclip, "copy") as copy:
+        inst._stop_meeting()
+    copy.assert_called_once_with("/Users/x/.macwhisper/meetings/meeting_1.md")
+    inst._reporter.report.assert_not_called()
+
+
+def test_meeting_stop_falls_back_to_text_if_save_failed():
+    import app
+    inst = _stopping_app(None)
+    with patch.object(app.pyperclip, "copy") as copy:
+        inst._stop_meeting()
+    copy.assert_called_once_with("full meeting text")
+    inst._reporter.report.assert_called_once()  # user is told the file is missing
+
+
+def test_meeting_stop_empty_meeting_copies_nothing():
+    import app
+    inst = _stopping_app(None, transcript="")
+    with patch.object(app.pyperclip, "copy") as copy:
+        inst._stop_meeting()
+    copy.assert_not_called()

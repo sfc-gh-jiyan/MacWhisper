@@ -113,6 +113,7 @@ class MeetingSession:
 
         # Meeting data
         self._segments: list[MeetingSegment] = []
+        self.transcript_path: str | None = None  # set by _auto_save()
         self._meeting_start: float = 0.0
         self._processor: OnlineASRProcessor | None = None
 
@@ -535,8 +536,20 @@ class MeetingSession:
 
     # ── Internal: auto-save ──────────────────────────────────
 
-    def _auto_save(self) -> None:
-        """Save meeting data to ~/.macwhisper/meetings/."""
+    def _auto_save(self) -> str | None:
+        """Save meeting data to ~/.macwhisper/meetings/.
+
+        Returns the Markdown transcript path (also stored on
+        ``self.transcript_path``), or None if saving failed.
+        """
+        self.transcript_path = None
+        try:
+            return self._write_files()
+        except OSError as e:
+            logger.error("Meeting auto-save failed: %s", e, exc_info=True)
+            return None
+
+    def _write_files(self) -> str:
         os.makedirs(MEETINGS_DIR, exist_ok=True)
         base = os.path.join(MEETINGS_DIR, f"meeting_{self._session_id}")
 
@@ -564,3 +577,5 @@ class MeetingSession:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
         print(f"[MEETING] Saved to {base}.*")
+        self.transcript_path = md_path
+        return md_path
