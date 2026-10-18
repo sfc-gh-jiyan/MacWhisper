@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -63,8 +64,13 @@ class MeetingSession:
         extended_silence_ms: int = 2000,
         on_update: callable | None = None,
         capture_system_audio: bool = False,
+        save_audio: bool = False,
     ):
         self.backend = backend
+        # Raw audio is only written to disk when explicitly enabled —
+        # recording other participants requires their consent.
+        self.save_audio = save_audio
+        self.audio_paths: list[str] = []
         self.vad = vad
         self.min_chunk_size = min_chunk_size
         self.max_buffer_s = max_buffer_s
@@ -512,6 +518,8 @@ class MeetingSession:
         minutes = int(duration // 60)
         seconds = int(duration % 60)
         lines.append(f"- **Duration**: {minutes}m {seconds}s")
+        for path in self.audio_paths:
+            lines.append(f"- **Audio**: {os.path.basename(path)}")
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -543,11 +551,42 @@ class MeetingSession:
         ``self.transcript_path``), or None if saving failed.
         """
         self.transcript_path = None
+        self.audio_paths = []
+        if self.save_audio:
+            try:
+                self.audio_paths = self._write_audio()
+            except OSError as e:
+                logger.error("Meeting audio save failed: %s", e, exc_info=True)
         try:
             return self._write_files()
         except OSError as e:
             logger.error("Meeting auto-save failed: %s", e, exc_info=True)
             return None
+
+    def _write_audio(self) -> list[str]:
+        """Write each captured channel to its own 16 kHz mono WAV.
+
+        Channels are kept separate so a replay can reproduce the live loop's
+        per-chunk mic/system selection exactly.
+        """
+        os.makedirs(MEETINGS_DIR, exist_ok=True)
+        base = os.path.join(MEETINGS_DIR, f"meeting_{self._session_id}")
+        with self._frames_lock:
+            channels = [("mic", list(self._mic_frames)), ("sys", list(self._sys_frames))]
+        paths = []
+        for name, frames in channels:
+            if not frames:
+                continue
+            audio = np.concatenate(frames, axis=0).astype(np.int16)
+            path = f"{base}_{name}.wav"
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(audio.tobytes())
+            logger.info("Meeting audio saved: %s (%.1fs)", path, len(audio) / SAMPLE_RATE)
+            paths.append(path)
+        return paths
 
     def _write_files(self) -> str:
         os.makedirs(MEETINGS_DIR, exist_ok=True)

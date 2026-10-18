@@ -86,6 +86,7 @@ def test_config_save(tmp_config):
     inst.save_audio = False
     inst.log_level = "WARNING"
     inst.meeting_subtitles = True
+    inst.save_meeting_audio = False
     inst._save_config()
     saved = json.loads(tmp_config.read_text())
     assert saved["translate_mode"] is True
@@ -869,6 +870,7 @@ def _meeting_app(meeting_subtitles=True, in_meeting=False, panel=None):
     inst.log_level = "WARNING"
     inst.meeting_subtitles = meeting_subtitles
     inst.item_meeting_subtitles = MagicMock()
+    inst.save_meeting_audio = False
     inst.status_item = MagicMock()
     inst._meeting_session = MagicMock() if in_meeting else None
     inst._overlay_panel = panel
@@ -1166,3 +1168,46 @@ def test_meeting_transcript_path_logged_at_default_level(caplog):
     assert "/Users/x/.macwhisper/meetings/meeting 1.md" in line
     assert "file:///Users/x/.macwhisper/meetings/meeting%201.md" in line
     assert caplog.records[-1].levelno >= logging.WARNING
+
+
+# ── Test: Save Meeting Audio toggle + grouped menu ────────────
+
+def test_save_meeting_audio_defaults_off_and_persists(tmp_config):
+    inst = _meeting_app()
+    inst.save_meeting_audio = False
+    inst._save_config()
+    assert json.loads(tmp_config.read_text())["save_meeting_audio"] is False
+
+
+def test_toggle_save_meeting_audio(tmp_config):
+    inst = _meeting_app()
+    inst.save_meeting_audio = False
+    inst.item_save_meeting_audio = MagicMock()
+    inst._toggle_save_meeting_audio(None)
+    assert inst.save_meeting_audio is True
+    assert inst.item_save_meeting_audio.title == "✅ Save Meeting Audio: On"
+    assert json.loads(tmp_config.read_text())["save_meeting_audio"] is True
+    inst._toggle_save_meeting_audio(None)
+    assert inst.item_save_meeting_audio.title == "   Save Meeting Audio: Off"
+
+
+def test_toggle_save_meeting_audio_mid_meeting_applies_at_stop(tmp_config):
+    inst = _meeting_app(in_meeting=True)
+    inst.save_meeting_audio = False
+    inst.item_save_meeting_audio = MagicMock()
+    inst._toggle_save_meeting_audio(None)
+    assert inst._meeting_session.save_audio is True
+
+
+def test_meeting_session_gets_save_audio_flag():
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert "save_audio=self.save_meeting_audio" in source
+
+
+def test_menu_grouped_into_submenus():
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert 'rumps.MenuItem("Push to Talk")' in source
+    assert 'rumps.MenuItem("Meeting")' in source
+    assert 'rumps.MenuItem("Shortcuts")' in source

@@ -319,6 +319,66 @@ class TestMeetingSessionState:
             meeting.MEETINGS_DIR = orig_dir
 
 
+    def _session_with_audio(self, tmpdir, save_audio, dual=True):
+        import meeting
+        session = self._make_session(save_audio=save_audio)
+        session._session_id = "20261018_audio"
+        session._segments = [MeetingSegment(text="x", start_time=0.0, end_time=1.0)]
+        tone = (np.ones((1600, 1)) * 1000).astype(np.int16)
+        session._mic_frames = [tone, tone]
+        session._sys_frames = [tone] if dual else []
+        return session
+
+    def test_meeting_audio_not_saved_by_default(self):
+        """Recording needs participants' consent — off unless enabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                session = self._session_with_audio(tmpdir, save_audio=False)
+                session._auto_save()
+                assert not [f for f in os.listdir(tmpdir) if f.endswith(".wav")]
+                assert session.audio_paths == []
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+    def test_meeting_audio_saved_per_channel_when_enabled(self):
+        import wave
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                session = self._session_with_audio(tmpdir, save_audio=True)
+                session._auto_save()
+                mic = os.path.join(tmpdir, "meeting_20261018_audio_mic.wav")
+                sysw = os.path.join(tmpdir, "meeting_20261018_audio_sys.wav")
+                assert session.audio_paths == [mic, sysw]
+                with wave.open(mic) as w:
+                    assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+                    assert w.getnframes() == 3200
+                with wave.open(sysw) as w:
+                    assert w.getnframes() == 1600
+                md = open(os.path.join(tmpdir, "meeting_20261018_audio.md")).read()
+                assert "meeting_20261018_audio_mic.wav" in md
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+    def test_meeting_audio_skips_empty_channel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                session = self._session_with_audio(tmpdir, save_audio=True, dual=False)
+                session._auto_save()
+                assert [os.path.basename(p) for p in session.audio_paths] == [
+                    "meeting_20261018_audio_mic.wav"]
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+
 class TestMeetingSegment:
 
     def test_dataclass_fields(self):

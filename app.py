@@ -227,6 +227,7 @@ class TranscriberApp(rumps.App):
             "current_model": self.current_model,
             "live_mode": self.live_mode,
             "meeting_subtitles": self.meeting_subtitles,
+            "save_meeting_audio": self.save_meeting_audio,
             "save_audio": self.save_audio,
             "log_level": self.log_level,
         }
@@ -242,6 +243,8 @@ class TranscriberApp(rumps.App):
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Medium (Accurate)"])
         self.live_mode      = cfg.get("live_mode", False)
         self.meeting_subtitles = cfg.get("meeting_subtitles", True)
+        # Off by default: recording participants requires their consent
+        self.save_meeting_audio = cfg.get("save_meeting_audio", False)
         self.save_audio     = cfg.get("save_audio", False)
         self.log_level      = cfg.get("log_level", "WARNING")
 
@@ -280,27 +283,44 @@ class TranscriberApp(rumps.App):
             callback=self._toggle_meeting_subtitles,
         )
 
+        msa_prefix = "✅" if self.save_meeting_audio else "  "
+        msa_label = "On" if self.save_meeting_audio else "Off"
+        self.item_save_meeting_audio = rumps.MenuItem(
+            f"{msa_prefix} Save Meeting Audio: {msa_label}",
+            callback=self._toggle_save_meeting_audio,
+        )
+        self.item_translate = rumps.MenuItem(
+            f"{translate_prefix} Translate to English", callback=self._toggle_translate
+        )
+
+        # Menu grouped by mode. Items are held by reference (self.item_*), so
+        # toggles keep working inside submenus.
         self.menu = [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
             *model_menu_items,
             rumps.separator,
-            rumps.MenuItem(f"{translate_prefix} Translate to English", callback=self._toggle_translate),
+            [rumps.MenuItem("Push to Talk"), [
+                self.item_translate,
+                self.item_live,
+                self.item_save_audio,
+            ]],
+            [rumps.MenuItem("Meeting"), [
+                self.item_meeting,
+                self.item_meeting_subtitles,
+                self.item_save_meeting_audio,
+            ]],
             rumps.separator,
-            self.item_live,
-            self.item_save_audio,
-            self.item_meeting,
-            self.item_meeting_subtitles,
-            rumps.separator,
-            rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
-            rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
-            rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
-            rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
-            rumps.MenuItem("Hold Right Option to record"),
+            [rumps.MenuItem("Shortcuts"), [
+                rumps.MenuItem("Hold Right Option to record"),
+                rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
+                rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
+                rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
+                rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
+            ]],
             rumps.separator,
         ]
         self.status_item    = self.menu["Status: Ready"]
-        self.item_translate = self.menu[f"{translate_prefix} Translate to English"]
 
         # Hold-to-record state
         self.recording     = False
@@ -500,6 +520,19 @@ class TranscriberApp(rumps.App):
         elif not self.meeting_subtitles and self._overlay_panel:
             AppHelper.callAfter(self._destroy_overlay)
 
+    def _toggle_save_meeting_audio(self, _):
+        """Save raw meeting audio (WAV) next to the transcript. Default off."""
+        self.save_meeting_audio = not self.save_meeting_audio
+        if self.save_meeting_audio:
+            self.item_save_meeting_audio.title = "✅ Save Meeting Audio: On"
+        else:
+            self.item_save_meeting_audio.title = "   Save Meeting Audio: Off"
+        # Audio is written at stop, so a mid-meeting toggle applies to this meeting
+        if self._meeting_session is not None:
+            self._meeting_session.save_audio = self.save_meeting_audio
+        self._save_config()
+        logger.info("Save meeting audio %s", "enabled" if self.save_meeting_audio else "disabled")
+
     def _toggle_save_audio(self, _):
         self.save_audio = not self.save_audio
         if self.save_audio:
@@ -536,6 +569,7 @@ class TranscriberApp(rumps.App):
             language=None,
             on_update=self._meeting_overlay_update,
             capture_system_audio=True,
+            save_audio=self.save_meeting_audio,
         )
 
         # Show overlay (unless the user turned Meeting Subtitles off)
