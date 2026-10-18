@@ -1077,3 +1077,35 @@ def test_report_error_shows_persistent_alert_on_main():
         call_after.call_args[0][0]()
     show.assert_called_once()
     assert show.call_args[0][:2] == ("T", "line1\nline2")
+
+
+def test_guarded_callbacks_work_through_real_pynput_wrapping():
+    """Regression: pynput passes (key, injected) to *args callbacks.
+
+    pynput's AbstractListener._wrap inspects the callback's signature; a
+    bare *args wrapper made it pass 2 args to _on_press(key) → TypeError on
+    every Option press.
+    """
+    from pynput._util import AbstractListener
+    import app
+    inst = _bare_app()
+    seen = []
+    inst._on_press = lambda key: seen.append(("press", key))
+    inst._on_release = lambda key: seen.append(("release", key))
+    for name, fn in (("press", inst._on_press), ("release", inst._on_release)):
+        guarded = inst._guarded(fn, f"hotkey ({name})")
+        cb = AbstractListener._wrap(None, guarded, 2)
+        cb("KEY", False)  # exactly how pynput darwin calls it
+    assert seen == [("press", "KEY"), ("release", "KEY")]
+    inst._reporter.report.assert_not_called()
+
+
+def test_guarded_real_method_signature():
+    """Same check against the real bound methods' signatures."""
+    import inspect
+    import app
+    inst = _bare_app()
+    for meth in (app.TranscriberApp._on_press, app.TranscriberApp._on_release):
+        bound = meth.__get__(inst)
+        n = len(inspect.signature(bound).parameters)
+        assert n == 1

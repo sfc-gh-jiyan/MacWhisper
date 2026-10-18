@@ -405,8 +405,20 @@ class TranscriberApp(rumps.App):
 
         pynput stops the whole keyboard listener on any unhandled exception,
         which silently disables the Option key — never let one escape.
+
+        pynput inspects the callback's signature and passes as many args as
+        it accepts (a *args callback gets (key, injected)), so trim to the
+        wrapped function's own arity.
         """
+        import inspect
+        try:
+            arity = len(inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            arity = None
+
         def inner(*args):
+            if arity is not None:
+                args = args[:arity]
             try:
                 return fn(*args)
             except Exception as e:
