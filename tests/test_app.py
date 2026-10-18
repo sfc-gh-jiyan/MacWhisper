@@ -1153,3 +1153,16 @@ def test_meeting_stop_empty_meeting_copies_nothing():
     with patch.object(app.pyperclip, "copy") as copy:
         inst._stop_meeting()
     copy.assert_not_called()
+
+
+def test_meeting_transcript_path_logged_at_default_level(caplog):
+    """Path must reach macwhisper.log even with the default WARNING level."""
+    import logging
+    import app
+    inst = _stopping_app("/Users/x/.macwhisper/meetings/meeting 1.md")
+    with patch.object(app.pyperclip, "copy"), caplog.at_level(logging.WARNING):
+        inst._stop_meeting()
+    line = next(r.getMessage() for r in caplog.records if "MEETING SAVED" in r.getMessage())
+    assert "/Users/x/.macwhisper/meetings/meeting 1.md" in line
+    assert "file:///Users/x/.macwhisper/meetings/meeting%201.md" in line
+    assert caplog.records[-1].levelno >= logging.WARNING

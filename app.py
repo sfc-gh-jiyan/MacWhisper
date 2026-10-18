@@ -577,7 +577,11 @@ class TranscriberApp(rumps.App):
         path = getattr(self._meeting_session, "transcript_path", None)
         if path:
             pyperclip.copy(path)
-            logger.info("Meeting transcript path copied to clipboard: %s", path)
+            # WARNING level on purpose: the default log_level is WARNING and the
+            # user relies on this line to open the transcript from the log.
+            import pathlib
+            logger.warning("MEETING SAVED — transcript: %s | open: %s",
+                           path, pathlib.Path(path).as_uri())
             self._notify("MacWhisper — Meeting saved",
                          "Transcript file path copied to clipboard", path)
         elif transcript:
