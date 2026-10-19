@@ -13,6 +13,7 @@ Usage:
   venv/bin/python tests/eval_meeting.py --session 20261018_194440
   venv/bin/python tests/eval_meeting.py --model mlx-community/whisper-large-v3-turbo
   venv/bin/python tests/eval_meeting.py --strategies realtime fullpass --show-text
+  .venv-eval/bin/python tests/eval_meeting.py --strategies qwen3   # needs mlx-audio
 
 Metric: MER — mixed error rate (CJK per character, Latin per word), via
 eval_metrics.compute_wer. 0.0 = perfect. Recall = share of reference tokens found.
@@ -40,6 +41,7 @@ DATA_DIR = os.path.expanduser("~/.macwhisper")
 MEETINGS_DIR = os.path.join(DATA_DIR, "meetings")
 REF_DIR = os.path.join(DATA_DIR, "eval")
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-mlx"
+DEFAULT_QWEN_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
 SAMPLE_RATE = 16000
 
 
@@ -120,11 +122,40 @@ def _fullpass(session: Session, backend) -> str:
     return result.text.strip()
 
 
+def _qwen3(session: Session, backend) -> str:
+    """Qwen3-ASR over the whole meeting (mlx-audio).
+
+    language="Chinese" is required: with auto-detect the model picks one
+    language and TRANSLATES the other (Chinese speech came out as English).
+    Pinned to Chinese it keeps code-switched English words verbatim.
+    """
+    result = backend.generate(session.load_audio(), language="Chinese")
+    return result.text.strip()
+
+
 STRATEGIES = {
     "realtime": _realtime,
     "fullpass": _fullpass,
+    "qwen3": _qwen3,
 }
-NEEDS_MODEL = {"fullpass"}
+# Which model family each strategy needs (absent = no model)
+BACKEND_KIND = {"fullpass": "whisper", "qwen3": "qwen3"}
+
+
+def _load_backend(kind: str, model: str):
+    if kind == "whisper":
+        from asr_backend import MLXWhisperBackend
+        backend = MLXWhisperBackend(model_repo=model)
+        backend.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm-up, not timed
+        return backend
+    if kind == "qwen3":
+        # Needs mlx-audio — run with the isolated eval env (.venv-eval), not
+        # the app venv, so app dependencies stay untouched.
+        from mlx_audio.stt.utils import load
+        backend = load(model)
+        backend.generate(np.zeros(SAMPLE_RATE, dtype=np.float32), language="Chinese")
+        return backend
+    raise ValueError(kind)
 
 
 def score(hypothesis: str, reference: str) -> dict:
@@ -146,22 +177,22 @@ def format_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def run(sessions: list[Session], strategies: list[str], model: str) -> list[dict]:
-    backend = None
-    if any(s in NEEDS_MODEL for s in strategies):
-        from asr_backend import MLXWhisperBackend
-        backend = MLXWhisperBackend(model_repo=model)
-        backend.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm-up, not timed
+def run(sessions: list[Session], strategies: list[str], model: str,
+        qwen_model: str = DEFAULT_QWEN_MODEL) -> list[dict]:
+    model_for = {"whisper": model, "qwen3": qwen_model}
+    backends = {kind: _load_backend(kind, model_for[kind])
+                for kind in {BACKEND_KIND[s] for s in strategies if s in BACKEND_KIND}}
     rows = []
     for sess in sessions:
         audio_s = len(_read_wav(sess.mic_path)) / SAMPLE_RATE
         for name in strategies:
+            kind = BACKEND_KIND.get(name)
             t0 = time.time()
-            text = STRATEGIES[name](sess, backend)
+            text = STRATEGIES[name](sess, backends.get(kind))
             elapsed = time.time() - t0
             rows.append({
                 "session": sess.session_id, "strategy": name,
-                "model": model if name in NEEDS_MODEL else "-",
+                "model": model_for[kind] if kind else "-",
                 "seconds": elapsed, "audio_s": audio_s, "text": text,
                 **score(text, sess.reference),
             })
@@ -172,7 +203,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--session", action="append", help="Session id (repeatable); default all")
     p.add_argument("--strategies", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
-    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--model", default=DEFAULT_MODEL, help="Whisper model (fullpass)")
+    p.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL, help="Qwen3-ASR model (qwen3)")
     p.add_argument("--show-text", action="store_true", help="Print each hypothesis")
     p.add_argument("--json", help="Also write rows to this JSON file")
     args = p.parse_args(argv)
@@ -185,7 +217,7 @@ def main(argv=None) -> int:
               f"{MEETINGS_DIR}/meeting_<id>_mic.wav")
         return 1
 
-    rows = run(sessions, args.strategies, args.model)
+    rows = run(sessions, args.strategies, args.model, args.qwen_model)
     print(format_table(rows))
     if args.show_text:
         for r in rows:

@@ -114,3 +114,30 @@ def test_format_table_contains_rows():
              "recall": 0.6, "seconds": 0.0, "audio_s": 30.0, "text": "abc"}]
     out = eval_meeting.format_table(rows)
     assert "realtime" in out and "0.500" in out and "A" in out
+
+
+def test_qwen3_strategy_pins_chinese_to_keep_code_switching(dirs):
+    """Without language='Chinese', Qwen3-ASR translates the Chinese parts."""
+    meetings, refs = dirs
+    _write_wav(meetings / "meeting_A_mic.wav", [0] * 16000)
+    (refs / "A.ref.txt").write_text("x")
+    s = eval_meeting.discover_sessions(str(meetings), str(refs))[0]
+
+    class Out:
+        text = " 我们 hello "
+
+    class FakeQwen:
+        kw = None
+
+        def generate(self, audio, **kw):
+            FakeQwen.kw = kw
+            return Out()
+
+    assert eval_meeting.STRATEGIES["qwen3"](s, backend=FakeQwen()) == "我们 hello"
+    assert FakeQwen.kw["language"] == "Chinese"
+
+
+def test_backend_kind_per_strategy():
+    assert eval_meeting.BACKEND_KIND["fullpass"] == "whisper"
+    assert eval_meeting.BACKEND_KIND["qwen3"] == "qwen3"
+    assert "realtime" not in eval_meeting.BACKEND_KIND
