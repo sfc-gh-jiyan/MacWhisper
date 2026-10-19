@@ -110,6 +110,7 @@ import crash_guard
 import error_alert
 import qwen_backend
 import qwen_engine
+import settings_window
 import shortcuts
 from qwen_backend import QwenUnavailable
 
@@ -353,33 +354,11 @@ class TranscriberApp(rumps.App):
             f"{translate_prefix} Translate to English", callback=self._toggle_translate
         )
 
-        # Menu grouped by mode. Items are held by reference (self.item_*), so
-        # toggles keep working inside submenus.
-        self.menu = [
-            rumps.MenuItem("Status: Ready"),
-            rumps.separator,
-            *model_menu_items,
-            rumps.separator,
-            [rumps.MenuItem("Push to Talk"), [
-                self.item_translate,
-                self.item_live,
-                self.item_save_audio,
-            ]],
-            [rumps.MenuItem("Meeting"), [
-                self.item_meeting,
-                self.item_meeting_subtitles,
-                self.item_save_meeting_audio,
-            ]],
-            rumps.separator,
-            [rumps.MenuItem("Shortcuts"), [
-                rumps.MenuItem("Hold Right Option to record"),
-                rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
-                rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
-                rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
-                rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
-            ]],
-            rumps.separator,
-        ]
+        # v0.7.1: slim menu (status, models, meeting, Settings…). Every option
+        # lives in the Settings window; the item_* objects are still kept so
+        # the existing toggle handlers can update their titles unchanged.
+        self._settings = None
+        self.menu = self._build_menu()
         self.status_item    = self.menu["Status: Ready"]
 
         # Hold-to-record state
@@ -398,6 +377,7 @@ class TranscriberApp(rumps.App):
         # Hotkey modifier tracking ({"ctrl", "alt", "shift", "cmd"} held now)
         self._held_mods: set = set()
         self._ptt_cancelled = False   # PTT key turned out to be part of a combo
+        self._shortcuts_paused = False  # True while Settings records a shortcut
         self._key_event_received = False
 
         # Live subtitle overlay state
@@ -534,6 +514,51 @@ class TranscriberApp(rumps.App):
         def cb(_):
             self._set_model(label)
         return cb
+
+    def _build_menu(self) -> list:
+        settings = rumps.MenuItem("Settings…", callback=self._open_settings, key=",")
+        return [
+            rumps.MenuItem("Status: Ready"),
+            rumps.separator,
+            *[self.model_items[label] for label in ALL_MODEL_KEYS],
+            rumps.separator,
+            self.item_meeting,
+            rumps.separator,
+            settings,
+            rumps.separator,
+        ]
+
+    # ── Settings window ───────────────────────────────────────
+
+    # Preferences without a dedicated toggle handler (set from Settings)
+    _PREFS = ("meeting_final_pass", "qwen_strip_fillers", "qwen_tight_spacing")
+
+    def _open_settings(self, _):
+        if self._settings is None:
+            self._settings = settings_window.SettingsWindow(self, ALL_MODEL_KEYS)
+        self._settings.show()
+
+    def _refresh_settings(self):
+        if getattr(self, "_settings", None) is not None:
+            self._settings.refresh()
+
+    def _set_pref(self, name: str, value: bool) -> None:
+        if name not in self._PREFS:
+            raise ValueError(f"unknown preference: {name}")
+        setattr(self, name, bool(value))
+        qwen = getattr(self, "_qwen", None)
+        if qwen is not None:   # apply to the running engine without a restart
+            if name == "qwen_strip_fillers":
+                qwen.strip_fillers = bool(value)
+            elif name == "qwen_tight_spacing":
+                qwen.tight = bool(value)
+        logger.info("Preference %s = %s", name, value)
+        self._save_config()
+
+    def _set_shortcuts(self, cfg: dict) -> None:
+        self.shortcuts = shortcuts.merged(cfg)
+        logger.info("Shortcuts updated: %s", self.shortcuts)
+        self._save_config()
 
     def _active_model_label(self) -> str:
         """Menu label of the engine/model actually selected."""
@@ -920,6 +945,11 @@ class TranscriberApp(rumps.App):
     def _on_press(self, key):
         self._key_event_received = True
         mod = shortcuts.modifier_of(key)
+        if getattr(self, "_shortcuts_paused", False):
+            # Settings is recording a shortcut: track modifiers, trigger nothing
+            if mod:
+                self._held_mods.add(mod)
+            return
         ptt = self._ptt_spec()
         is_ptt_key = shortcuts.key_token(key) == ptt
 
@@ -956,10 +986,19 @@ class TranscriberApp(rumps.App):
             self._ptt_cancelled = True
             threading.Thread(target=self._cancel_recording, daemon=True).start()
         logger.debug("shortcut %s -> %s (main thread)", spec, action)
-        self._on_main(self._guarded(self._combo_handlers()[action], f"shortcut {shortcuts.display(spec)}"))
+        handler = self._combo_handlers()[action]
+
+        def run():
+            handler()
+            self._refresh_settings()   # keep an open Settings window in sync
+        self._on_main(self._guarded(run, f"shortcut {shortcuts.display(spec)}"))
 
     def _on_release(self, key):
         mod = shortcuts.modifier_of(key)
+        if getattr(self, "_shortcuts_paused", False):
+            if mod:
+                self._held_mods.discard(mod)
+            return
         if shortcuts.key_token(key) == self._ptt_spec():
             if self._ptt_cancelled:
                 self._ptt_cancelled = False

@@ -1338,12 +1338,32 @@ def test_meeting_session_gets_save_audio_flag():
     assert "save_audio=self.save_meeting_audio" in source
 
 
-def test_menu_grouped_into_submenus():
+def _menu_app():
     import app
-    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
-    assert 'rumps.MenuItem("Push to Talk")' in source
-    assert 'rumps.MenuItem("Meeting")' in source
-    assert 'rumps.MenuItem("Shortcuts")' in source
+    inst = _engine_app()
+    inst.model_items = {k: MagicMock(title=k) for k in app.ALL_MODEL_KEYS}
+    inst.item_meeting = MagicMock(title="   Meeting Mode: Off")
+    return inst
+
+
+def test_main_menu_is_slim_models_meeting_settings():
+    """v0.7.1: no submenus; options live in the Settings window."""
+    import app
+    inst = _menu_app()
+    menu = inst._build_menu()
+    assert not any(isinstance(entry, (list, tuple)) for entry in menu)   # no submenus
+    titles = [getattr(e, "title", None) for e in menu if e is not app.rumps.separator]
+    assert titles[0] == "Status: Ready"
+    for label in app.ALL_MODEL_KEYS:
+        assert inst.model_items[label] in menu
+    assert inst.item_meeting in menu
+    assert any(t and t.startswith("Settings") for t in titles)
+
+
+def test_settings_menu_item_has_cmd_comma():
+    inst = _menu_app()
+    settings = [e for e in inst._build_menu() if getattr(e, "title", "").startswith("Settings")][0]
+    assert settings.key == ","
 
 
 # ── Test: Qwen3-ASR engine wiring (v0.7.0) ────────────────────
@@ -1680,3 +1700,86 @@ def test_meeting_overlay_gets_stop_callback(monkeypatch):
     inst._create_overlay(mode="talk")
     assert seen["meeting"] == inst._stop_meeting_from_overlay
     assert seen["talk"] is None
+
+
+# ── Settings wiring (v0.7.1) ──────────────────────────────────
+
+def test_shortcuts_paused_while_recording_one(monkeypatch):
+    """Recording ⌃⌥M in Settings must not toggle the meeting."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._shortcuts_paused = True
+    _press(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ"))
+    _press(inst, Key.alt_r)
+    inst._toggle_meeting_mode.assert_not_called()
+    inst._start_recording.assert_not_called()
+    assert inst._held_mods == {"ctrl", "alt"}                  # still tracked
+    _release(inst, Key.ctrl, Key.alt, Key.alt_r)
+    assert inst._held_mods == set()
+    inst._shortcuts_paused = False
+    _press(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ"))
+    inst._toggle_meeting_mode.assert_called_once()
+
+
+def test_set_pref_saves_and_updates_running_qwen(tmp_config):
+    inst = _engine_app()
+    inst._qwen = MagicMock(strip_fillers=True, tight=True)
+    inst._set_pref("qwen_strip_fillers", False)
+    inst._set_pref("qwen_tight_spacing", False)
+    inst._set_pref("meeting_final_pass", False)
+    assert inst._qwen.strip_fillers is False and inst._qwen.tight is False
+    cfg = json.loads(tmp_config.read_text())
+    assert cfg["qwen_strip_fillers"] is False and cfg["meeting_final_pass"] is False
+
+
+def test_set_pref_rejects_unknown_name():
+    inst = _engine_app()
+    with pytest.raises(ValueError):
+        inst._set_pref("recording", True)
+
+
+def test_set_shortcuts_saves_and_applies(tmp_config):
+    import shortcuts
+    inst = _engine_app()
+    new = shortcuts.merged({"meeting": ["ctrl+cmd+vk46"]})
+    inst._set_shortcuts(new)
+    assert inst.shortcuts == new
+    assert json.loads(tmp_config.read_text())["shortcuts"]["meeting"] == ["ctrl+cmd+vk46"]
+
+
+def test_open_settings_builds_window_once(monkeypatch):
+    import app
+    inst = _menu_app()
+    created = []
+
+    class FakeWindow:
+        def __init__(self, a, labels):
+            created.append(labels)
+            self.shown = 0
+
+        def show(self):
+            self.shown += 1
+    monkeypatch.setattr(app.settings_window, "SettingsWindow", FakeWindow)
+    inst._settings = None
+    inst._open_settings(None)
+    inst._open_settings(None)
+    assert len(created) == 1 and created[0] == app.ALL_MODEL_KEYS
+    assert inst._settings.shown == 2
+
+
+def test_shortcut_action_refreshes_open_settings(monkeypatch):
+    import app
+    from pynput.keyboard import Key, KeyCode
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._shortcuts_paused = False
+    inst._settings = MagicMock()
+    inst._toggle_translate = MagicMock()
+    inst._on_main = lambda fn, *a: fn(*a)
+    inst._guarded = lambda fn, where: fn
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(17, char="T"))
+    inst._toggle_translate.assert_called_once()
+    inst._settings.refresh.assert_called_once()
