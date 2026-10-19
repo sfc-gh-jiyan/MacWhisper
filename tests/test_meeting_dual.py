@@ -62,21 +62,36 @@ def _wav_exists(filename):
     return os.path.isfile(os.path.join(AUDIO_DIR, filename))
 
 
-def _load_ground_truth():
-    """Load audio_file -> text mapping from transcripts.jsonl."""
+def _load_ground_truth(data_dir=None):
+    """Load audio filename -> text from transcripts.jsonl AND archive/.
+
+    The live transcripts.jsonl is rotated into archive/<version>/ on
+    release, so reading only the live file silently dropped every ground
+    truth and all E2E tests skipped (after running for minutes).
+    Keys are basenames so absolute and relative audio_file entries match.
+    """
+    import glob
+    data_dir = data_dir or os.path.dirname(TRANSCRIPT_LOG)
+    logs = sorted(glob.glob(os.path.join(data_dir, "archive", "**", "transcripts.jsonl"),
+                            recursive=True))
+    logs.append(os.path.join(data_dir, "transcripts.jsonl"))
     gt = {}
-    if not os.path.exists(TRANSCRIPT_LOG):
-        return gt
-    with open(TRANSCRIPT_LOG, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            af = entry.get("audio_file")
-            text = entry.get("text")
-            if af and text:
-                gt[af] = text
+    for log in logs:
+        if not os.path.exists(log):
+            continue
+        with open(log, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                af = entry.get("audio_file")
+                text = entry.get("text")
+                if af and text:
+                    gt[os.path.basename(af)] = text
     return gt
 
 
@@ -483,14 +498,52 @@ def _wav_duration(filename):
 
 
 def _e2e_scenario_ids():
-    """Load E2E scenario names for parametrize IDs."""
-    scenarios = _load_scenarios("e2e")
-    return [s["name"] for s in scenarios]
+    """E2E scenario names for parametrize IDs (same subset as _e2e_scenarios)."""
+    return [s["name"] for s in _e2e_scenarios()]
+
+
+def _wav_seconds(path):
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / w.getframerate()
+    except (OSError, wave.Error, EOFError):
+        return None
+
+
+def _scenario_seconds(s, audio_dir=None):
+    """Length of a scenario = longest channel (incl. system offset)."""
+    audio_dir = audio_dir or AUDIO_DIR
+    mic = _wav_seconds(os.path.join(audio_dir, s["mic_wav"]))
+    sys_ = _wav_seconds(os.path.join(audio_dir, s["system_wav"]))
+    if mic is None or sys_ is None:
+        return None
+    return max(mic, sys_ + s.get("system_offset_s", 0.0))
+
+
+def pick_by_length(scenarios, n=3, length_fn=_scenario_seconds):
+    """Pick n scenarios spread across lengths: shortest, middle(s), longest.
+
+    Real-time-paced E2E scenarios take minutes each; running all of them
+    (plus the A/B re-runs) took >30 min. Default to a length-spread subset.
+    Scenarios whose audio is missing are dropped.
+    """
+    timed = sorted(((length_fn(s), s) for s in scenarios), key=lambda t: t[0] or 0)
+    timed = [(t, s) for t, s in timed if t is not None]
+    if len(timed) <= n:
+        return [s for _, s in timed]
+    idx = sorted({round(i * (len(timed) - 1) / (n - 1)) for i in range(n)})
+    return [timed[i][1] for i in idx]
 
 
 def _e2e_scenarios():
-    """Load E2E scenarios for parametrize."""
-    return _load_scenarios("e2e")
+    """E2E scenarios for parametrize: 3 of different lengths by default.
+
+    Set MW_ALL_SCENARIOS=1 to run every scenario.
+    """
+    scenarios = _load_scenarios("e2e")
+    if os.environ.get("MW_ALL_SCENARIOS") == "1":
+        return scenarios
+    return pick_by_length(scenarios, n=3)
 
 
 def _save_result(result):
@@ -516,6 +569,10 @@ class TestDualChannelQuality:
         sys_path = os.path.join(AUDIO_DIR, s["system_wav"])
         if not os.path.isfile(mic_path) or not os.path.isfile(sys_path):
             pytest.skip(f"WAV files not available for {s['name']}")
+        # Check BEFORE the minutes-long real-time replay, not after it
+        gt = _load_ground_truth()
+        if not (gt.get(s["mic_wav"]) or gt.get(s["system_wav"])):
+            pytest.skip(f"No ground truth available for {s['name']}")
         return s, mic_path, sys_path
 
     @pytest.fixture(scope="class")
@@ -926,3 +983,29 @@ class TestMeetingSessionWithRealSystem:
         transcript = session.stop()
         assert session.state == "stopped"
         assert isinstance(transcript, str)
+
+
+# ── Scenario selection (pure logic) ───────────────────────────
+
+def test_pick_by_length_spreads_short_middle_long():
+    scen = [{"name": n} for n in "abcdefgh"]
+    lengths = dict(zip("abcdefgh", [30, 5, 60, 12, 45, 20, 8, 90]))
+    picked = pick_by_length(scen, 3, length_fn=lambda s: lengths[s["name"]])
+    assert [s["name"] for s in picked] == ["b", "a", "h"]   # 5s, 30s (middle of 8), 90s
+
+
+def test_pick_by_length_drops_missing_and_handles_few():
+    scen = [{"name": "a"}, {"name": "b"}]
+    picked = pick_by_length(scen, 3, length_fn=lambda s: None if s["name"] == "a" else 10)
+    assert [s["name"] for s in picked] == ["b"]
+
+
+def test_ground_truth_includes_archive_and_basenames(tmp_path):
+    (tmp_path / "archive" / "v0.6.0").mkdir(parents=True)
+    (tmp_path / "archive" / "v0.6.0" / "transcripts.jsonl").write_text(
+        json.dumps({"audio_file": "/old/history/audio/a.wav", "text": "archived"}) + "\n")
+    (tmp_path / "transcripts.jsonl").write_text(
+        json.dumps({"audio_file": None, "text": "no audio"}) + "\n"
+        + json.dumps({"audio_file": "b.wav", "text": "live"}) + "\n")
+    gt = _load_ground_truth(str(tmp_path))
+    assert gt == {"a.wav": "archived", "b.wav": "live"}

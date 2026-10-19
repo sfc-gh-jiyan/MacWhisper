@@ -8,12 +8,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 - **Overlay jumping between displays**: content updates no longer re-center the panel on `NSScreen.mainScreen()` (the focused display). `update_overlay()` now only changes text — the window never moves or resizes on its own.
+- **Option key silently stopped working**: menu-bar updates ran on the pynput listener thread (`NSInternalInconsistencyException`), and pynput stops the whole listener on any callback exception. All menu/status/icon writes and Ctrl+Shift shortcuts now run on the main thread; callbacks are guarded and a watchdog restarts the listener if it dies.
+- **Mic stream race**: fast Option press/release could leak a running PortAudio stream; open/close is now locked and late streams are closed.
+- **Meeting Mode dropped half the speech**: each chunk was fed to the stateful Silero VAD twice, corrupting its state (speech detected in 124/478 chunks instead of 294/478 on a real recording). Segments were cut mid-sentence and trailing sentences lost.
+- **Overlay window level regression**: `setFloatingPanel_` silently reset the level to 3; level is now set after it.
+- **Startup mic check never ran** (`DeviceList` has no `.get`).
 
 ### Added
 - **Movable overlay**: drag anywhere on the subtitle window to move it, including to another display
 - **Resizable overlay**: drag edges/corners to resize (min 240×60); text wraps and auto-scrolls to the newest line
 - **Remembered position**: frame persisted per mode (Push to Talk / Meeting) in `~/.macwhisper/overlay.json`; falls back to the default position if the saved display is disconnected
 - **Meeting Subtitles toggle**: new menu item to show/hide the Meeting Mode overlay (default On). Toggling mid-meeting shows/hides it immediately; recording, transcription, and export are unaffected. Saved as `meeting_subtitles` in config.
+
+- **Never fail silently**: any error in any thread shows a persistent red alert ("please stop talking") until dismissed; hard crashes are captured to `crash.log` via `faulthandler` and reported on next launch.
+- **Meeting transcript path on clipboard**: Meeting Mode copies the saved `.md` path (not the full text) and logs it with a `file://` link at the default log level. Falls back to copying text if saving failed.
+- **Save Meeting Audio** toggle (default off — recording needs participants' consent): saves `meeting_<id>_mic.wav` / `_sys.wav` next to the transcript.
+- Menu grouped into **Push to Talk / Meeting / Shortcuts** submenus.
+- Evaluation tools (test-only, data stays in `~/.macwhisper/eval/`): `make eval-meeting`, `tests/compare_ptt.py`, `tests/simulate_stream.py` (Whisper vs Qwen3-ASR).
 
 ### Changed
 - Overlay is a non-activating panel: clicking or dragging it never steals focus, so Hold-to-Record auto-paste still targets the active app
