@@ -12,10 +12,10 @@ smoke:
 	  -m "not slow and not hardware" -q
 
 # ── Level 2: Subtitle QA (~1-2 min) ──────────────────────
-# Replay named sample WAVs (non-dated, 30-70s) with diagnostic report.
+# Replay 3 named sample WAVs of different lengths (10-70s) with diagnostic report.
 # Checks: latency, freezes, inference timing, stability.
 qa:
-	$(PYTHON) tests/test_replay.py --named-only --min-duration 30 --max-duration 70 \
+	$(PYTHON) tests/test_replay.py --named-only --min-duration 10 --max-duration 70 --spread 3 \
 	  --diagnose --report-dir $(REPORT_DIR) --no-offline
 
 # ── Meeting eval: score strategies vs references (local data only) ──
