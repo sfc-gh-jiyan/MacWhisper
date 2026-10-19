@@ -1911,3 +1911,9 @@ def test_meeting_stop_hint_follows_shortcuts():
     assert overlay.meeting_stop_hint == ""
     inst._set_shortcuts(shortcuts.merged({}))
     assert overlay.meeting_stop_hint == "⌃⌥M"
+
+
+def test_default_qwen_model_is_1_7b():
+    """User choice (2026-10-19): Qwen3 1.7B is the default engine model."""
+    import app
+    assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-1.7B-bf16"

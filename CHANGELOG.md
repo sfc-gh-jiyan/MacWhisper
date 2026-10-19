@@ -20,6 +20,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   - Global shortcuts are paused while one is being recorded.
 
 ### Changed
+- **Default Qwen3 model is now 1.7B** (was 0.6B). This only applies when the config has no `qwen_model`; a saved choice is kept.
 - **Meeting shortcut: ⌃⇧R → ⌃⌥M and ⌃⇧F8**, because ⌃⇧R conflicted with CoCo. The meeting window label shows the current shortcut.
 - **Slim menu**: status, the five models, Start/Stop Meeting and Settings…. The Push to Talk / Meeting / Shortcuts submenus are gone.
 - **Push to Talk ignores the key while another modifier is held** (⌃, ⇧ or ⌘), so ⌃⌥M never starts a recording. If Right ⌥ was pressed first and ⌃⌥M follows, the accidental recording is discarded: nothing is transcribed or pasted.

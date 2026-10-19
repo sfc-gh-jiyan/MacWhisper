@@ -62,7 +62,7 @@ make qwen-setup        # or ./scripts/setup_qwen.sh
 ./run.sh
 ```
 
-This creates a separate environment `.venv-qwen` (needs [uv](https://docs.astral.sh/uv/) or Python 3.12) and downloads Qwen3-ASR 0.6B (~2.9 GB on disk; 1.7B is ~7.6 GB and downloads when first selected). The app's own environment is not changed. Once `.venv-qwen` exists, the next launch switches to **Qwen3 0.6B** automatically. Qwen3 runs as a separate background process; its log is `~/.macwhisper/logs/qwen_sidecar.log`.
+This creates a separate environment `.venv-qwen` (needs [uv](https://docs.astral.sh/uv/) or Python 3.12) and downloads Qwen3-ASR 1.7B (~7.6 GB on disk; 0.6B is ~2.9 GB and downloads when first selected). The app's own environment is not changed. Once `.venv-qwen` exists, the next launch switches to **Qwen3 1.7B** automatically. Qwen3 runs as a separate background process; its log is `~/.macwhisper/logs/qwen_sidecar.log`.
 
 ### Required Permissions (Important!)
 
@@ -191,7 +191,7 @@ Settings are stored in `~/.macwhisper/config.json`:
   "save_audio": false,
   "log_level": "WARNING",
   "engine": "qwen",
-  "qwen_model": "mlx-community/Qwen3-ASR-0.6B-bf16",
+  "qwen_model": "mlx-community/Qwen3-ASR-1.7B-bf16",
   "qwen_strip_fillers": true,
   "qwen_tight_spacing": true,
   "meeting_final_pass": true

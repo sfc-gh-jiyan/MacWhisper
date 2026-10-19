@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_DIR="$ROOT/.venv-qwen"
-MODEL="${MACWHISPER_QWEN_MODEL:-mlx-community/Qwen3-ASR-0.6B-bf16}"
+MODEL="${MACWHISPER_QWEN_MODEL:-mlx-community/Qwen3-ASR-1.7B-bf16}"
 
 if [ "$(uname -m)" != "arm64" ]; then
     echo "ERROR: Qwen3-ASR (MLX) requires Apple Silicon." >&2
