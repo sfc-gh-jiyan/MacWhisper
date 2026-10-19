@@ -92,6 +92,27 @@ def fake_model_fn(audio: np.ndarray, language: str) -> str:
     return f"fake {len(audio) / SAMPLE_RATE:.1f}s {language}"
 
 
+def watch_parent(interval: float = 2.0) -> None:
+    """Exit if the app that started us is gone (killed, crashed, kill -9).
+
+    Normally a closed stdin ends serve(); this also covers the case where the
+    app dies while a long decode is running, so the model never lingers in
+    GPU memory.
+    """
+    import threading
+
+    parent = os.getppid()
+
+    def run():
+        while True:
+            time.sleep(interval)
+            if os.getppid() != parent:
+                print("[qwen_sidecar] parent process gone — exiting", file=sys.stderr)
+                os._exit(0)
+
+    threading.Thread(target=run, daemon=True, name="parent-watch").start()
+
+
 def serve(model_fn, model_name: str, load_s: float, out, inp) -> None:
     def send(obj):
         out.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -136,6 +157,7 @@ def main(argv=None) -> int:
               f"text={text!r}", file=sys.stderr)
         return 0
 
+    watch_parent()
     serve(model_fn, "fake" if args.fake else args.model, load_s, proto_out, sys.stdin)
     return 0
 

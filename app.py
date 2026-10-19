@@ -1474,7 +1474,14 @@ if __name__ == "__main__":
 
     _check_audio_device()
     try:
-        TranscriberApp().run()
+        _app = TranscriberApp()
+
+        def _close_qwen(*_):
+            if _app._qwen is not None:
+                _app._qwen.close()   # never leave the sidecar holding GPU memory
+        atexit.register(_close_qwen)
+        rumps.events.before_quit.register(_close_qwen)
+        _app.run()
     except Exception:
         import traceback
         crash_log = os.path.join(LOG_DIR, "crash.log")
