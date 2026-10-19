@@ -128,6 +128,11 @@ LOG_DIR = os.path.join(_DATA_DIR, "logs")
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
 HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
+# A combo pressed again without a release within this window is macOS key
+# auto-repeat (holding the keys), not a new press.
+COMBO_REPEAT_WINDOW_S = 1.5
+# Meeting start/stop ignores further toggles for this long (double start/stop)
+MEETING_TOGGLE_COOLDOWN_S = 1.0
 
 # Set by __main__ when the previous run did not exit cleanly (crash.log tail)
 _PREVIOUS_CRASH_TAIL: str | None = None
@@ -379,6 +384,7 @@ class TranscriberApp(rumps.App):
         self._held_mods: set = set()
         self._ptt_cancelled = False   # PTT key turned out to be part of a combo
         self._shortcuts_paused = False  # True while Settings records a shortcut
+        self._combo_down: dict = {}     # combo spec -> last press time (until released)
         self._key_event_received = False
 
         # Live subtitle overlay state
@@ -740,16 +746,25 @@ class TranscriberApp(rumps.App):
 
     def _toggle_meeting_mode(self, _):
         """Start or stop Meeting Mode."""
+        now = time.monotonic()
+        last = max(getattr(self, "_meeting_toggled_at", -1e9),
+                   getattr(self, "_overlay_stop_at", -1e9))
+        if now - last < MEETING_TOGGLE_COOLDOWN_S:
+            # Double press, key repeat, or a shortcut queued while the Stop
+            # confirm dialog was open: never stop/start again right away
+            logger.warning("Ignoring meeting toggle %.2fs after the last start/stop", now - last)
+            return
+        self._meeting_toggled_at = now
         if self._meeting_session and self._meeting_session.is_recording:
             self._stop_meeting()
-        elif time.monotonic() - getattr(self, "_overlay_stop_at", -1e9) < 1.5:
-            # A shortcut queued while the Stop confirm dialog was open
-            logger.info("Ignoring meeting toggle right after overlay Stop")
         else:
             self._start_meeting()
 
     def _start_meeting(self):
         """Start a new meeting recording session."""
+        if self._meeting_session and self._meeting_session.is_recording:
+            logger.warning("Meeting already running — not starting a second one")
+            return
         if self.recording:
             print("[WARN] Cannot start meeting while hold-to-record is active")
             return
@@ -1011,6 +1026,15 @@ class TranscriberApp(rumps.App):
         action = shortcuts.match_action(spec, self.shortcuts)
         if not action:
             return
+        now = time.monotonic()
+        down = getattr(self, "_combo_down", None)
+        if down is None:
+            down = self._combo_down = {}
+        last = down.get(spec)
+        down[spec] = now
+        if last is not None and now - last < COMBO_REPEAT_WINDOW_S:
+            logger.debug("shortcut %s auto-repeat ignored", spec)
+            return
         if self.recording and shortcuts.combo_uses_ptt_key(spec, ptt):
             # e.g. ⌃⌥M pressed with Right ⌥ first: that "recording" was not speech
             logger.info("Shortcut %s uses the Push to Talk key — cancelling recording", spec)
@@ -1026,6 +1050,11 @@ class TranscriberApp(rumps.App):
 
     def _on_release(self, key):
         mod = shortcuts.modifier_of(key)
+        tok = shortcuts.key_token(key)
+        down = getattr(self, "_combo_down", None)
+        if down and tok and not mod:
+            for spec in [s for s in down if s.rsplit("+", 1)[-1] == tok]:
+                del down[spec]   # key released: the next press is a new press
         if getattr(self, "_shortcuts_paused", False):
             if mod:
                 self._held_mods.discard(mod)

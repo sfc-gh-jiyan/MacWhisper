@@ -1917,3 +1917,116 @@ def test_default_qwen_model_is_1_7b():
     """User choice (2026-10-19): Qwen3 1.7B is the default engine model."""
     import app
     assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-1.7B-bf16"
+
+
+# ── Meeting shortcut: auto-repeat and double start (user report 19:47) ──
+
+def _meeting_hotkey_app(monkeypatch, clock):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    monkeypatch.setattr(app.time, "monotonic", lambda: clock["t"])
+    inst = _hotkey_app()
+    inst._shortcuts_paused = False
+    inst._on_main = lambda fn, *a: fn(*a)
+    inst._guarded = lambda fn, where: fn
+    del inst._toggle_meeting_mode            # use the real toggle
+    state = {"running": False, "starts": 0, "stops": 0}
+
+    def start():
+        state["running"] = True
+        state["starts"] += 1
+        inst._meeting_session = MagicMock(is_recording=True)
+
+    def stop():
+        state["running"] = False
+        state["stops"] += 1
+        inst._meeting_session = None
+    inst._start_meeting = start
+    inst._stop_meeting = stop
+    return inst, state
+
+
+def _combo(inst, clock, hold_repeats=0, step=0.05):
+    from pynput.keyboard import Key, KeyCode
+    m = KeyCode.from_vk(46, char="M")
+    inst._on_press(Key.ctrl)
+    inst._on_press(Key.shift)
+    inst._on_press(m)
+    for _ in range(hold_repeats):        # macOS key auto-repeat while held
+        clock["t"] += step
+        inst._on_press(m)
+    inst._on_release(m)
+    inst._on_release(Key.shift)
+    inst._on_release(Key.ctrl)
+
+
+def test_holding_meeting_shortcut_toggles_once(monkeypatch):
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    _combo(inst, clock, hold_repeats=20)          # held ~1 s: 20 repeat events
+    assert state == {"running": True, "starts": 1, "stops": 0}
+
+
+def test_same_shortcut_starts_then_stops(monkeypatch):
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    _combo(inst, clock)
+    clock["t"] += 5.0
+    _combo(inst, clock)
+    assert state == {"running": False, "starts": 1, "stops": 1}
+
+
+def test_second_start_within_a_second_is_ignored(monkeypatch):
+    """Even a separate press right after starting must not stop/restart it."""
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    _combo(inst, clock)
+    clock["t"] += 0.4
+    _combo(inst, clock)
+    clock["t"] += 0.4
+    _combo(inst, clock)
+    assert state == {"running": True, "starts": 1, "stops": 0}
+
+
+def test_lost_key_release_does_not_block_next_press(monkeypatch):
+    from pynput.keyboard import Key, KeyCode
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    m = KeyCode.from_vk(46, char="M")
+    inst._on_press(Key.ctrl); inst._on_press(Key.shift); inst._on_press(m)   # no release for M
+    clock["t"] += 3.0
+    inst._on_press(m)                                                       # a real new press
+    assert state["starts"] == 1 and state["stops"] == 1
+
+
+def test_auto_repeat_ignored_for_other_shortcuts_too(monkeypatch):
+    from pynput.keyboard import Key, KeyCode
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst._cycle_model = MagicMock()
+    inst.shortcuts = shortcuts.merged({"cycle_model": ["ctrl+shift+vk31"]})
+    o = KeyCode.from_vk(31, char="O")
+    inst._on_press(Key.ctrl); inst._on_press(Key.shift)
+    for _ in range(10):
+        inst._on_press(o); clock["t"] += 0.05
+    inst._cycle_model.assert_called_once()
+
+
+def test_start_meeting_refuses_when_one_is_running():
+    inst = _meeting_app(in_meeting=True)
+    inst._meeting_session.is_recording = True
+    running = inst._meeting_session
+    inst.recording = False
+    inst._backend_ready = MagicMock()
+    inst._start_meeting()
+    assert inst._meeting_session is running          # untouched, no second session
+    inst._backend_ready.wait.assert_not_called()

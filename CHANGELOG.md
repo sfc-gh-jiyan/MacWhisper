@@ -27,6 +27,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - With Push to Talk on Right ⌘/⌃/⇧, using that modifier for another shortcut (⌘C…) discards the recording. Right ⌥ behaves as before.
 
 ### Fixed
+- **Meeting shortcut started a second meeting.** Holding the shortcut produced macOS key auto-repeat, and each repeat toggled the meeting (start, stop, start within one second). The same shortcut now starts and stops a meeting:
+  - Auto-repeat is ignored for every shortcut.
+  - Start/stop ignores further toggles for 1 s.
+  - A second meeting can never start while one is running.
 - A modifier "stuck" after a lost key release (for example in a password field) could silently disable Push to Talk, or turn typing into a shortcut. Modifier state now resyncs from macOS.
 - Tests could overwrite `~/.macwhisper/config.json`. Every test now uses temp files, and the test run fails if the real config changes.
 
