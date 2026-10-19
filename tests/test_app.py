@@ -1363,3 +1363,49 @@ def test_qwen_live_loop_stops_when_next_recording_starts(monkeypatch):
     t.start()
     t.join(5)
     assert not t.is_alive()
+
+
+def _final_pass_app(qwen):
+    inst = _engine_app(qwen=qwen)
+    inst._notify = MagicMock()
+    session = MagicMock()
+    session.mixed_audio.return_value = np.zeros(16000 * 5, dtype=np.float32)
+    session.write_final_transcript.return_value = "/tmp/m.md"
+    return inst, session
+
+
+def test_meeting_final_pass_rewrites_file_and_frees_audio():
+    q = _FakeQwen(text="会议最终文稿")
+    inst, session = _final_pass_app(q)
+    inst._meeting_final_pass(session)
+    text, engine = session.write_final_transcript.call_args[0]
+    assert text == "会议最终文稿" and "Qwen3" in engine
+    session.release_audio.assert_called_once()
+    inst._notify.assert_called_once()
+
+
+def test_meeting_final_pass_failure_keeps_live_transcript_and_alerts():
+    inst, session = _final_pass_app(_FakeQwen(fail=True))
+    inst._meeting_final_pass(session)
+    session.write_final_transcript.assert_not_called()      # live .md untouched
+    session.release_audio.assert_called_once()
+    inst._reporter.report.assert_called_once()
+
+
+def test_meeting_stop_whisper_engine_skips_final_pass_but_frees_audio():
+    import app
+    inst = _meeting_app(in_meeting=True)
+    inst.engine = "whisper"
+    inst._qwen = None
+    inst._idle_icon = "🎙"
+    inst.item_meeting = MagicMock()
+    inst._notify = MagicMock()
+    session = inst._meeting_session
+    session.stop.return_value = "text"
+    session.transcript_path = "/tmp/x.md"
+    session.segments = []
+    inst._meeting_final_pass = MagicMock()
+    with patch.object(app.pyperclip, "copy"):
+        inst._stop_meeting()
+    inst._meeting_final_pass.assert_not_called()
+    session.release_audio.assert_called_once()

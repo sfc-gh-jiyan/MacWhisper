@@ -732,7 +732,46 @@ class TranscriberApp(rumps.App):
                 OSError("meeting transcript file was not written"),
             )
 
+        session = self._meeting_session
         self._meeting_session = None
+        if path and getattr(self, "meeting_final_pass", True) and self._use_qwen():
+            threading.Thread(target=self._meeting_final_pass, args=(session,),
+                             daemon=True, name="meeting-final-pass").start()
+        elif session is not None:
+            session.release_audio()
+
+    def _meeting_final_pass(self, session):
+        """Re-transcribe the whole meeting with Qwen3 from in-memory audio.
+
+        The live transcript is already saved (and its path copied) before
+        this starts, so a failure here loses nothing. The .md is rewritten
+        in place: final transcript first, live transcript second. Audio is
+        never written to disk by this pass.
+        """
+        try:
+            audio = session.mixed_audio()
+            duration = len(audio) / SAMPLE_RATE
+            if duration < 1.0:
+                return
+            self._set_status("Meeting: final transcript (Qwen3)...")
+            logger.warning("Meeting final pass started: %.0fs audio (Qwen3)", duration)
+            t0 = time.time()
+            text = self._qwen.transcribe_final(audio)
+            label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
+                          if v == self._qwen.model_repo), "Qwen3")
+            path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass")
+            logger.warning("MEETING FINAL TRANSCRIPT — %s (%.0fs audio in %.1fs)",
+                           path, duration, time.time() - t0)
+            self._set_status("Meeting saved (final transcript ready)")
+            self._notify("MacWhisper — Final meeting transcript ready",
+                         "Same file, final version on top", path or "")
+        except QwenUnavailable as e:
+            self._qwen_failed(str(e), e)
+            self._set_status("Meeting saved (live transcript only)")
+        except Exception as e:
+            self._reporter.report("meeting final transcript (the live transcript is saved)", e)
+        finally:
+            session.release_audio()
 
     def _meeting_overlay_update(self, confirmed, unconfirmed, segments, debug=None):
         """Callback from MeetingSession to update overlay."""
