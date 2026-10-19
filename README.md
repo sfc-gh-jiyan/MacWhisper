@@ -13,7 +13,8 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 - **Meeting Mode** — Continuous recording with automatic segmentation, dual-channel mic + system audio capture, Markdown/JSON/SRT export
 - **Bilingual support** — Chinese, English, and mixed Chinese-English speech
 - **Translate mode** — Toggle translation to English for any spoken language
-- **3 model sizes** — Switch between Small, Medium, and Large models on the fly
+- **Qwen3-ASR engine (v0.7)** — Qwen3-ASR 0.6B / 1.7B: much more accurate on mixed Chinese-English speech, 5.6× (0.6B) / 2.6× (1.7B) faster than Whisper Large, keeps English verbatim (never translates). Whisper stays loaded as an automatic fallback
+- **5 models** — Whisper Small / Medium / Large and Qwen3 0.6B / 1.7B, switchable on the fly
 - **Menu bar status** — 🎙 Ready / 🔴 Recording / 💬 Transcribing / 🌐 Translate mode
 - **Keyboard shortcuts** — `Ctrl+Shift+M` models, `Ctrl+Shift+T` translate, `Ctrl+Shift+S` live subtitles, `Ctrl+Shift+R` meeting mode
 - **Persistent settings** — Model choice and all toggles survive app restarts
@@ -52,6 +53,15 @@ The install script will:
 2. Build a `MacWhisper.app` in `/Applications`
 3. Pre-download the default Whisper model (~1.5 GB)
 4. Verify all dependencies are working
+
+#### Optional: Qwen3-ASR engine
+
+```bash
+make qwen-setup        # or ./scripts/setup_qwen.sh
+./run.sh
+```
+
+This creates a separate environment `.venv-qwen` (needs [uv](https://docs.astral.sh/uv/) or Python 3.12) and downloads Qwen3-ASR 0.6B (~2.9 GB on disk; 1.7B is ~7.6 GB and downloads when first selected). The app's own environment is not changed. Once `.venv-qwen` exists, the next launch switches to **Qwen3 0.6B** automatically. Qwen3 runs as a separate background process; its log is `~/.macwhisper/logs/qwen_sidecar.log`.
 
 ### Required Permissions (Important!)
 
@@ -140,6 +150,31 @@ All three models were tested with the same bilingual Chinese-English script:
 
 > **Note:** "First Load" is the JIT compilation time on first use after app launch. Subsequent transcriptions with the same model are near-instant.
 
+### Qwen3-ASR vs Whisper (v0.7)
+
+Measured on real recordings (mixed Chinese-English):
+
+| | Whisper Large | Qwen3 0.6B | Qwen3 1.7B |
+|---|---|---|---|
+| Meeting, mixed error rate (2 recordings, lower is better) | 0.627 / 0.203 real-time, 0.729 / 0.359 full pass | **0.085 / 0.188** | **0.119 / 0.156** |
+| Push to Talk speed (221 clips, total time) | 1× (523 s) | **5.6× faster** (94 s) | **2.6× faster** (201 s) |
+| English inside Chinese speech | sometimes translated | kept verbatim (0 / 221 translated) | kept verbatim |
+| Live subtitles vs final text (14 clips, simulated) | live text ~49% different from final | first text ~1 s; live ≈ final (~1% apart) | not measured |
+| Translate to English | ✅ | ❌ (Whisper is used automatically) | ❌ |
+| Word timestamps | ✅ | ❌ | ❌ |
+
+**What uses which engine** when a Qwen3 model is selected:
+
+| | Engine |
+|---|---|
+| Push to Talk — live subtitles and final text | Qwen3 |
+| Push to Talk in Translate mode | Whisper |
+| Meeting Mode — real-time subtitles | Whisper (unchanged) |
+| Meeting Mode — final transcript after Stop | Qwen3, from in-memory audio (no audio file written) |
+| Any Qwen3 failure (not installed, crash, timeout) | Whisper on the same audio + one red alert |
+
+**Going back to Whisper:** pick any Whisper model in **Push to Talk → Model**. That is saved as `"engine": "whisper"` and is kept across restarts.
+
 ## Configuration
 
 Settings are stored in `~/.macwhisper/config.json`:
@@ -150,9 +185,19 @@ Settings are stored in `~/.macwhisper/config.json`:
   "current_model": "mlx-community/whisper-medium-mlx",
   "live_mode": false,
   "save_audio": false,
-  "log_level": "WARNING"
+  "log_level": "WARNING",
+  "engine": "qwen",
+  "qwen_model": "mlx-community/Qwen3-ASR-0.6B-bf16",
+  "qwen_strip_fillers": true,
+  "qwen_tight_spacing": true,
+  "meeting_final_pass": true
 }
 ```
+
+- `engine` — `"qwen"` or `"whisper"`. `current_model` always names the Whisper model, which stays loaded as the fallback.
+- `qwen_strip_fillers` — remove standalone 嗯 / 呃 / um from Qwen3 output (never inside words such as 额外).
+- `qwen_tight_spacing` — no space between Chinese and English (`这个commit的情况`), matching Whisper's style.
+- `meeting_final_pass` — re-transcribe a meeting with Qwen3 after Stop (in memory only).
 
 ## Tech Stack
 
