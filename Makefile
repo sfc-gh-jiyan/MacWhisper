@@ -1,4 +1,4 @@
-.PHONY: smoke qa test test-full eval-meeting
+.PHONY: smoke qa test test-full eval-meeting qwen-setup
 
 # Use venv python if available, else system python
 PYTHON := $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python)
@@ -8,7 +8,7 @@ REPORT_DIR := tests/TestReport
 # Pure logic, no ML model needed. Run after every code change.
 smoke:
 	$(PYTHON) -m pytest tests/test_app.py tests/test_meeting.py \
-	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py \
+	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py tests/test_qwen_sidecar.py \
 	  -m "not slow and not hardware" -q
 
 # ── Level 2: Subtitle QA (~1-2 min) ──────────────────────
@@ -17,6 +17,10 @@ smoke:
 qa:
 	$(PYTHON) tests/test_replay.py --named-only --min-duration 10 --max-duration 70 --spread 3 \
 	  --diagnose --report-dir $(REPORT_DIR) --no-offline
+
+# ── Qwen3-ASR sidecar env (isolated from the app venv) ──
+qwen-setup:
+	./scripts/setup_qwen.sh
 
 # ── Meeting eval: score strategies vs references (local data only) ──
 # References: ~/.macwhisper/eval/<id>.ref.txt; audio from ~/.macwhisper/meetings/
