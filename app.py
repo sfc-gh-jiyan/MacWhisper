@@ -106,6 +106,8 @@ from online_processor import OnlineASRProcessor
 from overlay import create_overlay, update_overlay, destroy_overlay
 from subtitle_export import save_enhanced_history
 from meeting import MeetingSession, MEETINGS_DIR
+import crash_guard
+import error_alert
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,12 @@ _DATA_DIR = os.path.expanduser("~/.macwhisper")
 CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
 OVERLAY_FRAME_PATH = os.path.join(_DATA_DIR, "overlay.json")
 LOG_DIR = os.path.join(_DATA_DIR, "logs")
+CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
+RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
+HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
+
+# Set by __main__ when the previous run did not exit cleanly (crash.log tail)
+_PREVIOUS_CRASH_TAIL: str | None = None
 
 MODEL_OPTIONS = {
     "Small (Fast)":      "mlx-community/whisper-small-mlx",
@@ -219,6 +227,7 @@ class TranscriberApp(rumps.App):
             "current_model": self.current_model,
             "live_mode": self.live_mode,
             "meeting_subtitles": self.meeting_subtitles,
+            "save_meeting_audio": self.save_meeting_audio,
             "save_audio": self.save_audio,
             "log_level": self.log_level,
         }
@@ -234,6 +243,8 @@ class TranscriberApp(rumps.App):
         self.current_model  = cfg.get("current_model", MODEL_OPTIONS["Medium (Accurate)"])
         self.live_mode      = cfg.get("live_mode", False)
         self.meeting_subtitles = cfg.get("meeting_subtitles", True)
+        # Off by default: recording participants requires their consent
+        self.save_meeting_audio = cfg.get("save_meeting_audio", False)
         self.save_audio     = cfg.get("save_audio", False)
         self.log_level      = cfg.get("log_level", "WARNING")
 
@@ -272,33 +283,57 @@ class TranscriberApp(rumps.App):
             callback=self._toggle_meeting_subtitles,
         )
 
+        msa_prefix = "✅" if self.save_meeting_audio else "  "
+        msa_label = "On" if self.save_meeting_audio else "Off"
+        self.item_save_meeting_audio = rumps.MenuItem(
+            f"{msa_prefix} Save Meeting Audio: {msa_label}",
+            callback=self._toggle_save_meeting_audio,
+        )
+        self.item_translate = rumps.MenuItem(
+            f"{translate_prefix} Translate to English", callback=self._toggle_translate
+        )
+
+        # Menu grouped by mode. Items are held by reference (self.item_*), so
+        # toggles keep working inside submenus.
         self.menu = [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
             *model_menu_items,
             rumps.separator,
-            rumps.MenuItem(f"{translate_prefix} Translate to English", callback=self._toggle_translate),
+            [rumps.MenuItem("Push to Talk"), [
+                self.item_translate,
+                self.item_live,
+                self.item_save_audio,
+            ]],
+            [rumps.MenuItem("Meeting"), [
+                self.item_meeting,
+                self.item_meeting_subtitles,
+                self.item_save_meeting_audio,
+            ]],
             rumps.separator,
-            self.item_live,
-            self.item_save_audio,
-            self.item_meeting,
-            self.item_meeting_subtitles,
-            rumps.separator,
-            rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
-            rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
-            rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
-            rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
-            rumps.MenuItem("Hold Right Option to record"),
+            [rumps.MenuItem("Shortcuts"), [
+                rumps.MenuItem("Hold Right Option to record"),
+                rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
+                rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
+                rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
+                rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
+            ]],
             rumps.separator,
         ]
         self.status_item    = self.menu["Status: Ready"]
-        self.item_translate = self.menu[f"{translate_prefix} Translate to English"]
 
         # Hold-to-record state
         self.recording     = False
         self.frames        = []
         self.stream        = None
+        self._stream_lock  = threading.Lock()  # guards self.stream open/close
+        self._rec_gen      = 0                 # recording generation token
         self._idle_icon    = idle_icon
+
+        # Error reporting — every failure must reach the user, never silent
+        self._reporter = crash_guard.ErrorReporter(alert=self._show_error)
+        crash_guard.install_thread_excepthook(self._reporter)
+        self._hotkey_stop = threading.Event()
 
         # Hotkey modifier tracking
         self._ctrl_pressed  = False
@@ -338,8 +373,77 @@ class TranscriberApp(rumps.App):
         threading.Thread(target=self._start_hotkey_listener, daemon=True).start()
         threading.Thread(target=self._check_permissions, daemon=True).start()
 
+    @rumps.timer(2)
+    def _report_previous_crash(self, sender):
+        """One-shot: if the last run died, tell the user (needs a live event loop)."""
+        sender.stop()
+        tail = _PREVIOUS_CRASH_TAIL
+        if tail is None:
+            return
+        last = "\n".join(tail.splitlines()[-6:]) or "(no details captured)"
+        self._show_error(
+            "⚠️ MacWhisper crashed last time",
+            "The previous session ended unexpectedly. Anything you said right "
+            "before that may not have been transcribed.\n\n"
+            f"Last lines of crash.log:\n{last}",
+        )
+
+    # ── Main-thread UI helpers ────────────────────────────────
+    # AppKit raises NSInternalInconsistencyException (or aborts the process)
+    # when menu/window state is modified off the main thread. All UI writes
+    # from worker/hotkey threads go through _on_main.
+
+    @staticmethod
+    def _on_main(fn):
+        from Foundation import NSThread
+        if NSThread.isMainThread():
+            fn()
+        else:
+            AppHelper.callAfter(fn)
+
     def _set_status(self, text):
-        self.status_item.title = f"Status: {text}"
+        item = self.status_item
+        self._on_main(lambda: setattr(item, "title", f"Status: {text}"))
+
+    def _set_title(self, icon):
+        def apply():
+            self.title = icon
+        self._on_main(apply)
+
+    def _show_error(self, title, message):
+        """Persistent red alert + notification. Safe from any thread."""
+        def apply():
+            error_alert.show_error_alert(title, message, frame_path=OVERLAY_FRAME_PATH)
+            try:
+                rumps.notification(title, "", message.splitlines()[0])
+            except Exception:
+                logger.debug("notification failed", exc_info=True)
+        self._on_main(apply)
+
+    def _guarded(self, fn, where):
+        """Wrap a callback so exceptions are reported instead of propagating.
+
+        pynput stops the whole keyboard listener on any unhandled exception,
+        which silently disables the Option key — never let one escape.
+
+        pynput inspects the callback's signature and passes as many args as
+        it accepts (a *args callback gets (key, injected)), so trim to the
+        wrapped function's own arity.
+        """
+        import inspect
+        try:
+            arity = len(inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            arity = None
+
+        def inner(*args):
+            if arity is not None:
+                args = args[:arity]
+            try:
+                return fn(*args)
+            except Exception as e:
+                self._reporter.report(where, e, while_recording=getattr(self, "recording", False))
+        return inner
 
     # ── Backend warmup ───────────────────────────────────────
 
@@ -381,7 +485,7 @@ class TranscriberApp(rumps.App):
         self.item_translate.title = "✅ Translate to English" if self.translate_mode else "   Translate to English"
         self._idle_icon = "🌐" if self.translate_mode else "🎙"
         if not self.recording:
-            self.title = self._idle_icon
+            self._set_title(self._idle_icon)
         mode_str = "Translate ON" if self.translate_mode else "Transcribe"
         self._set_status(mode_str)
         self._save_config()
@@ -415,6 +519,19 @@ class TranscriberApp(rumps.App):
             AppHelper.callAfter(lambda: self._create_overlay(mode="meeting"))
         elif not self.meeting_subtitles and self._overlay_panel:
             AppHelper.callAfter(self._destroy_overlay)
+
+    def _toggle_save_meeting_audio(self, _):
+        """Save raw meeting audio (WAV) next to the transcript. Default off."""
+        self.save_meeting_audio = not self.save_meeting_audio
+        if self.save_meeting_audio:
+            self.item_save_meeting_audio.title = "✅ Save Meeting Audio: On"
+        else:
+            self.item_save_meeting_audio.title = "   Save Meeting Audio: Off"
+        # Audio is written at stop, so a mid-meeting toggle applies to this meeting
+        if self._meeting_session is not None:
+            self._meeting_session.save_audio = self.save_meeting_audio
+        self._save_config()
+        logger.info("Save meeting audio %s", "enabled" if self.save_meeting_audio else "disabled")
 
     def _toggle_save_audio(self, _):
         self.save_audio = not self.save_audio
@@ -452,6 +569,7 @@ class TranscriberApp(rumps.App):
             language=None,
             on_update=self._meeting_overlay_update,
             capture_system_audio=True,
+            save_audio=self.save_meeting_audio,
         )
 
         # Show overlay (unless the user turned Meeting Subtitles off)
@@ -459,7 +577,7 @@ class TranscriberApp(rumps.App):
             AppHelper.callAfter(lambda: self._create_overlay(mode="meeting"))
 
         self._meeting_session.start()
-        self.title = "🔴"
+        self._set_title("🔴")
         self.item_meeting.title = "✅ Meeting Mode: Recording"
         self._set_status("Meeting recording...")
         print("[INFO] Meeting Mode started")
@@ -481,17 +599,32 @@ class TranscriberApp(rumps.App):
             logger.error("Meeting stop failed: %s", e)
             transcript = ""
 
-        self.title = self._idle_icon
+        self._set_title(self._idle_icon)
         self.item_meeting.title = "   Meeting Mode: Off"
 
         seg_count = len(self._meeting_session.segments) if self._meeting_session else 0
         self._set_status(f"Meeting saved ({seg_count} segments)")
         print(f"[INFO] Meeting Mode stopped — {seg_count} segments")
 
-        # Copy transcript to clipboard
-        if transcript:
+        # Meetings are long (20-30 min): copy the transcript FILE PATH, not the
+        # full text. Fall back to the text only if the file could not be saved.
+        path = getattr(self._meeting_session, "transcript_path", None)
+        if path:
+            pyperclip.copy(path)
+            # WARNING level on purpose: the default log_level is WARNING and the
+            # user relies on this line to open the transcript from the log.
+            import pathlib
+            logger.warning("MEETING SAVED — transcript: %s | open: %s",
+                           path, pathlib.Path(path).as_uri())
+            self._notify("MacWhisper — Meeting saved",
+                         "Transcript file path copied to clipboard", path)
+        elif transcript:
             pyperclip.copy(transcript)
-            print("[INFO] Meeting transcript copied to clipboard")
+            self._reporter.report(
+                "saving the meeting transcript file — the full text was copied "
+                "to the clipboard instead, paste it somewhere now",
+                OSError("meeting transcript file was not written"),
+            )
 
         self._meeting_session = None
 
@@ -554,10 +687,26 @@ class TranscriberApp(rumps.App):
     # ── Hotkeys ──────────────────────────────────────────────
 
     def _start_hotkey_listener(self):
-        with keyboard.Listener(
-            on_press=self._on_press, on_release=self._on_release
-        ) as listener:
-            listener.join()
+        """Run the pynput listener forever; restart it if it ever dies."""
+        failures = 0
+        while not self._hotkey_stop.is_set():
+            try:
+                logger.info("Hotkey listener starting (restart #%d)", failures)
+                with keyboard.Listener(
+                    on_press=self._guarded(self._on_press, "hotkey (key press)"),
+                    on_release=self._guarded(self._on_release, "hotkey (key release)"),
+                ) as listener:
+                    listener.join()
+                if self._hotkey_stop.is_set():
+                    return
+                raise RuntimeError("keyboard listener stopped unexpectedly")
+            except Exception as e:
+                failures += 1
+                self._reporter.report(
+                    "hotkey listener — restarting it; the Option key may not "
+                    "have worked until now", e,
+                )
+                self._hotkey_stop.wait(min(HOTKEY_RESTART_DELAY_S * failures, 30))
 
     def _on_press(self, key):
         self._key_event_received = True
@@ -568,17 +717,17 @@ class TranscriberApp(rumps.App):
 
         if self._ctrl_pressed and self._shift_pressed:
             vk = getattr(key, 'vk', None)
-            if vk == 46:  # M key
-                self._cycle_model()
-                return
-            if vk == 17:  # T key
-                self._toggle_translate(None)
-                return
-            if vk == 1:   # S key
-                self._toggle_live_mode(None)
-                return
-            if vk == 15:  # R key
-                self._toggle_meeting_mode(None)
+            # Menu actions touch AppKit → run them on the main thread, the
+            # same path as clicking the menu item.
+            action = {
+                46: lambda: self._cycle_model(),                 # M
+                17: lambda: self._toggle_translate(None),        # T
+                1:  lambda: self._toggle_live_mode(None),        # S
+                15: lambda: self._toggle_meeting_mode(None),     # R
+            }.get(vk)
+            if action:
+                logger.debug("hotkey Ctrl+Shift vk=%s → main thread", vk)
+                self._on_main(self._guarded(action, f"shortcut Ctrl+Shift (vk={vk})"))
                 return
 
         if key == keyboard.Key.alt_r and not self.recording:
@@ -598,10 +747,12 @@ class TranscriberApp(rumps.App):
     # ── Hold-to-Record ────────────────────────────────────────
 
     def _start_recording(self):
+        self._rec_gen += 1
+        gen = self._rec_gen
         self.frames    = []
         self.recording = True
         self._last_overlay_key = None
-        self.title     = "🟠"
+        self._set_title("🟠")
         self._set_status("Recording...")
         print("[INFO] Recording started")
 
@@ -636,28 +787,56 @@ class TranscriberApp(rumps.App):
         # during the wait, flooding the processor with 8s of audio on the
         # first iteration — pre-inference trim would discard the beginning,
         # and LocalAgreement couldn't confirm anything for 10+ seconds.
-        def callback(indata, frame_count, time_info, status):
-            if self.recording:
-                self.frames.append(indata.copy())
+        self._open_mic_stream(gen)
 
-        self.stream = sd.InputStream(
+    def _open_mic_stream(self, gen):
+        """Open the mic stream unless the recording already ended.
+
+        Hold-to-record start/stop run on separate threads. If Option is
+        released before the stream exists, the old code left the stream
+        running forever (leaked PortAudio callbacks). Under the lock we either
+        hand the stream to self.stream or close it immediately.
+        """
+        def callback(indata, frame_count, time_info, status):
+            # Runs on CoreAudio's real-time thread — must never raise.
+            try:
+                if self.recording:
+                    self.frames.append(indata.copy())
+            except Exception:
+                pass
+
+        stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16",
             blocksize=1024, callback=callback
         )
-        self.stream.start()
+        with self._stream_lock:
+            if not self.recording or gen != self._rec_gen:
+                logger.warning("Mic stream opened after recording ended (gen %s/%s) — closing",
+                               gen, self._rec_gen)
+                stream.close()
+                return
+            self.stream = stream
+            stream.start()
+            logger.debug("Mic stream started (gen %s)", gen)
+
+    def _close_mic_stream(self):
+        """Stop and close the mic stream (idempotent, thread-safe)."""
+        with self._stream_lock:
+            stream, self.stream = self.stream, None
+        if stream is None:
+            return
+        try:
+            stream.stop()
+            stream.close()
+        except Exception as e:
+            self._reporter.report("closing the microphone", e)
 
     def _stop_and_transcribe(self):
         self.recording = False
         print(f"[INFO] Recording stopped, frames: {len(self.frames)}")
 
         # ── 1. Stop audio stream IMMEDIATELY (no more data for live loop) ──
-        try:
-            if self.stream:
-                self.stream.stop()
-                self.stream.close()
-                self.stream = None
-        except Exception as e:
-            logger.error("Stream cleanup failed: %s", e)
+        self._close_mic_stream()
 
         # ── 2. Destroy overlay IMMEDIATELY so user sees instant response ──
         if self._overlay_panel:
@@ -688,11 +867,11 @@ class TranscriberApp(rumps.App):
             self._log_subtitle_session_end(realtime_text)
 
         if not self.frames:
-            self.title = self._idle_icon
+            self._set_title(self._idle_icon)
             self._set_status("Ready")
             return
 
-        self.title = "💬"
+        self._set_title("💬")
         self._set_status("Transcribing...")
         self.transcribe_queue.put((list(self.frames), realtime_text))
         self.frames = []  # release memory immediately
@@ -714,7 +893,7 @@ class TranscriberApp(rumps.App):
         try:
             self._live_loop_impl(proc)
         except Exception as e:
-            logger.error("Live loop crashed: %s", e, exc_info=True)
+            self._reporter.report("live subtitles", e, while_recording=self.recording)
         finally:
             self._live_loop_done.set()
 
@@ -866,14 +1045,14 @@ class TranscriberApp(rumps.App):
             try:
                 self._do_transcribe(frames, realtime_text=realtime_text)
             except Exception as e:
-                print(f"[ERROR] Transcription failed: {e}")
+                self._reporter.report("final transcription — text was not pasted", e)
             finally:
                 self.transcribe_queue.task_done()
                 # Release processor memory (audio_buffer, committed words, etc.)
                 if self._processor:
                     self._processor.reset()
                     self._processor = None
-                self.title = self._idle_icon
+                self._set_title(self._idle_icon)
                 self._set_status("Ready")
 
     def _do_transcribe(self, frames, realtime_text=""):
@@ -1013,7 +1192,7 @@ def _check_audio_device():
         devices = sd.query_devices()
         has_input = any(
             d.get("max_input_channels", 0) > 0
-            for d in (devices if isinstance(devices, list) else [devices])
+            for d in devices
         )
         if not has_input:
             rumps.alert(
@@ -1041,7 +1220,7 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=_file_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             logging.FileHandler(_log_file, encoding="utf-8"),
             logging.StreamHandler(),  # WARNING+ to console (default)
@@ -1049,6 +1228,22 @@ if __name__ == "__main__":
     )
     # Console handler only shows WARNING+
     logging.getLogger().handlers[-1].setLevel(logging.WARNING)
+
+    # ── Crash evidence: hard crashes (SIGABRT/SIGSEGV) bypass Python's
+    #    exception handling entirely. faulthandler writes them to crash.log,
+    #    and the run marker lets the next launch tell the user.
+    import atexit
+    crash_guard.enable_faulthandler(CRASH_LOG_PATH)
+    _marker = crash_guard.RunMarker(RUN_MARKER_PATH)
+    if _marker.previous_run_crashed():
+        _PREVIOUS_CRASH_TAIL = crash_guard.read_tail(CRASH_LOG_PATH)
+        logging.getLogger(__name__).error(
+            "Previous MacWhisper run did not exit cleanly; crash.log tail:\n%s",
+            _PREVIOUS_CRASH_TAIL,
+        )
+    _marker.create()
+    atexit.register(_marker.clear)
+    rumps.events.before_quit.register(_marker.clear)  # Quit menu → NSApp.terminate_
 
     _check_audio_device()
     try:

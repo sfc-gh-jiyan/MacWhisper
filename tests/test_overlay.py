@@ -100,3 +100,15 @@ def test_update_overlay_never_changes_frame(mode):
     panel.setFrameOrigin_.assert_not_called()
     panel.setContentSize_.assert_not_called()
     panel.center.assert_not_called()
+
+
+def test_overlay_window_level_stays_high():
+    """Regression: setFloatingPanel_ silently reset the level to 3."""
+    pytest.importorskip("AppKit")
+    from AppKit import NSApplication
+    NSApplication.sharedApplication()
+    panel, _ = overlay.create_overlay("talk", None)
+    try:
+        assert panel.level() == 1000
+    finally:
+        overlay.destroy_overlay(panel)

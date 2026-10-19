@@ -290,6 +290,95 @@ class TestMeetingSessionState:
                 meeting.MEETINGS_DIR = orig_dir
 
 
+    def test_auto_save_exposes_transcript_path(self):
+        session = self._make_session()
+        session._session_id = "20260326_path"
+        session._segments = [MeetingSegment(text="x", start_time=0.0, end_time=1.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                path = session._auto_save()
+                assert path == os.path.join(tmpdir, "meeting_20260326_path.md")
+                assert session.transcript_path == path
+                assert os.path.isfile(path)
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+    def test_auto_save_failure_leaves_no_path(self):
+        session = self._make_session()
+        session._session_id = "x"
+        import meeting
+        orig_dir = meeting.MEETINGS_DIR
+        meeting.MEETINGS_DIR = "/dev/null/not-a-dir"
+        try:
+            assert session._auto_save() is None  # must not raise
+            assert session.transcript_path is None
+        finally:
+            meeting.MEETINGS_DIR = orig_dir
+
+
+    def _session_with_audio(self, tmpdir, save_audio, dual=True):
+        import meeting
+        session = self._make_session(save_audio=save_audio)
+        session._session_id = "20261018_audio"
+        session._segments = [MeetingSegment(text="x", start_time=0.0, end_time=1.0)]
+        tone = (np.ones((1600, 1)) * 1000).astype(np.int16)
+        session._mic_frames = [tone, tone]
+        session._sys_frames = [tone] if dual else []
+        return session
+
+    def test_meeting_audio_not_saved_by_default(self):
+        """Recording needs participants' consent — off unless enabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                session = self._session_with_audio(tmpdir, save_audio=False)
+                session._auto_save()
+                assert not [f for f in os.listdir(tmpdir) if f.endswith(".wav")]
+                assert session.audio_paths == []
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+    def test_meeting_audio_saved_per_channel_when_enabled(self):
+        import wave
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                session = self._session_with_audio(tmpdir, save_audio=True)
+                session._auto_save()
+                mic = os.path.join(tmpdir, "meeting_20261018_audio_mic.wav")
+                sysw = os.path.join(tmpdir, "meeting_20261018_audio_sys.wav")
+                assert session.audio_paths == [mic, sysw]
+                with wave.open(mic) as w:
+                    assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+                    assert w.getnframes() == 3200
+                with wave.open(sysw) as w:
+                    assert w.getnframes() == 1600
+                md = open(os.path.join(tmpdir, "meeting_20261018_audio.md")).read()
+                assert "meeting_20261018_audio_mic.wav" in md
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+    def test_meeting_audio_skips_empty_channel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig_dir = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                session = self._session_with_audio(tmpdir, save_audio=True, dual=False)
+                session._auto_save()
+                assert [os.path.basename(p) for p in session.audio_paths] == [
+                    "meeting_20261018_audio_mic.wav"]
+            finally:
+                meeting.MEETINGS_DIR = orig_dir
+
+
 class TestMeetingSegment:
 
     def test_dataclass_fields(self):
@@ -710,3 +799,39 @@ class TestRMSPrioritySelection:
         # Main assertion: no crash, session works correctly
         assert isinstance(transcript, str)
         assert backend._call_count > 0
+
+
+class TestMeetingVadSinglePass:
+    """Regression: the meeting loop fed every chunk to the stateful Silero
+    RNN twice (process_chunk + is_speech). Re-feeding corrupts its hidden
+    state — on a real recording it dropped speech detection from 294/478 to
+    124/478 chunks, skipping inference and cutting segments mid-sentence."""
+
+    def test_each_chunk_reaches_vad_model_once(self):
+        calls = []
+
+        class CountingVad:
+            def reset(self):
+                pass
+
+            def process_chunk(self, chunk):
+                calls.append(("process", len(chunk)))
+                return {"is_speech": True, "silence_ms": 0, "speech_ms": 100}
+
+            def is_speech(self, chunk, *a, **k):
+                calls.append(("is_speech", len(chunk)))
+                return True
+
+            def is_extended_silence(self, *a, **k):
+                return False
+
+        backend = MockBackend(responses=["hello world"] * 50)
+        source = MockAudioSource()
+        session = MeetingSession(backend=backend, vad=CountingVad(), audio_source=source)
+        session.start()
+        time.sleep(0.5)  # MockAudioSource generates chunks continuously
+        session.stop()
+
+        assert calls, "VAD was never consulted"
+        assert not [c for c in calls if c[0] == "is_speech"], (
+            "chunk was evaluated twice by the VAD model: %r" % calls[:6])

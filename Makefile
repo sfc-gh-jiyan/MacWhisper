@@ -1,4 +1,4 @@
-.PHONY: smoke qa test test-full
+.PHONY: smoke qa test test-full eval-meeting
 
 # Use venv python if available, else system python
 PYTHON := $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python)
@@ -8,7 +8,7 @@ REPORT_DIR := tests/TestReport
 # Pure logic, no ML model needed. Run after every code change.
 smoke:
 	$(PYTHON) -m pytest tests/test_app.py tests/test_meeting.py \
-	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py \
+	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py \
 	  -m "not slow and not hardware" -q
 
 # ── Level 2: Subtitle QA (~1-2 min) ──────────────────────
@@ -17,6 +17,11 @@ smoke:
 qa:
 	$(PYTHON) tests/test_replay.py --named-only --min-duration 30 --max-duration 70 \
 	  --diagnose --report-dir $(REPORT_DIR) --no-offline
+
+# ── Meeting eval: score strategies vs references (local data only) ──
+# References: ~/.macwhisper/eval/<id>.ref.txt; audio from ~/.macwhisper/meetings/
+eval-meeting:
+	$(PYTHON) tests/eval_meeting.py
 
 # ── Level 3: Standard test (~5 min) ──────────────────────
 # Requires mlx_whisper model. Run before every commit.

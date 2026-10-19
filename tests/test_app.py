@@ -86,6 +86,7 @@ def test_config_save(tmp_config):
     inst.save_audio = False
     inst.log_level = "WARNING"
     inst.meeting_subtitles = True
+    inst.save_meeting_audio = False
     inst._save_config()
     saved = json.loads(tmp_config.read_text())
     assert saved["translate_mode"] is True
@@ -869,6 +870,7 @@ def _meeting_app(meeting_subtitles=True, in_meeting=False, panel=None):
     inst.log_level = "WARNING"
     inst.meeting_subtitles = meeting_subtitles
     inst.item_meeting_subtitles = MagicMock()
+    inst.save_meeting_audio = False
     inst.status_item = MagicMock()
     inst._meeting_session = MagicMock() if in_meeting else None
     inst._overlay_panel = panel
@@ -916,3 +918,296 @@ def test_meeting_start_respects_subtitles_pref():
     import app
     source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     assert "if self.meeting_subtitles:" in source
+
+
+# ── Test: crash safety (fix/crash-alerts) ─────────────────────
+
+def _bare_app():
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.status_item = MagicMock()
+    inst.recording = False
+    inst.frames = []
+    inst.stream = None
+    inst._stream_lock = threading.Lock()
+    inst._rec_gen = 0
+    inst._reporter = MagicMock()
+    inst._hotkey_stop = threading.Event()
+    return inst
+
+
+def test_set_status_from_background_thread_is_marshalled():
+    import app
+    inst = _bare_app()
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        t = threading.Thread(target=inst._set_status, args=("Ready",))
+        t.start()
+        t.join()
+    call_after.assert_called_once()
+    inst.status_item.title  # untouched by the background thread
+    call_after.call_args[0][0]()  # run it "on main"
+    assert inst.status_item.title == "Status: Ready"
+
+
+def test_set_title_from_background_thread_is_marshalled():
+    import app
+    inst = _bare_app()
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        t = threading.Thread(target=inst._set_title, args=("🔴",))
+        t.start()
+        t.join()
+    call_after.assert_called_once()
+
+
+def test_no_direct_title_writes_left_in_app():
+    """All menu-bar icon writes must go through _set_title (main thread)."""
+    import re
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    direct = re.findall(r"^\s*self\.title\s*=", source, flags=re.M)
+    assert len(direct) == 1  # only inside _set_title itself
+
+
+def test_guarded_hotkey_handler_reports_instead_of_raising():
+    inst = _bare_app()
+
+    def boom(_key):
+        raise RuntimeError("layout engine")
+
+    wrapped = inst._guarded(boom, "hotkey (press)")
+    wrapped("key")  # must NOT raise — raising kills the pynput listener
+    inst._reporter.report.assert_called_once()
+    assert inst._reporter.report.call_args[0][0] == "hotkey (press)"
+
+
+def test_hotkey_listener_restarts_after_it_dies():
+    import app
+    inst = _bare_app()
+    starts = []
+
+    class FakeListener:
+        def __init__(self, **kw):
+            starts.append(kw)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def join(self):
+            if len(starts) >= 2:
+                inst._hotkey_stop.set()
+                return
+            raise RuntimeError("listener crashed")
+
+    with patch.object(app.keyboard, "Listener", FakeListener), \
+         patch.object(app, "HOTKEY_RESTART_DELAY_S", 0):
+        inst._start_hotkey_listener()
+    assert len(starts) == 2
+    inst._reporter.report.assert_called_once()
+
+
+def test_ctrl_shift_hotkeys_run_on_main_thread():
+    import app
+    inst = _bare_app()
+    inst._ctrl_pressed = True
+    inst._shift_pressed = True
+    inst._meeting_session = None
+    inst._toggle_meeting_mode = MagicMock()
+    key = MagicMock()
+    key.vk = 15  # R
+    with patch.object(app.AppHelper, "callAfter") as call_after:
+        t = threading.Thread(target=inst._on_press, args=(key,))
+        t.start()
+        t.join()
+    inst._toggle_meeting_mode.assert_not_called()  # not on the listener thread
+    call_after.assert_called_once()
+
+
+def test_fast_release_closes_late_stream():
+    """Option released before the mic stream opened → stream must not leak."""
+    import app
+    inst = _bare_app()
+    fake_stream = MagicMock()
+    inst.recording = False  # already released
+    with patch.object(app.sd, "InputStream", return_value=fake_stream):
+        inst._open_mic_stream(gen=inst._rec_gen)
+    fake_stream.start.assert_not_called()
+    fake_stream.close.assert_called_once()
+    assert inst.stream is None
+
+
+def test_stale_generation_stream_is_closed():
+    import app
+    inst = _bare_app()
+    inst.recording = True
+    inst._rec_gen = 2  # a newer recording already started
+    fake_stream = MagicMock()
+    with patch.object(app.sd, "InputStream", return_value=fake_stream):
+        inst._open_mic_stream(gen=1)
+    fake_stream.close.assert_called_once()
+    assert inst.stream is None
+
+
+def test_open_and_close_mic_stream():
+    import app
+    inst = _bare_app()
+    inst.recording = True
+    fake_stream = MagicMock()
+    with patch.object(app.sd, "InputStream", return_value=fake_stream):
+        inst._open_mic_stream(gen=inst._rec_gen)
+    fake_stream.start.assert_called_once()
+    assert inst.stream is fake_stream
+    inst._close_mic_stream()
+    fake_stream.stop.assert_called_once()
+    fake_stream.close.assert_called_once()
+    assert inst.stream is None
+    inst._close_mic_stream()  # idempotent, no "NoneType has no close"
+
+
+def test_report_error_shows_persistent_alert_on_main():
+    import app
+    inst = _bare_app()
+    with patch.object(app.AppHelper, "callAfter") as call_after, \
+         patch.object(app.error_alert, "show_error_alert") as show, \
+         patch.object(app.rumps, "notification"):
+        t = threading.Thread(target=inst._show_error, args=("T", "line1\nline2"))
+        t.start()
+        t.join()
+        call_after.assert_called_once()
+        call_after.call_args[0][0]()
+    show.assert_called_once()
+    assert show.call_args[0][:2] == ("T", "line1\nline2")
+
+
+def test_guarded_callbacks_work_through_real_pynput_wrapping():
+    """Regression: pynput passes (key, injected) to *args callbacks.
+
+    pynput's AbstractListener._wrap inspects the callback's signature; a
+    bare *args wrapper made it pass 2 args to _on_press(key) → TypeError on
+    every Option press.
+    """
+    from pynput._util import AbstractListener
+    import app
+    inst = _bare_app()
+    seen = []
+    inst._on_press = lambda key: seen.append(("press", key))
+    inst._on_release = lambda key: seen.append(("release", key))
+    for name, fn in (("press", inst._on_press), ("release", inst._on_release)):
+        guarded = inst._guarded(fn, f"hotkey ({name})")
+        cb = AbstractListener._wrap(None, guarded, 2)
+        cb("KEY", False)  # exactly how pynput darwin calls it
+    assert seen == [("press", "KEY"), ("release", "KEY")]
+    inst._reporter.report.assert_not_called()
+
+
+def test_guarded_real_method_signature():
+    """Same check against the real bound methods' signatures."""
+    import inspect
+    import app
+    inst = _bare_app()
+    for meth in (app.TranscriberApp._on_press, app.TranscriberApp._on_release):
+        bound = meth.__get__(inst)
+        n = len(inspect.signature(bound).parameters)
+        assert n == 1
+
+
+# ── Test: meeting stop copies transcript file path ────────────
+
+def _stopping_app(transcript_path, transcript="full meeting text"):
+    import app
+    inst = _bare_app()
+    inst._overlay_panel = None
+    inst._idle_icon = "🎙"
+    inst.item_meeting = MagicMock()
+    session = MagicMock()
+    session.stop.return_value = transcript
+    session.transcript_path = transcript_path
+    session.segments = [1, 2, 3]
+    inst._meeting_session = session
+    inst._set_title = MagicMock()
+    inst._notify = MagicMock()
+    return inst
+
+
+def test_meeting_stop_copies_file_path_not_text():
+    import app
+    inst = _stopping_app("/Users/x/.macwhisper/meetings/meeting_1.md")
+    with patch.object(app.pyperclip, "copy") as copy:
+        inst._stop_meeting()
+    copy.assert_called_once_with("/Users/x/.macwhisper/meetings/meeting_1.md")
+    inst._reporter.report.assert_not_called()
+
+
+def test_meeting_stop_falls_back_to_text_if_save_failed():
+    import app
+    inst = _stopping_app(None)
+    with patch.object(app.pyperclip, "copy") as copy:
+        inst._stop_meeting()
+    copy.assert_called_once_with("full meeting text")
+    inst._reporter.report.assert_called_once()  # user is told the file is missing
+
+
+def test_meeting_stop_empty_meeting_copies_nothing():
+    import app
+    inst = _stopping_app(None, transcript="")
+    with patch.object(app.pyperclip, "copy") as copy:
+        inst._stop_meeting()
+    copy.assert_not_called()
+
+
+def test_meeting_transcript_path_logged_at_default_level(caplog):
+    """Path must reach macwhisper.log even with the default WARNING level."""
+    import logging
+    import app
+    inst = _stopping_app("/Users/x/.macwhisper/meetings/meeting 1.md")
+    with patch.object(app.pyperclip, "copy"), caplog.at_level(logging.WARNING):
+        inst._stop_meeting()
+    line = next(r.getMessage() for r in caplog.records if "MEETING SAVED" in r.getMessage())
+    assert "/Users/x/.macwhisper/meetings/meeting 1.md" in line
+    assert "file:///Users/x/.macwhisper/meetings/meeting%201.md" in line
+    assert caplog.records[-1].levelno >= logging.WARNING
+
+
+# ── Test: Save Meeting Audio toggle + grouped menu ────────────
+
+def test_save_meeting_audio_defaults_off_and_persists(tmp_config):
+    inst = _meeting_app()
+    inst.save_meeting_audio = False
+    inst._save_config()
+    assert json.loads(tmp_config.read_text())["save_meeting_audio"] is False
+
+
+def test_toggle_save_meeting_audio(tmp_config):
+    inst = _meeting_app()
+    inst.save_meeting_audio = False
+    inst.item_save_meeting_audio = MagicMock()
+    inst._toggle_save_meeting_audio(None)
+    assert inst.save_meeting_audio is True
+    assert inst.item_save_meeting_audio.title == "✅ Save Meeting Audio: On"
+    assert json.loads(tmp_config.read_text())["save_meeting_audio"] is True
+    inst._toggle_save_meeting_audio(None)
+    assert inst.item_save_meeting_audio.title == "   Save Meeting Audio: Off"
+
+
+def test_toggle_save_meeting_audio_mid_meeting_applies_at_stop(tmp_config):
+    inst = _meeting_app(in_meeting=True)
+    inst.save_meeting_audio = False
+    inst.item_save_meeting_audio = MagicMock()
+    inst._toggle_save_meeting_audio(None)
+    assert inst._meeting_session.save_audio is True
+
+
+def test_meeting_session_gets_save_audio_flag():
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert "save_audio=self.save_meeting_audio" in source
+
+
+def test_menu_grouped_into_submenus():
+    import app
+    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert 'rumps.MenuItem("Push to Talk")' in source
+    assert 'rumps.MenuItem("Meeting")' in source
+    assert 'rumps.MenuItem("Shortcuts")' in source

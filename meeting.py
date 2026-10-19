@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -63,8 +64,13 @@ class MeetingSession:
         extended_silence_ms: int = 2000,
         on_update: callable | None = None,
         capture_system_audio: bool = False,
+        save_audio: bool = False,
     ):
         self.backend = backend
+        # Raw audio is only written to disk when explicitly enabled —
+        # recording other participants requires their consent.
+        self.save_audio = save_audio
+        self.audio_paths: list[str] = []
         self.vad = vad
         self.min_chunk_size = min_chunk_size
         self.max_buffer_s = max_buffer_s
@@ -113,6 +119,7 @@ class MeetingSession:
 
         # Meeting data
         self._segments: list[MeetingSegment] = []
+        self.transcript_path: str | None = None  # set by _auto_save()
         self._meeting_start: float = 0.0
         self._processor: OnlineASRProcessor | None = None
 
@@ -367,7 +374,12 @@ class MeetingSession:
 
             # VAD processing
             if self.vad:
-                self.vad.process_chunk(chosen)
+                # Silero is a stateful RNN: each chunk must reach it exactly
+                # ONCE. Re-evaluating the same chunk (the old is_speech() call
+                # below) corrupted its hidden state and misclassified over
+                # half of real speech as silence.
+                vad_state = self.vad.process_chunk(chosen)
+                chunk_is_speech = vad_state["is_speech"]
 
                 # Safety: force segment break if current segment exceeds 30s.
                 # Natural speech rarely has 2s clean silence, so the extended-
@@ -390,7 +402,7 @@ class MeetingSession:
                         continue
 
                 # VAD pre-filter: skip transcription during pure silence
-                if not self.vad.is_speech(chosen):
+                if not chunk_is_speech:
                     vad_skip_count += 1
                     if vad_skip_count % 20 == 0:
                         print(f"[MEETING] VAD skip (silence): {vad_skip_count} chunks")
@@ -511,6 +523,8 @@ class MeetingSession:
         minutes = int(duration // 60)
         seconds = int(duration % 60)
         lines.append(f"- **Duration**: {minutes}m {seconds}s")
+        for path in self.audio_paths:
+            lines.append(f"- **Audio**: {os.path.basename(path)}")
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -535,8 +549,51 @@ class MeetingSession:
 
     # ── Internal: auto-save ──────────────────────────────────
 
-    def _auto_save(self) -> None:
-        """Save meeting data to ~/.macwhisper/meetings/."""
+    def _auto_save(self) -> str | None:
+        """Save meeting data to ~/.macwhisper/meetings/.
+
+        Returns the Markdown transcript path (also stored on
+        ``self.transcript_path``), or None if saving failed.
+        """
+        self.transcript_path = None
+        self.audio_paths = []
+        if self.save_audio:
+            try:
+                self.audio_paths = self._write_audio()
+            except OSError as e:
+                logger.error("Meeting audio save failed: %s", e, exc_info=True)
+        try:
+            return self._write_files()
+        except OSError as e:
+            logger.error("Meeting auto-save failed: %s", e, exc_info=True)
+            return None
+
+    def _write_audio(self) -> list[str]:
+        """Write each captured channel to its own 16 kHz mono WAV.
+
+        Channels are kept separate so a replay can reproduce the live loop's
+        per-chunk mic/system selection exactly.
+        """
+        os.makedirs(MEETINGS_DIR, exist_ok=True)
+        base = os.path.join(MEETINGS_DIR, f"meeting_{self._session_id}")
+        with self._frames_lock:
+            channels = [("mic", list(self._mic_frames)), ("sys", list(self._sys_frames))]
+        paths = []
+        for name, frames in channels:
+            if not frames:
+                continue
+            audio = np.concatenate(frames, axis=0).astype(np.int16)
+            path = f"{base}_{name}.wav"
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(audio.tobytes())
+            logger.info("Meeting audio saved: %s (%.1fs)", path, len(audio) / SAMPLE_RATE)
+            paths.append(path)
+        return paths
+
+    def _write_files(self) -> str:
         os.makedirs(MEETINGS_DIR, exist_ok=True)
         base = os.path.join(MEETINGS_DIR, f"meeting_{self._session_id}")
 
@@ -564,3 +621,5 @@ class MeetingSession:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
         print(f"[MEETING] Saved to {base}.*")
+        self.transcript_path = md_path
+        return md_path
