@@ -37,6 +37,11 @@ _STYLE_FULL_SIZE_CONTENT = 1 << 15
 _delegates: dict = {}
 _drag_view_cls = None
 _delegate_cls = None
+_stop_target_cls = None
+
+STOP_BUTTON_W = 68
+STOP_BUTTON_H = 22
+STOP_BUTTON_MARGIN = 8
 
 
 # ── Pure geometry / persistence helpers (unit-tested) ─────────
@@ -131,7 +136,69 @@ def _persist_from_notification(delegate, notification) -> None:
     save_frame(info["path"], info["mode"], frame)
 
 
+def _confirm_stop() -> bool:
+    """Ask before ending the meeting (a stray click must not stop it)."""
+    from AppKit import NSAlert, NSApplication
+    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)  # bring alert to front
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("End the meeting?")
+    alert.setInformativeText_("The transcript is saved and its file path copied to the clipboard.")
+    alert.addButtonWithTitle_("End Meeting")
+    alert.addButtonWithTitle_("Cancel")
+    return alert.runModal() == 1000  # NSAlertFirstButtonReturn
+
+
+def _handle_stop_click(target) -> None:
+    callback = getattr(target, "_mw_on_stop", None)
+    if callback is None:
+        return
+    logger.info("Overlay Stop clicked")
+    if not _confirm_stop():
+        logger.info("Overlay Stop cancelled by user")
+        return
+    try:
+        callback()
+    except Exception:
+        # Never raise into AppKit's event loop
+        logger.exception("Overlay Stop callback failed")
+
+
 # ── AppKit classes (created lazily, defined once per process) ─
+
+def _get_stop_target_cls():
+    global _stop_target_cls
+    if _stop_target_cls is None:
+        from Foundation import NSObject
+
+        class MWOverlayStopTarget(NSObject):
+            """Target for the meeting overlay's Stop button."""
+
+            def stopClicked_(self, _sender):
+                _handle_stop_click(self)
+
+        _stop_target_cls = MWOverlayStopTarget
+    return _stop_target_cls
+
+
+def _add_stop_button(panel, content, on_stop) -> None:
+    from AppKit import NSButton, NSMakeRect, NSFont, NSColor
+    cf = content.frame()
+    x = cf.size.width - STOP_BUTTON_W - STOP_BUTTON_MARGIN
+    y = cf.size.height - STOP_BUTTON_H - STOP_BUTTON_MARGIN
+    btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, STOP_BUTTON_W, STOP_BUTTON_H))
+    btn.setTitle_("■ Stop")
+    btn.setBezelStyle_(1)               # NSBezelStyleRounded
+    btn.setFont_(NSFont.systemFontOfSize_(12))
+    btn.setBezelColor_(NSColor.systemRedColor())
+    btn.setToolTip_("End the meeting (asks to confirm)")
+    btn.setAutoresizingMask_(0x1 | 0x8)  # NSViewMinXMargin | NSViewMinYMargin: stick top-right
+    target = _get_stop_target_cls().alloc().init()
+    target._mw_on_stop = on_stop
+    btn.setTarget_(target)
+    btn.setAction_("stopClicked:")
+    content.addSubview_(btn)            # added last: above the drag view
+    _delegates[("stop", id(panel))] = target  # keep the target alive (weak ref in AppKit)
+
 
 def _get_classes():
     global _drag_view_cls, _delegate_cls
@@ -168,12 +235,14 @@ def _get_classes():
 
 # ── Public API ────────────────────────────────────────────────
 
-def create_overlay(mode: str = "talk", frame_path: str | None = None):
+def create_overlay(mode: str = "talk", frame_path: str | None = None, on_stop=None):
     """Create a movable, resizable NSPanel for dual-color subtitles.
 
     Args:
         mode: "talk" for Push to Talk, "meeting" for Meeting Recording.
         frame_path: JSON file used to remember the frame per mode.
+        on_stop: meeting mode only — adds a top-right Stop button that calls
+            this (on the main thread) after the user confirms.
 
     Returns:
         (panel, text_view) tuple, or (None, None) if no screen available.
@@ -280,6 +349,9 @@ def create_overlay(mode: str = "talk", frame_path: str | None = None):
     drag_view.setAutoresizingMask_(flex_wh)
     content.addSubview_(drag_view)
 
+    if mode == "meeting" and on_stop is not None:
+        _add_stop_button(panel, content, on_stop)
+
     panel.orderFrontRegardless()
 
     # Render initial label immediately (don't wait for first transcription)
@@ -362,6 +434,11 @@ def destroy_overlay(panel):
     """Persist the final frame, then hide and release the overlay panel."""
     if not panel:
         return
+    if _delegates.pop(("stop", id(panel)), None) is not None:
+        from AppKit import NSButton
+        for v in panel.contentView().subviews():
+            if isinstance(v, NSButton):
+                v.setTarget_(None)      # no dangling target after the panel closes
     delegate = _delegates.pop(id(panel), None)
     info = getattr(delegate, "_mw_info", None) if delegate else None
     if info:

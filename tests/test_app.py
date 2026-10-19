@@ -1645,3 +1645,38 @@ def test_cancel_recording_discards_audio_without_transcribing(monkeypatch):
     inst._close_mic_stream.assert_called_once()
     inst._destroy_overlay.assert_called_once()
     inst.transcribe_queue.put.assert_not_called()
+
+
+def test_overlay_stop_ends_running_meeting():
+    inst = _meeting_app(in_meeting=True)
+    inst._meeting_session.is_recording = True
+    inst._stop_meeting = MagicMock()
+    inst._start_meeting = MagicMock()
+    inst._stop_meeting_from_overlay()
+    inst._stop_meeting.assert_called_once()
+    inst._start_meeting.assert_not_called()
+
+
+def test_overlay_stop_after_meeting_already_ended_never_starts_a_new_one():
+    """Confirm dialog open while the meeting was stopped by shortcut: do nothing."""
+    inst = _meeting_app(in_meeting=False)
+    inst._stop_meeting = MagicMock()
+    inst._start_meeting = MagicMock()
+    inst._stop_meeting_from_overlay()
+    inst._stop_meeting.assert_not_called()
+    inst._start_meeting.assert_not_called()
+
+
+def test_meeting_overlay_gets_stop_callback(monkeypatch):
+    import app
+    seen = {}
+
+    def fake_create(mode, frame_path, on_stop=None):
+        seen[mode] = on_stop
+        return MagicMock(), MagicMock()
+    monkeypatch.setattr(app, "create_overlay", fake_create)
+    inst = _meeting_app()
+    inst._create_overlay(mode="meeting")
+    inst._create_overlay(mode="talk")
+    assert seen["meeting"] == inst._stop_meeting_from_overlay
+    assert seen["talk"] is None

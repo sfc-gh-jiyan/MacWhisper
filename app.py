@@ -691,6 +691,18 @@ class TranscriberApp(rumps.App):
         self._save_config()
         print(f"[INFO] Save audio {'enabled' if self.save_audio else 'disabled'}")
 
+    def _stop_meeting_from_overlay(self):
+        """Stop button in the meeting overlay (called after the user confirms).
+
+        Never toggles: if the meeting already ended while the confirm dialog
+        was open (e.g. stopped by shortcut), this must not start a new one.
+        """
+        if self._meeting_session and self._meeting_session.is_recording:
+            logger.info("Meeting stopped from the overlay Stop button")
+            self._stop_meeting()
+        else:
+            logger.info("Overlay Stop: meeting already ended, nothing to do")
+
     def _toggle_meeting_mode(self, _):
         """Start or stop Meeting Mode."""
         if self._meeting_session and self._meeting_session.is_recording:
@@ -1452,7 +1464,9 @@ class TranscriberApp(rumps.App):
     # ── Live Subtitles — overlay ──────────────────────────────
 
     def _create_overlay(self, mode: str = "talk"):
-        panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH)
+        on_stop = self._stop_meeting_from_overlay if mode == "meeting" else None
+        panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH,
+                                          on_stop=on_stop)
         if panel:
             self._overlay_panel = panel
             self._overlay_text = text_view
