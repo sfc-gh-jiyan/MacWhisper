@@ -39,6 +39,16 @@ _drag_view_cls = None
 _delegate_cls = None
 _stop_target_cls = None
 
+# Meeting stop shortcut shown in the label; the app updates it from config
+meeting_stop_hint = "⌃⌥M"
+
+
+def meeting_label() -> str:
+    if meeting_stop_hint:
+        return f"● Meeting Recording — {meeting_stop_hint} or Stop to end\n"
+    return "● Meeting Recording — click Stop to end\n"
+
+
 STOP_BUTTON_W = 68
 STOP_BUTTON_H = 22
 STOP_BUTTON_MARGIN = 8
@@ -435,7 +445,7 @@ def update_overlay(panel, text_view, confirmed: str, unconfirmed: str, mode: str
     label_font = NSFont.systemFontOfSize_weight_(11, 0.4)  # semibold small
     if mode == "meeting":
         label_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.9, 0.25, 0.25, 0.9)
-        label_text = "● Meeting Recording — Ctrl+Shift+R to stop\n"
+        label_text = meeting_label()
     else:
         label_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.5, 0.15, 0.9)
         label_text = "● Push to Talk\n"

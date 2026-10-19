@@ -209,3 +209,13 @@ def test_confirm_stop_returns_focus_to_previous_app(monkeypatch):
     monkeypatch.setattr(overlay, "_make_alert", lambda: alert)
     assert overlay._confirm_stop() is False
     prev.activateWithOptions_.assert_called_once()
+
+
+def test_meeting_label_shows_current_stop_shortcut(monkeypatch):
+    """Label must not advertise the removed ⌃⇧R."""
+    assert "Ctrl+Shift+R" not in overlay.meeting_label()
+    monkeypatch.setattr(overlay, "meeting_stop_hint", "⌃⌘M")
+    assert "⌃⌘M" in overlay.meeting_label()
+    monkeypatch.setattr(overlay, "meeting_stop_hint", "")
+    assert overlay.meeting_label().startswith("● Meeting Recording")
+    assert "to stop" not in overlay.meeting_label() or "Stop" in overlay.meeting_label()

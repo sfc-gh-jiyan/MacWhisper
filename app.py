@@ -308,6 +308,7 @@ class TranscriberApp(rumps.App):
         self.meeting_final_pass = cfg.get("meeting_final_pass", True)
         # Keyboard shortcuts (v0.7.1): defaults fill anything missing/invalid
         self.shortcuts = shortcuts.merged(cfg.get("shortcuts"))
+        self._apply_shortcut_hints()
 
         # Meeting mode state
         self._meeting_session: MeetingSession | None = None
@@ -557,8 +558,15 @@ class TranscriberApp(rumps.App):
 
     def _set_shortcuts(self, cfg: dict) -> None:
         self.shortcuts = shortcuts.merged(cfg)
+        self._apply_shortcut_hints()
         logger.info("Shortcuts updated: %s", self.shortcuts)
         self._save_config()
+
+    def _apply_shortcut_hints(self) -> None:
+        """Text that names shortcuts (meeting overlay label) follows the config."""
+        import overlay as _overlay
+        meeting = self.shortcuts.get("meeting") or []
+        _overlay.meeting_stop_hint = shortcuts.display(meeting[0]) if meeting else ""
 
     def _active_model_label(self) -> str:
         """Menu label of the engine/model actually selected."""

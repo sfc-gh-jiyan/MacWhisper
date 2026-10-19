@@ -554,7 +554,10 @@ def test_data_dir_constant():
     import app
     assert hasattr(app, "_DATA_DIR")
     assert app._DATA_DIR.endswith(".macwhisper")
-    assert app.CONFIG_PATH.endswith(os.path.join(".macwhisper", "config.json"))
+    # CONFIG_PATH itself is redirected to a temp file for every test (conftest);
+    # check the production definition instead.
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert 'CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")' in src
     assert hasattr(app, "LOG_DIR")
     assert app.LOG_DIR.endswith(os.path.join(".macwhisper", "logs"))
 
@@ -1896,3 +1899,15 @@ def test_talk_overlay_not_created_after_recording_was_cancelled(monkeypatch):
     inst.recording = True
     inst._create_overlay()
     assert created == [1]
+
+
+def test_meeting_stop_hint_follows_shortcuts():
+    import overlay
+    import shortcuts
+    inst = _engine_app()
+    inst._set_shortcuts(shortcuts.merged({"meeting": ["ctrl+cmd+vk46", "ctrl+shift+f8"]}))
+    assert overlay.meeting_stop_hint == "⌃⌘M"
+    inst._set_shortcuts(shortcuts.merged({"meeting": []}))
+    assert overlay.meeting_stop_hint == ""
+    inst._set_shortcuts(shortcuts.merged({}))
+    assert overlay.meeting_stop_hint == "⌃⌥M"
