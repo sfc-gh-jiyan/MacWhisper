@@ -592,6 +592,7 @@ class TranscriberApp(rumps.App):
                 self._warmup_model(self.current_model)
         logger.info("Model selected: %s (engine=%s)", label, self.engine)
         self._refresh_model_menu()
+        self._refresh_settings()
         self._set_status(f"Model: {label.split(' (')[0]}")
         self._save_config()
 
@@ -724,6 +725,7 @@ class TranscriberApp(rumps.App):
         """
         if self._meeting_session and self._meeting_session.is_recording:
             logger.info("Meeting stopped from the overlay Stop button")
+            self._overlay_stop_at = time.monotonic()
             self._stop_meeting()
         else:
             logger.info("Overlay Stop: meeting already ended, nothing to do")
@@ -732,6 +734,9 @@ class TranscriberApp(rumps.App):
         """Start or stop Meeting Mode."""
         if self._meeting_session and self._meeting_session.is_recording:
             self._stop_meeting()
+        elif time.monotonic() - getattr(self, "_overlay_stop_at", -1e9) < 1.5:
+            # A shortcut queued while the Stop confirm dialog was open
+            logger.info("Ignoring meeting toggle right after overlay Stop")
         else:
             self._start_meeting()
 
@@ -961,21 +966,39 @@ class TranscriberApp(rumps.App):
                     logger.warning("Resynced stuck modifiers %s (lost key release)",
                                    sorted(self._held_mods - real))
                 self._held_mods = set(real)
+            started = False
             if not self.recording and shortcuts.ptt_allowed(self._held_mods, ptt):
                 # Block hold-to-record during active meeting
                 if self._meeting_session and self._meeting_session.is_recording:
                     pass
                 else:
                     self._ptt_cancelled = False
+                    started = True
                     threading.Thread(target=self._start_recording, daemon=True).start()
             if mod:
                 self._held_mods.add(mod)
-            return
+                return
+            if started or self.recording:
+                return
+            # Not dictation (e.g. ⌃⇧F8 with PTT = F8): match it as a combo below
 
         if mod:
             self._held_mods.add(mod)
             return
 
+        if (self.recording and not self._ptt_cancelled and ptt in ("cmd_r", "ctrl_r", "shift_r")
+                and shortcuts.modifier_name(ptt) in self._held_mods):
+            # e.g. PTT = Right ⌘ and the user typed ⌘C: not dictation
+            logger.info("Key pressed while holding %s — cancelling recording", ptt)
+            self._ptt_cancelled = True
+            threading.Thread(target=self._cancel_recording, daemon=True).start()
+
+        real = _system_modifiers()
+        if real is not None and real != self._held_mods:
+            # A lost release must not turn plain typing (⇧S) into a combo (⌃⇧S)
+            logger.warning("Resynced modifiers %s -> %s before shortcut match",
+                           sorted(self._held_mods), sorted(real))
+            self._held_mods = set(real)
         spec = shortcuts.event_spec(key, self._held_mods)
         action = shortcuts.match_action(spec, self.shortcuts)
         if not action:
@@ -1503,6 +1526,10 @@ class TranscriberApp(rumps.App):
     # ── Live Subtitles — overlay ──────────────────────────────
 
     def _create_overlay(self, mode: str = "talk"):
+        if mode == "talk" and not getattr(self, "recording", True):
+            # Queued creation that lost the race with a fast release/cancel
+            logger.info("Skipping talk overlay: recording already ended")
+            return
         on_stop = self._stop_meeting_from_overlay if mode == "meeting" else None
         panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH,
                                           on_stop=on_stop)

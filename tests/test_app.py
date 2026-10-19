@@ -16,6 +16,15 @@ import pytest
 
 # ── Helpers ───────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _no_real_keyboard(request, monkeypatch):
+    """Hotkey tests must not read the test machine's real modifier state."""
+    if request.node.name == "test_system_modifiers_reads_quartz":
+        return
+    import app
+    monkeypatch.setattr(app, "_system_modifiers", lambda: None)
+
+
 @pytest.fixture
 def tmp_config(tmp_path):
     cfg_file = tmp_path / "test_config.json"
@@ -1783,3 +1792,107 @@ def test_shortcut_action_refreshes_open_settings(monkeypatch):
     _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(17, char="T"))
     inst._toggle_translate.assert_called_once()
     inst._settings.refresh.assert_called_once()
+
+
+# ── v0.7.1 bug hunt ───────────────────────────────────────────
+
+def test_right_cmd_ptt_cancelled_by_cmd_c(monkeypatch):
+    """PTT = Right ⌘: ⌘C must not record-and-paste."""
+    import shortcuts
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"push_to_talk": ["cmd_r"]})
+    _press(inst, Key.cmd_r)
+    inst._start_recording.assert_called_once()
+    inst.recording = True
+    _press(inst, KeyCode.from_vk(8, char="c"))
+    inst._cancel_recording.assert_called_once()
+    _release(inst, KeyCode.from_vk(8), Key.cmd_r)
+    inst._stop_and_transcribe.assert_not_called()
+
+
+def test_right_option_ptt_unchanged_when_other_key_pressed(monkeypatch):
+    """Default Right ⌥ keeps v0.7.0 behavior exactly."""
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    _press(inst, Key.alt_r)
+    inst.recording = True
+    _press(inst, KeyCode.from_vk(0, char="å"))
+    inst._cancel_recording.assert_not_called()
+    _release(inst, KeyCode.from_vk(0), Key.alt_r)
+    inst._stop_and_transcribe.assert_called_once()
+
+
+def test_meeting_toggle_debounced_after_overlay_stop(monkeypatch):
+    """⌃⌥M pressed while the Stop confirm dialog was open must not start a new meeting."""
+    import app
+    inst = _meeting_app(in_meeting=True)
+    inst._meeting_session.is_recording = True
+    t = {"now": 100.0}
+    monkeypatch.setattr(app.time, "monotonic", lambda: t["now"])
+    inst._stop_meeting = MagicMock(side_effect=lambda: setattr(inst, "_meeting_session", None))
+    inst._start_meeting = MagicMock()
+    inst._stop_meeting_from_overlay()
+    t["now"] += 0.3
+    inst._toggle_meeting_mode(None)                  # queued shortcut
+    inst._start_meeting.assert_not_called()
+    t["now"] += 2.0
+    inst._toggle_meeting_mode(None)                  # a deliberate press later works
+    inst._start_meeting.assert_called_once()
+
+
+def test_set_model_refreshes_settings_window():
+    import app
+    inst = _menu_app()
+    inst._settings = MagicMock()
+    inst._warmup_model = MagicMock()
+    inst._set_status = MagicMock()
+    inst._set_model("Large (Best)")
+    inst._settings.refresh.assert_called_once()
+
+
+def test_combo_ending_in_ptt_key_still_fires(monkeypatch):
+    """Reviewer: PTT = F8 must not swallow ⌃⇧F8 (meeting)."""
+    import app
+    import shortcuts
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"push_to_talk": ["f8"]})
+    _press(inst, Key.ctrl, Key.shift, Key.f8)
+    inst._start_recording.assert_not_called()
+    inst._toggle_meeting_mode.assert_called_once()
+    _release(inst, Key.f8)
+    inst._stop_and_transcribe.assert_not_called()
+
+
+def test_stale_modifier_does_not_fire_combo_while_typing(monkeypatch):
+    """Reviewer: stale ⌃ + typing ⇧S must not toggle live subtitles."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._toggle_live_mode = MagicMock()
+    inst._held_mods = {"ctrl", "shift"}                        # ⌃ is stale
+    monkeypatch.setattr(app, "_system_modifiers", lambda: {"shift"})
+    _press(inst, KeyCode.from_vk(1, char="S"))
+    inst._toggle_live_mode.assert_not_called()
+    assert inst._held_mods == {"shift"}
+
+
+def test_talk_overlay_not_created_after_recording_was_cancelled(monkeypatch):
+    """Reviewer: queued overlay creation must not outlive a cancelled recording."""
+    import app
+    created = []
+    monkeypatch.setattr(app, "create_overlay", lambda *a, **k: created.append(1) or (MagicMock(), MagicMock()))
+    inst = _meeting_app()
+    inst.recording = False
+    inst._create_overlay()                                     # talk mode, recording over
+    assert created == [] and inst._overlay_panel is None
+    inst.recording = True
+    inst._create_overlay()
+    assert created == [1]

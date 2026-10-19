@@ -140,3 +140,10 @@ def test_right_side_modifier_keycodes_for_flags_changed():
     assert sc.side_modifier_name(62) == "ctrl_r"
     assert sc.side_modifier_name(60) == "shift_r"
     assert sc.side_modifier_name(58) is None        # left Option: not a valid PTT key
+
+
+def test_non_ascii_digits_rejected():
+    """Reviewer: 'vk²'.isdigit() is True but int('²') fails in display()."""
+    with pytest.raises(ValueError):
+        sc.normalize("ctrl+vk²")
+    assert sc.merged({"meeting": ["ctrl+vk²"]})["meeting"] == sc.DEFAULTS["meeting"]

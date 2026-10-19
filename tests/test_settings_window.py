@@ -355,3 +355,12 @@ def test_window_reopens_after_close(real_window):
     win.window.performClose_(None)
     win.show()
     assert win.window.isVisible()
+
+
+def test_recording_stops_when_window_loses_focus(real_window):
+    """Switching apps mid-recording must not leave global hotkeys paused."""
+    app, win = real_window
+    win._record_buttons[("translate", 0)].performClick_(None)
+    assert app._shortcuts_paused is True
+    win._controller.windowDidResignKey_(None)
+    assert app._shortcuts_paused is False and win._recording is None

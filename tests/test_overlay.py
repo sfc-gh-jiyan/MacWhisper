@@ -197,3 +197,15 @@ def test_destroy_detaches_stop_button_target():
     overlay.destroy_overlay(panel)
     assert btn.target() is None
     assert not [k for k in overlay._delegates if isinstance(k, tuple)]
+
+
+def test_confirm_stop_returns_focus_to_previous_app(monkeypatch):
+    """After the dialog, the user's app must be frontmost again (auto-paste target)."""
+    pytest.importorskip("AppKit")
+    prev = MagicMock()
+    monkeypatch.setattr(overlay, "_frontmost_app", lambda: prev)
+    alert = MagicMock()
+    alert.runModal.return_value = 1001          # Cancel
+    monkeypatch.setattr(overlay, "_make_alert", lambda: alert)
+    assert overlay._confirm_stop() is False
+    prev.activateWithOptions_.assert_called_once()

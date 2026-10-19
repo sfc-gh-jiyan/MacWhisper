@@ -56,7 +56,8 @@ DEFAULTS = {
 
 def _is_key_token(tok: str) -> bool:
     if tok.startswith("vk"):
-        return tok[2:].isdigit()
+        digits = tok[2:]
+        return digits.isascii() and digits.isdecimal()   # 'vk²'.isdigit() is True
     return tok.isidentifier() and tok not in MODIFIERS
 
 

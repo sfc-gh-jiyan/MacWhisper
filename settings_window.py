@@ -124,6 +124,19 @@ class SettingsModel:
 
 # ── AppKit window ─────────────────────────────────────────────
 
+def _frontmost_other_app():
+    """Frontmost app if it is not MacWhisper itself, else None."""
+    try:
+        from AppKit import NSWorkspace, NSRunningApplication
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        me = NSRunningApplication.currentApplication()
+        if front is None or front.processIdentifier() == me.processIdentifier():
+            return None
+        return front
+    except Exception:
+        return None
+
+
 _controller_cls = None
 WIDTH = 560
 ROW_H = 26
@@ -156,6 +169,12 @@ def _get_controller_cls():
 
         def windowWillClose_(self, _notification):
             self._mw_owner.stop_recording()
+            self._mw_owner.restore_focus()
+
+        def windowDidResignKey_(self, _notification):
+            # Local key monitor only sees keys while we are key: never leave
+            # global hotkeys paused after the user switches apps
+            self._mw_owner.stop_recording()
 
     _controller_cls = MWSettingsController
     return _controller_cls
@@ -177,6 +196,7 @@ class SettingsWindow:
         self._recording = None      # (action, slot) while waiting for keys
         self._monitor = None
         self._controller = None
+        self._prev_app = None       # app to give focus back to on close
 
     # ── public ──
     def show(self) -> None:
@@ -184,8 +204,19 @@ class SettingsWindow:
         if self.window is None:
             self._build()
         self.refresh()
+        if not self.is_visible():
+            self._prev_app = _frontmost_other_app()
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
+
+    def restore_focus(self) -> None:
+        """Give focus back to the user's app (Push to Talk pastes into it)."""
+        prev, self._prev_app = self._prev_app, None
+        if prev is not None:
+            try:
+                prev.activateWithOptions_(0)
+            except Exception:
+                logger.debug("restore focus failed", exc_info=True)
 
     def is_visible(self) -> bool:
         return bool(self.window is not None and self.window.isVisible())

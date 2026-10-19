@@ -136,16 +136,45 @@ def _persist_from_notification(delegate, notification) -> None:
     save_frame(info["path"], info["mode"], frame)
 
 
+def _frontmost_app():
+    """Frontmost app if it is not MacWhisper itself, else None."""
+    try:
+        from AppKit import NSWorkspace, NSRunningApplication
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        me = NSRunningApplication.currentApplication()
+        if front is None or front.processIdentifier() == me.processIdentifier():
+            return None
+        return front
+    except Exception:
+        return None
+
+
+def _make_alert():
+    from AppKit import NSAlert
+    return NSAlert.alloc().init()
+
+
 def _confirm_stop() -> bool:
-    """Ask before ending the meeting (a stray click must not stop it)."""
-    from AppKit import NSAlert, NSApplication
+    """Ask before ending the meeting (a stray click must not stop it).
+
+    Activating MacWhisper is needed to show the alert in front; afterwards
+    focus goes back to the user's app so the next Push to Talk pastes there.
+    """
+    from AppKit import NSApplication
+    prev = _frontmost_app()
     NSApplication.sharedApplication().activateIgnoringOtherApps_(True)  # bring alert to front
-    alert = NSAlert.alloc().init()
+    alert = _make_alert()
     alert.setMessageText_("End the meeting?")
     alert.setInformativeText_("The transcript is saved and its file path copied to the clipboard.")
     alert.addButtonWithTitle_("End Meeting")
     alert.addButtonWithTitle_("Cancel")
-    return alert.runModal() == 1000  # NSAlertFirstButtonReturn
+    confirmed = alert.runModal() == 1000  # NSAlertFirstButtonReturn
+    if prev is not None:
+        try:
+            prev.activateWithOptions_(0)
+        except Exception:
+            logger.debug("restore focus failed", exc_info=True)
+    return confirmed
 
 
 def _handle_stop_click(target) -> None:
