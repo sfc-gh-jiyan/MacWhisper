@@ -96,6 +96,7 @@ def load_clips(data_dir: str = DATA_DIR) -> list[dict]:
                 clips.append({
                     "wav": path, "duration_s": float(r.get("duration_s") or 0),
                     "pasted": r["text"], "pasted_model": r.get("model", "?"),
+                    "realtime": r.get("realtime_text", ""),
                 })
     return sorted(clips, key=lambda c: c["wav"])
 
