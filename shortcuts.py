@@ -95,6 +95,11 @@ def display(spec: str) -> str:
     return "".join(_MOD_SYMBOL[m] for m in MODIFIERS if m in mods) + label
 
 
+def modifier_name(token: str) -> str | None:
+    """'alt_r' -> 'alt'; None if the token is not a modifier key."""
+    return _MOD_OF_NAME.get(token)
+
+
 def modifier_of(key) -> str | None:
     """'ctrl'/'alt'/'shift'/'cmd' if this pynput key is a modifier, else None."""
     name = getattr(key, "name", None)
@@ -198,3 +203,43 @@ def combo_uses_ptt_key(combo_spec: str, ptt_spec: str) -> bool:
     _, key = split(ptt_spec)
     own = _MOD_OF_NAME.get(key)
     return own is not None and own in mods
+
+
+# ── Settings recorder: NSEvent -> spec (must match the pynput listener) ──
+
+_NS_FLAG_MODS = (("shift", 1 << 17), ("ctrl", 1 << 18), ("alt", 1 << 19), ("cmd", 1 << 20))
+_SIDE_MODIFIER_VK = {61: "alt_r", 54: "cmd_r", 62: "ctrl_r", 60: "shift_r"}
+_special_by_vk: dict | None = None
+
+
+def _special_names() -> dict:
+    """macOS keyCode -> pynput special key name, from pynput's own table.
+
+    Reusing pynput's table guarantees the Settings recorder and the global
+    listener name every key identically (e.g. keyCode 100 -> "f8").
+    """
+    global _special_by_vk
+    if _special_by_vk is None:
+        try:
+            from pynput.keyboard import _darwin
+            table = _darwin.Listener._SPECIAL_KEYS
+            _special_by_vk = {vk: key.name for (vk, media), key in table.items() if media is None}
+        except Exception:
+            _special_by_vk = {}
+    return _special_by_vk
+
+
+def spec_from_keycode(keycode: int, mods: set) -> str:
+    """Spec for an NSEvent keyCode with modifiers — same string pynput yields."""
+    token = _special_names().get(keycode) or f"vk{keycode}"
+    return "+".join([m for m in MODIFIERS if m in mods] + [token])
+
+
+def mods_from_flags(flags: int) -> set:
+    """NSEvent modifierFlags -> {"ctrl", "alt", "shift", "cmd"} (caps lock ignored)."""
+    return {name for name, bit in _NS_FLAG_MODS if flags & bit}
+
+
+def side_modifier_name(keycode: int) -> str | None:
+    """Right-side modifier key name for a flagsChanged keyCode (PTT candidates)."""
+    return _SIDE_MODIFIER_VK.get(keycode)

@@ -8,7 +8,7 @@ REPORT_DIR := tests/TestReport
 # Pure logic, no ML model needed. Run after every code change.
 smoke:
 	$(PYTHON) -m pytest tests/test_app.py tests/test_meeting.py \
-	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py tests/test_qwen_sidecar.py tests/test_qwen_backend.py tests/test_qwen_text.py tests/test_qwen_engine.py tests/test_shortcuts.py \
+	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py tests/test_qwen_sidecar.py tests/test_qwen_backend.py tests/test_qwen_text.py tests/test_qwen_engine.py tests/test_shortcuts.py tests/test_settings_window.py \
 	  -m "not slow and not hardware" -q
 
 # ── Level 2: Subtitle QA (~1-2 min) ──────────────────────
