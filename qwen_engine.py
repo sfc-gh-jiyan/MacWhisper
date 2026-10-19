@@ -34,6 +34,7 @@ class QwenEngine:
         self.backend = None
         self.model_repo: str | None = None
         self._ok = False
+        self.started_ok = False   # became ready at least once for this model
         self.last_error = ""
         self._lock = threading.Lock()
 
@@ -52,7 +53,9 @@ class QwenEngine:
                     logger.debug("closing previous Qwen backend failed", exc_info=True)
             self.backend = self._factory(model_repo)
             self.model_repo = model_repo
+            self.started_ok = False
             self._ok = bool(self.backend.start())
+            self.started_ok = self._ok
             self.last_error = "" if self._ok else (getattr(self.backend, "last_error", "") or
                                                    "Qwen3 sidecar failed to start")
             logger.info("QwenEngine start %s -> ready=%s %s", model_repo, self._ok, self.last_error)
@@ -72,8 +75,12 @@ class QwenEngine:
             self._ok = False
 
     def transcribe_final(self, audio: np.ndarray) -> str:
-        """Final text for a whole utterance. Raises QwenUnavailable on failure."""
-        if not self.is_ready:
+        """Final text for a whole utterance. Raises QwenUnavailable on failure.
+
+        After a sidecar crash (started_ok but not ready) the backend restarts
+        it transparently, within its restart budget.
+        """
+        if not self.started_ok or self.backend is None:
             raise QwenUnavailable(self.last_error or "Qwen3 engine not started")
         result = self.backend.transcribe(np.asarray(audio, dtype=np.float32))
         return qwen_text.postprocess(result.text, strip_filler_words=self.strip_fillers,

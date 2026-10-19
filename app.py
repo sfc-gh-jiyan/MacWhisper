@@ -568,10 +568,27 @@ class TranscriberApp(rumps.App):
         self._qwen.start_async(repo, on_done=done)
 
     def _use_qwen(self) -> bool:
-        """Qwen3 serves this request: selected, ready, and not translating."""
+        """Qwen3 serves this final pass: selected, started once, not translating.
+
+        Deliberately NOT gated on "ready right now": after a sidecar crash the
+        request must reach Qwen3 so it restarts it — or fails loudly (alert +
+        Whisper fallback) — instead of silently switching to Whisper. While
+        Qwen3 is still loading (never started), Whisper is used quietly.
+        """
         qwen = getattr(self, "_qwen", None)
         return (getattr(self, "engine", "whisper") == "qwen" and qwen is not None
-                and qwen.is_ready and not self.translate_mode)
+                and getattr(qwen, "started_ok", False) and not self.translate_mode)
+
+    def _qwen_live_ok(self) -> bool:
+        """Live subtitles need a sidecar that is ready NOW (no restart delays)."""
+        return self._use_qwen() and self._qwen.is_ready
+
+    def _qwen_recovered(self):
+        """Qwen3 served a request: re-arm the alert and clear the menu mark."""
+        if self._qwen_alerted:
+            logger.warning("Qwen3 recovered — using Qwen3 again")
+            self._qwen_alerted = False
+            self._on_main(self._refresh_model_menu)
 
     def _qwen_failed(self, reason: str, exc: Exception | None = None):
         """Qwen3 unusable: alert once per incident; Whisper takes over."""
@@ -922,7 +939,7 @@ class TranscriberApp(rumps.App):
         self._qwen_live_text = ""
         if self.live_mode:
             self._live_loop_done.clear()
-            loop = self._qwen_live_loop if self._use_qwen() else self._live_loop
+            loop = self._qwen_live_loop if self._qwen_live_ok() else self._live_loop
             threading.Thread(target=loop, daemon=True).start()
 
         # ── 4. Start audio capture LAST ──
@@ -1249,6 +1266,7 @@ class TranscriberApp(rumps.App):
             t0 = time.time()
             try:
                 text = self._qwen.transcribe_final(audio_float)
+                self._qwen_recovered()
                 print(f"[INFO] Final transcription (Qwen3): {time.time() - t0:.1f}s "
                       f"for {duration:.1f}s audio")
                 print(f"[INFO] Result: {text}")

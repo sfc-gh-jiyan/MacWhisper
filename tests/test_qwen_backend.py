@@ -92,6 +92,7 @@ def test_restart_budget_is_limited(tmp_path):
                 b.transcribe(_audio(1.0))
         assert b.restarts == 1
         assert "gave up" in b.last_error
+        assert b.last_error.count("gave up") == 1        # no nesting on repeats
     finally:
         b.close()
 
@@ -119,3 +120,16 @@ def test_sidecar_stderr_goes_to_log_file(tmp_path):
 
 def test_default_python_path_points_at_repo_venv():
     assert qb.default_python_path(REPO).endswith(os.path.join(".venv-qwen", "bin", "python"))
+
+
+def test_sidecar_killed_between_requests_records_exit_code(tmp_path):
+    b = _backend(tmp_path, max_restarts=0)
+    try:
+        assert b.start(timeout=20)
+        b._proc.kill()
+        b._proc.wait(5)
+        with pytest.raises(qb.QwenUnavailable):
+            b.transcribe(_audio(1.0))
+        assert "exited (code" in b.last_error
+    finally:
+        b.close()

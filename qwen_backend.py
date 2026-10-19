@@ -226,10 +226,17 @@ class QwenSidecarBackend(ASRBackend):
     def _ensure_running_locked(self) -> None:
         if self.is_ready:
             return
+        if self._proc is not None and self._proc.poll() is not None:
+            # Died between requests (crash, OOM, killed): record why
+            self.last_error = f"Qwen3 sidecar exited (code {self._proc.returncode})"
+            logger.error("%s — see %s", self.last_error, self.log_path)
+            self._kill_locked()
         if self._started_once:
             if self.restarts >= self.max_restarts:
-                self.last_error = (f"Qwen3 sidecar gave up after {self.restarts} restarts: "
-                                   f"{self.last_error}")
+                if not self.last_error.startswith("Qwen3 sidecar gave up"):
+                    cause = self.last_error or "sidecar not running"
+                    self.last_error = (f"Qwen3 sidecar gave up after {self.restarts} "
+                                       f"restarts (last error: {cause})")
                 raise QwenUnavailable(self.last_error)
             self.restarts += 1
             logger.warning("Restarting Qwen sidecar (restart %d/%d)", self.restarts, self.max_restarts)

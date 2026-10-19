@@ -1219,6 +1219,7 @@ def test_menu_grouped_into_submenus():
 class _FakeQwen:
     def __init__(self, ready=True, text="千问 result", fail=False):
         self.is_ready = ready
+        self.started_ok = ready
         self.text = text
         self.fail = fail
         self.calls = 0
@@ -1409,3 +1410,46 @@ def test_meeting_stop_whisper_engine_skips_final_pass_but_frees_audio():
         inst._stop_meeting()
     inst._meeting_final_pass.assert_not_called()
     session.release_audio.assert_called_once()
+
+
+class _CrashedQwen(_FakeQwen):
+    """Was ready, sidecar died: is_ready False, and a retry fails too."""
+
+    def __init__(self):
+        super().__init__(ready=False, fail=True)
+        self.started_ok = True
+        self.last_error = "Qwen3 sidecar exited unexpectedly"
+
+
+def test_crashed_sidecar_is_retried_then_alerts_instead_of_silent_whisper():
+    """Regression (real-model verify): after a crash the app silently used Whisper."""
+    inst = _engine_app(qwen=_CrashedQwen())
+    inst._whisper_final = MagicMock(return_value=("whisper text", None))
+    text, model = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert text == "whisper text"
+    assert inst._qwen.calls == 1                       # Qwen3 was actually tried
+    inst._reporter.report.assert_called_once()         # and the user was told
+
+
+def test_qwen_still_loading_uses_whisper_without_alert():
+    q = _FakeQwen(ready=False)
+    q.started_ok = False                                # never became ready yet
+    inst = _engine_app(qwen=q)
+    inst._whisper_final = MagicMock(return_value=("w", None))
+    inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert q.calls == 0
+    inst._reporter.report.assert_not_called()
+
+
+def test_alert_rearms_after_qwen_recovers():
+    q = _FakeQwen(fail=True)
+    inst = _engine_app(qwen=q)
+    inst._on_main = lambda fn, *a: fn(*a)
+    inst._whisper_final = MagicMock(return_value=("w", None))
+    audio = (np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    inst._final_text(*audio)                 # fail -> alert 1
+    q.fail = False
+    inst._final_text(*audio)                 # recovered
+    q.fail = True
+    inst._final_text(*audio)                 # fails again -> alert 2 (not silent)
+    assert inst._reporter.report.call_count == 2
