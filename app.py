@@ -110,6 +110,7 @@ import crash_guard
 import error_alert
 import qwen_backend
 import qwen_engine
+import shortcuts
 from qwen_backend import QwenUnavailable
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,27 @@ QWEN_MODEL_OPTIONS = {
 ALL_MODEL_OPTIONS = {**MODEL_OPTIONS, **QWEN_MODEL_OPTIONS}
 ALL_MODEL_KEYS = list(ALL_MODEL_OPTIONS.keys())
 DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 0.6B (Fast, zh+en)"]
+
+
+def _system_modifiers() -> set | None:
+    """Modifiers macOS says are down right now (None if the query fails).
+
+    pynput tracks modifiers from press/release events; a lost release (e.g.
+    secure input fields) would leave a modifier "stuck" and silently block
+    Push to Talk. This lets the next key press resync from the real state.
+    """
+    try:
+        import Quartz
+        flags = Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateCombinedSessionState)
+    except Exception:
+        return None
+    masks = {
+        "ctrl": Quartz.kCGEventFlagMaskControl,
+        "alt": Quartz.kCGEventFlagMaskAlternate,
+        "shift": Quartz.kCGEventFlagMaskShift,
+        "cmd": Quartz.kCGEventFlagMaskCommand,
+    }
+    return {m for m, mask in masks.items() if flags & mask}
 
 
 def initial_engine(cfg: dict, qwen_env_exists: bool) -> str:
@@ -255,6 +277,7 @@ class TranscriberApp(rumps.App):
             "qwen_strip_fillers": getattr(self, "qwen_strip_fillers", True),
             "qwen_tight_spacing": getattr(self, "qwen_tight_spacing", True),
             "meeting_final_pass": getattr(self, "meeting_final_pass", True),
+            "shortcuts": getattr(self, "shortcuts", None) or shortcuts.merged({}),
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f)
@@ -282,6 +305,8 @@ class TranscriberApp(rumps.App):
         self.qwen_tight_spacing = cfg.get("qwen_tight_spacing", True)
         # Re-transcribe meetings with Qwen3 from in-memory audio (never written to disk)
         self.meeting_final_pass = cfg.get("meeting_final_pass", True)
+        # Keyboard shortcuts (v0.7.1): defaults fill anything missing/invalid
+        self.shortcuts = shortcuts.merged(cfg.get("shortcuts"))
 
         # Meeting mode state
         self._meeting_session: MeetingSession | None = None
@@ -370,9 +395,9 @@ class TranscriberApp(rumps.App):
         crash_guard.install_thread_excepthook(self._reporter)
         self._hotkey_stop = threading.Event()
 
-        # Hotkey modifier tracking
-        self._ctrl_pressed  = False
-        self._shift_pressed = False
+        # Hotkey modifier tracking ({"ctrl", "alt", "shift", "cmd"} held now)
+        self._held_mods: set = set()
+        self._ptt_cancelled = False   # PTT key turned out to be part of a combo
         self._key_event_received = False
 
         # Live subtitle overlay state
@@ -868,41 +893,81 @@ class TranscriberApp(rumps.App):
                 )
                 self._hotkey_stop.wait(min(HOTKEY_RESTART_DELAY_S * failures, 30))
 
+    # Combo action -> handler (menu actions touch AppKit: run on main thread)
+    def _combo_handlers(self):
+        return {
+            "meeting": lambda: self._toggle_meeting_mode(None),
+            "cycle_model": lambda: self._cycle_model(),
+            "translate": lambda: self._toggle_translate(None),
+            "live_subtitles": lambda: self._toggle_live_mode(None),
+        }
+
+    def _ptt_spec(self) -> str:
+        return (self.shortcuts.get("push_to_talk") or shortcuts.DEFAULTS["push_to_talk"])[0]
+
     def _on_press(self, key):
         self._key_event_received = True
-        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            self._ctrl_pressed = True
-        elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
-            self._shift_pressed = True
+        mod = shortcuts.modifier_of(key)
+        ptt = self._ptt_spec()
+        is_ptt_key = shortcuts.key_token(key) == ptt
 
-        if self._ctrl_pressed and self._shift_pressed:
-            vk = getattr(key, 'vk', None)
-            # Menu actions touch AppKit → run them on the main thread, the
-            # same path as clicking the menu item.
-            action = {
-                46: lambda: self._cycle_model(),                 # M
-                17: lambda: self._toggle_translate(None),        # T
-                1:  lambda: self._toggle_live_mode(None),        # S
-                15: lambda: self._toggle_meeting_mode(None),     # R
-            }.get(vk)
-            if action:
-                logger.debug("hotkey Ctrl+Shift vk=%s → main thread", vk)
-                self._on_main(self._guarded(action, f"shortcut Ctrl+Shift (vk={vk})"))
-                return
+        if is_ptt_key:
+            real = _system_modifiers()
+            if real is not None and real != self._held_mods - {mod}:
+                # Includes this key's own modifier (just pressed); drop stale ones
+                if self._held_mods - real:
+                    logger.warning("Resynced stuck modifiers %s (lost key release)",
+                                   sorted(self._held_mods - real))
+                self._held_mods = set(real)
+            if not self.recording and shortcuts.ptt_allowed(self._held_mods, ptt):
+                # Block hold-to-record during active meeting
+                if self._meeting_session and self._meeting_session.is_recording:
+                    pass
+                else:
+                    self._ptt_cancelled = False
+                    threading.Thread(target=self._start_recording, daemon=True).start()
+            if mod:
+                self._held_mods.add(mod)
+            return
 
-        if key == keyboard.Key.alt_r and not self.recording:
-            # Block hold-to-record during active meeting
-            if self._meeting_session and self._meeting_session.is_recording:
-                return
-            threading.Thread(target=self._start_recording, daemon=True).start()
+        if mod:
+            self._held_mods.add(mod)
+            return
+
+        spec = shortcuts.event_spec(key, self._held_mods)
+        action = shortcuts.match_action(spec, self.shortcuts)
+        if not action:
+            return
+        if self.recording and shortcuts.combo_uses_ptt_key(spec, ptt):
+            # e.g. ⌃⌥M pressed with Right ⌥ first: that "recording" was not speech
+            logger.info("Shortcut %s uses the Push to Talk key — cancelling recording", spec)
+            self._ptt_cancelled = True
+            threading.Thread(target=self._cancel_recording, daemon=True).start()
+        logger.debug("shortcut %s -> %s (main thread)", spec, action)
+        self._on_main(self._guarded(self._combo_handlers()[action], f"shortcut {shortcuts.display(spec)}"))
 
     def _on_release(self, key):
-        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            self._ctrl_pressed = False
-        elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
-            self._shift_pressed = False
-        elif key == keyboard.Key.alt_r and self.recording:
-            threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+        mod = shortcuts.modifier_of(key)
+        if shortcuts.key_token(key) == self._ptt_spec():
+            if self._ptt_cancelled:
+                self._ptt_cancelled = False
+            elif self.recording:
+                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+        if mod:
+            self._held_mods.discard(mod)
+
+    def _cancel_recording(self):
+        """Stop a Push to Talk recording and discard it (no transcription, no paste)."""
+        if not self.recording:
+            return
+        self.recording = False
+        self._close_mic_stream()
+        if self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
+        self.frames = []   # new list: the Qwen live loop exits on identity change
+        self._set_title(self._idle_icon)
+        self._set_status("Ready")
+        logger.info("Recording cancelled (shortcut used the Push to Talk key)")
 
     # ── Hold-to-Record ────────────────────────────────────────
 

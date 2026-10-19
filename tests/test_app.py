@@ -1009,21 +1009,153 @@ def test_hotkey_listener_restarts_after_it_dies():
     inst._reporter.report.assert_called_once()
 
 
-def test_ctrl_shift_hotkeys_run_on_main_thread():
+def _hotkey_app():
     import app
+    import shortcuts
     inst = _bare_app()
-    inst._ctrl_pressed = True
-    inst._shift_pressed = True
+    inst._held_mods = set()
+    inst.shortcuts = shortcuts.merged({})
     inst._meeting_session = None
+    inst.recording = False
+    inst._ptt_cancelled = False
     inst._toggle_meeting_mode = MagicMock()
-    key = MagicMock()
-    key.vk = 15  # R
+    inst._cycle_model = MagicMock()
+    inst._start_recording = MagicMock()
+    inst._stop_and_transcribe = MagicMock()
+    inst._cancel_recording = MagicMock()
+    return inst
+
+
+def _press(inst, *keys):
+    for k in keys:
+        inst._on_press(k)
+
+
+def _release(inst, *keys):
+    for k in keys:
+        inst._on_release(k)
+
+
+def _run_sync_threads(monkeypatch):
+    import app
+    # Event-logic tests must not depend on the real keyboard of the test machine
+    monkeypatch.setattr(app, "_system_modifiers", lambda: None)
+
+    class SyncThread:
+        def __init__(self, target, args=(), daemon=None, **kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+    monkeypatch.setattr(app.threading, "Thread", SyncThread)
+
+
+def test_combo_hotkeys_run_on_main_thread():
+    import app
+    from pynput.keyboard import Key, KeyCode
+    inst = _hotkey_app()
     with patch.object(app.AppHelper, "callAfter") as call_after:
-        t = threading.Thread(target=inst._on_press, args=(key,))
+        t = threading.Thread(target=_press, args=(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ")))
         t.start()
         t.join()
     inst._toggle_meeting_mode.assert_not_called()  # not on the listener thread
     call_after.assert_called_once()
+
+
+def test_default_meeting_shortcuts_and_old_ctrl_shift_r_is_gone(monkeypatch):
+    import app
+    from pynput.keyboard import Key, KeyCode
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ")); _release(inst, Key.alt, Key.ctrl)
+    _press(inst, Key.ctrl, Key.shift, Key.f8); _release(inst, Key.shift, Key.ctrl)
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(15, char="R")); _release(inst, Key.shift, Key.ctrl)
+    assert inst._toggle_meeting_mode.call_count == 2
+
+
+def test_custom_shortcut_from_config(monkeypatch):
+    import app
+    import shortcuts
+    from pynput.keyboard import Key, KeyCode
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"cycle_model": ["ctrl+cmd+vk46"]})
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(46)); _release(inst, Key.shift, Key.ctrl)
+    inst._cycle_model.assert_not_called()                      # old default no longer bound
+    _press(inst, Key.ctrl, Key.cmd, KeyCode.from_vk(46)); _release(inst, Key.cmd, Key.ctrl)
+    inst._cycle_model.assert_called_once()
+
+
+def test_push_to_talk_custom_key(monkeypatch):
+    import shortcuts
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"push_to_talk": ["f13"]})
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()          # Right ⌥ no longer records
+    _press(inst, Key.f13)
+    inst._start_recording.assert_not_called()          # ⌥ still held: not a plain F13
+    _release(inst, Key.f13, Key.alt_r)
+    _press(inst, Key.f13)
+    inst._start_recording.assert_called_once()
+    inst.recording = True
+    _release(inst, Key.f13)
+    inst._stop_and_transcribe.assert_called_once()
+
+
+def test_ptt_not_started_while_ctrl_held(monkeypatch):
+    """⌃ then Right ⌥ (start of ⌃⌥M) must not start a recording."""
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl, Key.alt_r)
+    inst._start_recording.assert_not_called()
+
+
+def test_combo_with_right_option_cancels_started_recording(monkeypatch):
+    """Right ⌥ pressed first (recording starts), then ⌃+M: cancel, toggle meeting, no paste."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+    inst.recording = True
+    _press(inst, Key.ctrl, KeyCode.from_vk(46, char="µ"))
+    inst._cancel_recording.assert_called_once()
+    inst._toggle_meeting_mode.assert_called_once()
+    _release(inst, Key.ctrl, Key.alt_r)
+    inst._stop_and_transcribe.assert_not_called()             # nothing transcribed/pasted
+
+
+def test_ptt_ignored_during_meeting(monkeypatch):
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._meeting_session = MagicMock(is_recording=True)
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()
+
+
+def test_modifier_state_is_tracked_left_and_right():
+    from pynput.keyboard import Key
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl_r, Key.shift)
+    assert inst._held_mods == {"ctrl", "shift"}
+    _release(inst, Key.ctrl_r)
+    assert inst._held_mods == {"shift"}
+
+
+def test_shortcuts_saved_to_config(tmp_config):
+    import shortcuts
+    inst = _engine_app()
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+cmd+vk46"]})
+    inst._save_config()
+    cfg = json.loads(tmp_config.read_text())
+    assert cfg["shortcuts"]["meeting"] == ["ctrl+cmd+vk46"]
+    assert cfg["shortcuts"]["push_to_talk"] == ["alt_r"]
 
 
 def test_fast_release_closes_late_stream():
@@ -1453,3 +1585,63 @@ def test_alert_rearms_after_qwen_recovers():
     q.fail = True
     inst._final_text(*audio)                 # fails again -> alert 2 (not silent)
     assert inst._reporter.report.call_count == 2
+
+
+def test_stale_modifier_from_lost_release_does_not_block_ptt(monkeypatch):
+    """Lost Ctrl release (e.g. secure input) must not disable Push to Talk forever."""
+    import app
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._held_mods = {"ctrl"}                                  # stale: Ctrl is really up
+    monkeypatch.setattr(app, "_system_modifiers", lambda: {"alt"})   # only Right ⌥ down now
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+    assert inst._held_mods == {"alt"}
+
+
+def test_real_ctrl_still_blocks_ptt(monkeypatch):
+    import app
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._held_mods = {"ctrl"}
+    monkeypatch.setattr(app, "_system_modifiers", lambda: {"ctrl", "alt"})
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()
+
+
+def test_system_modifier_query_failure_keeps_tracked_state(monkeypatch):
+    import app
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    monkeypatch.setattr(app, "_system_modifiers", lambda: None)   # API unavailable
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+
+
+def test_system_modifiers_reads_quartz():
+    import app
+    mods = app._system_modifiers()
+    assert mods is None or mods <= {"ctrl", "alt", "shift", "cmd"}
+
+
+def test_cancel_recording_discards_audio_without_transcribing(monkeypatch):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _bare_app()
+    inst.recording = True
+    old_frames = [np.zeros((1600, 1), dtype=np.int16)]
+    inst.frames = old_frames
+    inst._overlay_panel = MagicMock()
+    inst._destroy_overlay = MagicMock()
+    inst._close_mic_stream = MagicMock()
+    inst._idle_icon = "🎙"
+    inst.transcribe_queue = MagicMock()
+    inst._cancel_recording()
+    assert inst.recording is False
+    assert inst.frames == [] and inst.frames is not old_frames      # live loop sees a new list
+    inst._close_mic_stream.assert_called_once()
+    inst._destroy_overlay.assert_called_once()
+    inst.transcribe_queue.put.assert_not_called()
