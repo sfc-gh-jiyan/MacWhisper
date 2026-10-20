@@ -58,72 +58,9 @@ echo "[2/5] Installing dependencies (this may take a few minutes)..."
 
 echo "[3/5] Creating ${APP_NAME}.app bundle..."
 
-mkdir -p "${APP_PATH}/Contents/MacOS"
-mkdir -p "${APP_PATH}/Contents/Resources"
-
-# App icon
-cp "${SCRIPT_DIR}/AppIcon.icns" "${APP_PATH}/Contents/Resources/AppIcon.icns"
-
-# Launcher script — Python directly (no bash intermediary)
-cat > "${APP_PATH}/Contents/MacOS/${APP_NAME}" << LAUNCHER
-#!${SCRIPT_DIR}/venv/bin/python3
-import os, sys, platform
-if platform.machine() != "arm64":
-    import subprocess
-    r = subprocess.run(["/usr/bin/arch", "-arm64", sys.executable] + sys.argv)
-    sys.exit(r.returncode)
-_dir = "${SCRIPT_DIR}"
-os.chdir(_dir)
-_log_dir = os.path.expanduser("~/.macwhisper/logs")
-os.makedirs(_log_dir, exist_ok=True)
-_fd = os.open(os.path.join(_log_dir, "macwhisper.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
-os.dup2(_fd, 1)
-os.dup2(_fd, 2)
-os.close(_fd)
-import certifi
-os.environ["SSL_CERT_FILE"] = certifi.where()
-sys.path.insert(0, _dir)
-import runpy
-runpy.run_path(os.path.join(_dir, "app.py"), run_name="__main__")
-LAUNCHER
-chmod +x "${APP_PATH}/Contents/MacOS/${APP_NAME}"
-
-# Info.plist — version from VERSION file
-cat > "${APP_PATH}/Contents/Info.plist" << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key>
-  <string>MacWhisper</string>
-  <key>CFBundleDisplayName</key>
-  <string>MacWhisper</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.macwhisper.app</string>
-  <key>CFBundleVersion</key>
-  <string>${VERSION}</string>
-  <key>CFBundleShortVersionString</key>
-  <string>${VERSION}</string>
-  <key>CFBundleExecutable</key>
-  <string>MacWhisper</string>
-  <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>NSMicrophoneUsageDescription</key>
-  <string>MacWhisper needs microphone access for voice transcription.</string>
-  <key>NSAccessibilityUsageDescription</key>
-  <string>MacWhisper needs Accessibility access to paste transcribed text and detect the Right Option hotkey.</string>
-  <key>LSArchitecturePriority</key>
-  <array>
-    <string>arm64</string>
-  </array>
-  <key>LSUIElement</key>
-  <true/>
-</dict>
-</plist>
-PLIST
+# Native launcher (embeds CPython): permissions belong to MacWhisper.app,
+# not to Python or Terminal. See scripts/build_app.sh.
+"$SCRIPT_DIR/scripts/build_app.sh"
 
 # ── Step 3: Create data directory ─────────────────────────
 
@@ -165,18 +102,15 @@ echo "  To launch:"
 echo "    Option A: Open ${APP_NAME} from /Applications"
 echo "    Option B: Run './run.sh' from this directory"
 echo ""
-echo "  First time setup (System Settings → Privacy & Security):"
-echo "    Grant these 3 permissions to MacWhisper (or your Terminal app if using ./run.sh):"
+echo "  First launch: double-click MacWhisper in /Applications, then grant"
+echo "  (System Settings → Privacy & Security) to MacWhisper:"
 echo ""
-echo "    1. Microphone           — for recording audio"
-echo "    2. Accessibility        — for auto-paste (Cmd+V simulation)"
-echo "    3. Input Monitoring     — for global hotkey (Right Option key)"
+echo "    1. Microphone           — for recording audio (asked on first use)"
+echo "    2. Accessibility        — for auto-paste"
+echo "    3. Input Monitoring     — for the global hotkeys"
 echo ""
-echo "    ⚠  If you launch via Terminal/iTerm, add BOTH the terminal app AND MacWhisper."
+echo "    ./run.sh runs from Terminal instead; then Terminal needs these permissions."
 echo ""
-echo "  Usage:"
-echo "    Hold Right Option key to record, release to transcribe"
-echo "    Ctrl+Shift+M  — switch model (Small/Medium/Large)"
-echo "    Ctrl+Shift+T  — toggle translate mode"
-echo "    Ctrl+Shift+S  — toggle live subtitles"
+echo "  Usage: hold Right ⌥ to talk; ⌃⌥M or ⌃⇧F8 start/stop a meeting."
+echo "  All options and shortcuts: menu bar → Settings… (⌘,)"
 echo ""

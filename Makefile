@@ -1,4 +1,4 @@
-.PHONY: smoke qa test test-full eval-meeting qwen-setup
+.PHONY: smoke qa test test-full eval-meeting qwen-setup app
 
 # Use venv python if available, else system python
 PYTHON := $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python)
@@ -17,6 +17,10 @@ smoke:
 qa:
 	$(PYTHON) tests/test_replay.py --named-only --min-duration 10 --max-duration 70 --spread 3 \
 	  --diagnose --report-dir $(REPORT_DIR) --no-offline
+
+# ── /Applications/MacWhisper.app (native launcher; double-click to start) ──
+app:
+	./scripts/build_app.sh
 
 # ── Qwen3-ASR sidecar env (isolated from the app venv) ──
 qwen-setup:
