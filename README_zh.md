@@ -50,9 +50,11 @@ cd MacWhisper
 
 安装脚本会自动完成：
 1. 创建 Python 虚拟环境并安装依赖
-2. 在 `/Applications` 中创建 `MacWhisper.app`
+2. 在 `/Applications` 中创建 `MacWhisper.app`（原生启动器，运行的是本文件夹里的代码）
 3. 预下载默认 Whisper 模型（约 1.5 GB）
 4. 验证所有依赖是否正常
+
+App 每次启动都运行本文件夹里当前的代码，所以 `git pull` 之后重新打开 App 即可。只有移动了文件夹或重建了 `venv`，才需要用 `make app` 重新生成。生成 App 需要命令行工具（`xcode-select --install`）。
 
 ### 必需权限（重要！）
 
@@ -79,18 +81,22 @@ MacWhisper 需要 **三项** macOS 权限才能正常运行。**不授权这些�
 
 > **从终端启动？** 如果你使用 `macwhisper-mlx` 命令或 `./run.sh` 而不是 .app，还需要将你的**终端应用**（Terminal、iTerm、Warp 等）也添加到以上**三项**权限中。
 
-> **权限不生效？** 授权后可能需要退出并重新启动 MacWhisper。某些情况下，输入监控权限需要重启系统才能激活。
+> **权限不生效？** 先授权，再启动 MacWhisper：权限是在 App 启动时读取的，所以授权后要退出并重新打开。在 `~/.macwhisper/logs/macwhisper.log` 里查 `Permissions (...): accessibility=True input_monitoring=True`。如果开关看着是开的，日志里却是 `False`，先退出 MacWhisper，运行 `make reset-permissions`，再把两项重新授权一次。
+>
+> **会议结束没有弹出"Meeting saved"？** 通知其实已经进了通知中心。想弹横幅，打开"系统设置 → 通知 → MacWhisper"，样式选 **横幅** 或 **提示**。如果你开着专注模式，把 MacWhisper 加进允许的 App 里。
 
 ## 使用
 
-**方式 A** — 从"应用程序"文件夹打开 `MacWhisper`（Launchpad 或 Spotlight 搜索）
+**方式 A** — 在"应用程序"里双击 `MacWhisper`（或从 Launchpad / Spotlight 打开）。想开机自动启动，打开 **Settings… → General → Launch MacWhisper at login**。
 
-**方式 B** — 从终端启动：
+**方式 B** — 从终端启动（开发用；这时权限要授给终端）：
 ```bash
 ./run.sh
 ```
 
 菜单栏出现麦克风图标（🎙），即可使用。
+
+同一时间只会运行一个 MacWhisper。已经在运行时再打开，只会弹出一条通知。想在 App 和 `./run.sh` 之间切换，先退出正在运行的那个（菜单栏 → Quit）；`./run.sh` 会自动停掉正在运行的那个。
 
 ### 操作方式
 

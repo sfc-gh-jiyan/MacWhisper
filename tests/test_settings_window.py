@@ -364,3 +364,77 @@ def test_recording_stops_when_window_loses_focus(real_window):
     assert app._shortcuts_paused is True
     win._controller.windowDidResignKey_(None)
     assert app._shortcuts_paused is False and win._recording is None
+
+
+# ── Launch at login (v0.7.2) ──────────────────────────────────
+
+class FakeLogin:
+    def __init__(self, state=0, fail=""):
+        import login_item
+        self.st = state
+        self.fail = fail
+        self.calls = []
+        self.L = login_item
+
+    def state(self):
+        return self.st
+
+    def available(self):
+        return self.st != self.L.UNAVAILABLE
+
+    def enabled(self):
+        return self.st in (self.L.ON, self.L.NEEDS_APPROVAL)
+
+    def hint(self):
+        return {2: "Approve in Login Items", 3: "Available from /Applications"}.get(self.st, "")
+
+    def set_enabled(self, on):
+        self.calls.append(on)
+        if self.fail:
+            return False, self.fail
+        self.st = self.L.ON if on else self.L.OFF
+        return True, ""
+
+
+def test_model_login_item_reads_system_state():
+    app = FakeApp()
+    app.login_item = FakeLogin(state=1)
+    m = sw.SettingsModel(app)
+    assert m.login_enabled() is True and m.login_available() is True
+
+
+def test_model_login_item_toggle_and_error():
+    app = FakeApp()
+    app.login_item = FakeLogin(state=0)
+    m = sw.SettingsModel(app)
+    assert m.set_login(True) == ""
+    assert app.login_item.calls == [True]
+    app.login_item = FakeLogin(state=0, fail="Operation not permitted")
+    assert "Operation not permitted" in sw.SettingsModel(app).set_login(True)
+
+
+def test_real_window_login_checkbox(real_window):
+    app, win = real_window
+    app.login_item = FakeLogin(state=0)
+    win.refresh()
+    box = win._login_box
+    assert box.isEnabled() and box.state() == 0
+    box.performClick_(None)
+    assert app.login_item.calls == [True] and box.state() == 1
+
+
+def test_real_window_login_checkbox_disabled_from_run_sh(real_window):
+    app, win = real_window
+    app.login_item = FakeLogin(state=3)
+    win.refresh()
+    assert not win._login_box.isEnabled()
+    assert "/Applications" in win._login_hint.stringValue()
+
+
+def test_real_window_login_error_shown_and_box_reverts(real_window):
+    app, win = real_window
+    app.login_item = FakeLogin(state=0, fail="Operation not permitted")
+    win.refresh()
+    win._login_box.performClick_(None)
+    assert win._login_box.state() == 0                    # reflects the real (unchanged) state
+    assert "Operation not permitted" in win._error.stringValue()

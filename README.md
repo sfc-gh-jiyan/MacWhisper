@@ -51,9 +51,11 @@ cd MacWhisper
 
 The install script will:
 1. Create a Python virtual environment and install dependencies
-2. Build a `MacWhisper.app` in `/Applications`
+2. Build a `MacWhisper.app` in `/Applications` with a native launcher that runs this folder's code
 3. Pre-download the default Whisper model (~1.5 GB)
 4. Verify all dependencies are working
+
+The app always runs the current code in this folder, so after `git pull` just relaunch it. Rebuild it with `make app` only if you move the folder or recreate `venv`. Building needs the Command Line Tools (`xcode-select --install`).
 
 #### Optional: Qwen3-ASR engine
 
@@ -89,18 +91,22 @@ Go to **System Settings → Privacy & Security**:
 
 > **Running from Terminal?** If you use `macwhisper-mlx` or `./run.sh` instead of the .app, you must also add your **terminal app** (Terminal, iTerm, Warp, etc.) to **all three** permission categories above.
 
-> **Permissions not taking effect?** After granting permissions, you may need to quit and relaunch MacWhisper. In some cases, a system restart is needed for Input Monitoring to activate.
+> **Permissions not taking effect?** Grant first, then start MacWhisper. Permissions are read when the app starts, so quit and relaunch it after granting. Check `~/.macwhisper/logs/macwhisper.log` for `Permissions (...): accessibility=True input_monitoring=True`. If a switch looks on but the log says `False`, quit MacWhisper, run `make reset-permissions`, and grant both again.
+>
+> **No "Meeting saved" banner?** The notification goes to Notification Center. To see a banner, open System Settings → Notifications → MacWhisper and choose **Banners** or **Alerts**. If you use a Focus mode, add MacWhisper to its allowed apps.
 
 ## Usage
 
-**Option A** — Open `MacWhisper` from your Applications folder (Launchpad or Spotlight)
+**Option A** — Double-click `MacWhisper` in Applications (or open it from Launchpad / Spotlight). To start it automatically, turn on **Settings… → General → Launch MacWhisper at login**.
 
-**Option B** — Run from terminal:
+**Option B** — Run from terminal (for development; Terminal then needs the permissions):
 ```bash
 ./run.sh
 ```
 
 A microphone icon (🎙) appears in your menu bar. That's it — you're ready.
+
+Only one MacWhisper runs at a time. Opening it again while it is running just shows a notification. Quit the running one first (menu bar → Quit) if you want to switch between the app and `./run.sh`; `./run.sh` stops a running one for you.
 
 ### Controls
 

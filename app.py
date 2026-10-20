@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.7.1
+MacWhisper - macOS Menu Bar App  v0.7.2
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,9 +9,10 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 import json
+import io
 import logging
 import threading
 import os
@@ -112,6 +113,8 @@ import qwen_backend
 import qwen_engine
 import settings_window
 import shortcuts
+import signal
+import single_instance
 from qwen_backend import QwenUnavailable
 
 logger = logging.getLogger(__name__)
@@ -127,6 +130,80 @@ OVERLAY_FRAME_PATH = os.path.join(_DATA_DIR, "overlay.json")
 LOG_DIR = os.path.join(_DATA_DIR, "logs")
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
+INSTANCE_LOCK_PATH = os.path.join(_DATA_DIR, ".instance.lock")
+_INSTANCE_LOCK = None  # held for the whole process (GC would release the lock)
+
+
+def _stream_is_file(stream, path: str) -> bool:
+    """True if `stream` writes to the file at `path` (same device + inode)."""
+    try:
+        a = os.fstat(stream.fileno())
+        b = os.stat(path)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _input_monitoring_granted():
+    """True/False from macOS (CGPreflightListenEventAccess); None if unknown."""
+    try:
+        import Quartz
+        return bool(Quartz.CGPreflightListenEventAccess())
+    except Exception:
+        return None
+
+
+def _permission_status() -> dict:
+    """Ask macOS directly — the hotkeys need both, for THIS app identity."""
+    return {"accessibility": bool(AXIsProcessTrusted()),
+            "input_monitoring": _input_monitoring_granted()}
+
+
+def _install_sigterm_quit() -> None:
+    """Quit normally on SIGTERM (logout/shutdown, ./run.sh restart).
+
+    Python's default SIGTERM ends the process without atexit/before_quit, so
+    the run marker stayed and the next launch said "crashed last time", and
+    the Qwen3 sidecar was not closed. The handler only queues a normal quit
+    on the main run loop (never touches AppKit itself); Python runs it the
+    next time the main thread executes Python code (the 2 s status timer).
+    """
+    state = {"queued": False}
+
+    def _on_sigterm(signum, _frame):
+        if state["queued"]:
+            return
+        state["queued"] = True
+        logging.getLogger(__name__).warning("SIGTERM received — quitting normally")
+        AppHelper.callAfter(rumps.quit_application)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+def _notify_already_running() -> None:
+    """Tell the user why a second launch did nothing (no rumps app yet)."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["osascript", "-e", 'display notification "MacWhisper is already running '
+             '— look for it in the menu bar." with title "MacWhisper"'],
+            timeout=5, check=False,
+        )
+    except Exception:
+        pass
+
+
+def _claim_single_instance() -> bool:
+    """True if this process is the only MacWhisper; otherwise notify and return False."""
+    global _INSTANCE_LOCK
+    _INSTANCE_LOCK = single_instance.acquire(INSTANCE_LOCK_PATH)
+    if _INSTANCE_LOCK is not None:
+        return True
+    logging.getLogger(__name__).warning(
+        "MacWhisper is already running (pid %s) — exiting this launch",
+        single_instance.holder_pid(INSTANCE_LOCK_PATH))
+    _notify_already_running()
+    return False
 HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
 # A combo pressed again without a release within this window is macOS key
 # auto-repeat (holding the keys), not a new press.
@@ -559,6 +636,9 @@ class TranscriberApp(rumps.App):
     _PREFS = ("meeting_final_pass", "qwen_strip_fillers", "qwen_tight_spacing")
 
     def _open_settings(self, _):
+        if getattr(self, "login_item", None) is None:
+            import login_item  # loads ServiceManagement only when Settings is opened
+            self.login_item = login_item.LoginItem.for_this_app()
         if self._settings is None:
             self._settings = settings_window.SettingsWindow(self, ALL_MODEL_KEYS)
         self._settings.show()
@@ -933,13 +1013,25 @@ class TranscriberApp(rumps.App):
             pass
 
     def _check_permissions(self):
-        if not AXIsProcessTrusted():
+        status = _permission_status()
+        logger.warning("Permissions (pid %d, %s): accessibility=%s input_monitoring=%s",
+                       os.getpid(), sys.executable, status["accessibility"],
+                       status["input_monitoring"])
+        if not status["accessibility"]:
             print("[WARN] Accessibility permission NOT granted — auto-paste will fail")
             print("       → System Settings → Privacy & Security → Accessibility")
             self._notify(
                 "MacWhisper — Permission Needed",
                 "Accessibility access is required",
                 "System Settings → Privacy & Security → Accessibility",
+            )
+        if status["input_monitoring"] is False:
+            logger.warning("Input Monitoring NOT granted — hotkeys (Right ⌥) will not work. "
+                           "System Settings → Privacy & Security → Input Monitoring, then restart")
+            self._notify(
+                "MacWhisper — Permission Needed",
+                "Input Monitoring is required for the hotkeys",
+                "System Settings → Privacy & Security → Input Monitoring, then restart MacWhisper",
             )
 
         time.sleep(8)
@@ -1661,17 +1753,26 @@ if __name__ == "__main__":
     # Configure logging — configurable level to file, WARNING to console
     _log_file = os.path.join(LOG_DIR, "macwhisper.log")
     os.makedirs(LOG_DIR, exist_ok=True)
+    _handlers = [logging.FileHandler(_log_file, encoding="utf-8")]
+    # WARNING+ also to the console (./run.sh). Not when stderr IS the log
+    # (double-clicked app: the launcher redirects it there) — every line
+    # would be written twice.
+    if not _stream_is_file(sys.stderr, _log_file):
+        _console = logging.StreamHandler()
+        _console.setLevel(logging.WARNING)
+        _handlers.append(_console)
     logging.basicConfig(
         level=_file_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.FileHandler(_log_file, encoding="utf-8"),
-            logging.StreamHandler(),  # WARNING+ to console (default)
-        ],
+        handlers=_handlers,
     )
-    # Console handler only shows WARNING+
-    logging.getLogger().handlers[-1].setLevel(logging.WARNING)
+
+    # One MacWhisper only (double-click + ./run.sh would fight over hotkeys
+    # and the mic). Before the run marker, so a refused launch leaves the
+    # running app's crash marker alone.
+    if not _claim_single_instance():
+        sys.exit(0)
 
     # ── Crash evidence: hard crashes (SIGABRT/SIGSEGV) bypass Python's
     #    exception handling entirely. faulthandler writes them to crash.log,
@@ -1688,6 +1789,7 @@ if __name__ == "__main__":
     _marker.create()
     atexit.register(_marker.clear)
     rumps.events.before_quit.register(_marker.clear)  # Quit menu → NSApp.terminate_
+    _install_sigterm_quit()   # logout/shutdown: same clean path as Quit
 
     _check_audio_device()
     try:

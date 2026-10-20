@@ -4,6 +4,32 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.2] — 2026-10-20
+
+### Added
+- **Double-click MacWhisper in /Applications.** `./install.sh` (or `make app`) now builds `/Applications/MacWhisper.app` with a native launcher that embeds Python and runs this repo's code.
+  - Privacy permissions (Microphone, Accessibility, Input Monitoring) now belong to **MacWhisper** itself. Before, they went to Python or, with `./run.sh`, to Terminal.
+  - The app always runs the current repo code; rebuild only after moving the repo or recreating `venv`.
+  - It sets the same memory setting as `./run.sh` (`MallocNanoZone=0`) and logs to `~/.macwhisper/logs/macwhisper.log`.
+- **Launch at login**: Settings → General. The switch shows the real state from macOS, including "approve in Login Items". It is unavailable (grayed out) when started with `./run.sh`.
+- **One instance only**: opening MacWhisper while it is already running shows a notification instead of starting a second copy that would fight over the hotkeys and the microphone.
+
+### Changed
+- The previous `/Applications/MacWhisper.app` was a Python script. Homebrew installs still pointed it at their own old copy. It is replaced by the native app.
+- **After updating, grant the permissions to MacWhisper once** (System Settings → Privacy & Security → Accessibility and Input Monitoring). The new app is a different program to macOS.
+
+### Fixed
+- **"MacWhisper crashed last time" after logout, shutdown or a `./run.sh` restart.** macOS (and `./run.sh`) stop the app with SIGTERM, which ended it without the normal quit steps. The next launch then showed a false crash alert, and the Qwen3 helper was not closed. SIGTERM now quits the same way as menu → Quit.
+- Every warning in `macwhisper.log` was written twice when the app was started from /Applications.
+- **No menu bar icon in the double-clicked app.** The launcher re-ran itself to set `MallocNanoZone=0`, so macOS lost track of the app it had started (`process has mismatched pid version`). The variable now comes from `LSEnvironment` in Info.plist, and the build fails if the launcher can re-exec.
+- **Hotkeys dead after a rebuild although permissions looked granted.** The ad-hoc signature identified the app by its file hash, so each rebuild was a new program to macOS. The app is now identified by its bundle id (`com.macwhisper.app`), so permissions survive rebuilds.
+- `./run.sh` could leave you with no running app: it started the new one 0.5 s after stopping the old one, and the single-instance lock refused it. It now waits up to 10 s, then force-stops the old one.
+
+### Added (diagnostics)
+- At startup the log shows what macOS reports: `Permissions (...): accessibility=… input_monitoring=…`. A notification appears when Input Monitoring is missing.
+- `make reset-permissions` clears only MacWhisper's privacy permission records, for a clean re-grant. It refuses to run while MacWhisper is running.
+- `./scripts/build_app.sh --probe` builds a separate "MacWhisper Key Probe" app (same launcher, logs permission state and key names only) to diagnose keyboard access without touching MacWhisper.
+
 ## [0.7.1] — 2026-10-19
 
 ### Added

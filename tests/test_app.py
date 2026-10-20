@@ -2060,3 +2060,161 @@ def test_start_meeting_refuses_when_one_is_running():
     inst._start_meeting()
     assert inst._meeting_session is running          # untouched, no second session
     inst._backend_ready.wait.assert_not_called()
+
+
+# ── Single instance (v0.7.2) ──────────────────────────────────
+
+def test_claim_single_instance_first_wins(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "INSTANCE_LOCK_PATH", str(tmp_path / ".instance.lock"))
+    monkeypatch.setattr(app, "_INSTANCE_LOCK", None)
+    notified = []
+    monkeypatch.setattr(app, "_notify_already_running", lambda: notified.append(1))
+    assert app._claim_single_instance() is True
+    assert app._INSTANCE_LOCK is not None          # kept alive for the whole process
+    assert notified == []
+
+
+def test_claim_single_instance_second_is_refused_and_told(tmp_path, monkeypatch):
+    import app
+    import single_instance
+    path = str(tmp_path / ".instance.lock")
+    other = single_instance.acquire(path)          # stands in for the running app
+    try:
+        monkeypatch.setattr(app, "INSTANCE_LOCK_PATH", path)
+        monkeypatch.setattr(app, "_INSTANCE_LOCK", None)
+        notified = []
+        monkeypatch.setattr(app, "_notify_already_running", lambda: notified.append(1))
+        assert app._claim_single_instance() is False
+        assert notified == [1]
+    finally:
+        single_instance.release(other)
+
+
+def test_single_instance_check_runs_before_run_marker():
+    """A refused 2nd launch must not touch the running app's crash marker."""
+    import app
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert main.index("_claim_single_instance()") < main.index("RunMarker(")
+
+
+def test_open_settings_creates_login_item_lazily(monkeypatch):
+    import app
+    import login_item
+    inst = _menu_app()
+    inst._settings = None
+    made = []
+    monkeypatch.setattr(login_item.LoginItem, "for_this_app",
+                        classmethod(lambda cls: made.append(1) or cls(None)))
+    monkeypatch.setattr(app.settings_window, "SettingsWindow",
+                        lambda a, labels: MagicMock())
+    assert getattr(inst, "login_item", None) is None
+    inst._open_settings(None)
+    inst._open_settings(None)
+    assert made == [1] and inst.login_item is not None
+
+
+# ── Log duplication when stderr IS the log file (double-clicked app) ──
+
+def test_stderr_is_log_file_detects_same_file(tmp_path):
+    import app
+    log = tmp_path / "macwhisper.log"
+    log.write_text("")
+    with open(log, "a") as same, open(tmp_path / "other.log", "a") as other:
+        assert app._stream_is_file(same, str(log)) is True
+        assert app._stream_is_file(other, str(log)) is False
+
+
+def test_stderr_is_log_file_handles_missing_and_odd_streams(tmp_path):
+    import io
+    import app
+    assert app._stream_is_file(io.StringIO(), str(tmp_path / "x.log")) is False
+    with open(tmp_path / "a.log", "a") as f:
+        assert app._stream_is_file(f, str(tmp_path / "missing.log")) is False
+
+
+def test_main_skips_console_handler_when_stderr_is_the_log():
+    """The launcher redirects stderr into macwhisper.log; a console handler
+    would then write every WARNING+ line twice."""
+    import app
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert "_stream_is_file(sys.stderr, _log_file)" in main
+
+
+# ── SIGTERM (logout/shutdown, ./run.sh restart) quits cleanly ──
+
+def test_sigterm_handler_schedules_normal_quit(monkeypatch):
+    """Regression: SIGTERM killed the app without atexit/before_quit, so the
+    run marker stayed and every next launch said "crashed last time"."""
+    import signal
+    import app
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
+    quits = []
+    monkeypatch.setattr(app.rumps, "quit_application", lambda *a: quits.append(1))
+    installed = {}
+    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
+    app._install_sigterm_quit()
+    handler = installed[signal.SIGTERM]
+    handler(signal.SIGTERM, None)
+    assert quits == []                       # never touches AppKit inside the handler
+    fn, args = queued[0]
+    fn(*args)
+    assert quits == [1]
+
+
+def test_sigterm_handler_quits_only_once(monkeypatch):
+    import signal
+    import app
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
+    installed = {}
+    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
+    app._install_sigterm_quit()
+    installed[signal.SIGTERM](signal.SIGTERM, None)
+    installed[signal.SIGTERM](signal.SIGTERM, None)
+    assert len(queued) == 1
+
+
+def test_main_installs_sigterm_quit():
+    import app
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert "_install_sigterm_quit()" in main
+
+
+# ── Permission diagnostics (v0.7.2): ask macOS, don't guess ──
+
+def test_permission_status_reports_both(monkeypatch):
+    import app
+    monkeypatch.setattr(app, "AXIsProcessTrusted", lambda: True)
+    monkeypatch.setattr(app, "_input_monitoring_granted", lambda: False)
+    assert app._permission_status() == {"accessibility": True, "input_monitoring": False}
+
+
+def test_input_monitoring_unknown_when_api_missing(monkeypatch):
+    import app
+    import Quartz
+    def boom():
+        raise AttributeError("not available on this macOS / PyObjC")
+    monkeypatch.setattr(Quartz, "CGPreflightListenEventAccess", boom)
+    assert app._input_monitoring_granted() is None
+
+
+def test_check_permissions_logs_status_and_warns_input_monitoring(monkeypatch, caplog):
+    import logging
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._key_event_received = True
+    inst._notify = MagicMock()
+    monkeypatch.setattr(app, "_permission_status",
+                        lambda: {"accessibility": True, "input_monitoring": False})
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    with caplog.at_level(logging.WARNING):
+        inst._check_permissions()
+    text = caplog.text
+    assert "accessibility=True" in text and "input_monitoring=False" in text
+    assert "Input Monitoring" in text
+    inst._notify.assert_called()
