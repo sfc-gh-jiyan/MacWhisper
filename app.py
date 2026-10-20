@@ -892,6 +892,7 @@ class TranscriberApp(rumps.App):
             on_update=self._meeting_overlay_update,
             capture_system_audio=True,
             save_audio=self.save_meeting_audio,
+            **self._meeting_live_engine(),
         )
 
         # Show overlay (unless the user turned Meeting Subtitles off)
@@ -903,6 +904,32 @@ class TranscriberApp(rumps.App):
         self.item_meeting.title = "✅ Meeting Mode: Recording"
         self._set_status("Meeting recording...")
         print("[INFO] Meeting Mode started")
+
+    def _meeting_live_engine(self) -> dict:
+        """MeetingSession kwargs for live subtitles (v0.7.3).
+
+        Qwen3 when it is the selected engine and its sidecar is ready now:
+        one segment at a time, closed after 0.8 s of silence (Whisper keeps
+        2 s). If Qwen3 fails mid-meeting, Whisper takes over the rest of the
+        meeting and the usual one-time alert is shown. Otherwise: Whisper,
+        unchanged.
+        """
+        if not self._qwen_live_ok():
+            logger.info("Meeting live subtitles: Whisper")
+            return {}
+        import qwen_meeting
+        qwen = self._qwen
+        strip = getattr(self, "qwen_strip_fillers", True)
+        tight = getattr(self, "qwen_tight_spacing", True)
+        logger.info("Meeting live subtitles: Qwen3 (segments, Whisper fallback)")
+        return {
+            "processor_factory": lambda: qwen_meeting.QwenSegmentProcessor(
+                qwen.backend, strip_fillers=strip, tight=tight),
+            "fallback_factory": None,     # MeetingSession builds its Whisper processor
+            "on_engine_failed": lambda exc: self._qwen_failed(
+                f"live meeting subtitles: {exc}", exc),
+            "extended_silence_ms": 800,
+        }
 
     def _stop_meeting(self):
         """Stop the current meeting session."""

@@ -65,8 +65,18 @@ class MeetingSession:
         on_update: callable | None = None,
         capture_system_audio: bool = False,
         save_audio: bool = False,
+        processor_factory=None,
+        fallback_factory=None,
+        on_engine_failed=None,
     ):
+        """processor_factory() builds the live processor (default: Whisper
+        OnlineASRProcessor). If it raises QwenUnavailable, fallback_factory()
+        replaces it for the rest of the meeting and on_engine_failed(exc) is
+        called once (v0.7.3: Qwen3 live subtitles with Whisper fallback)."""
         self.backend = backend
+        self._processor_factory = processor_factory
+        self._fallback_factory = fallback_factory
+        self._on_engine_failed = on_engine_failed
         # Raw audio is only written to disk when explicitly enabled —
         # recording other participants requires their consent.
         self.save_audio = save_audio
@@ -153,14 +163,9 @@ class MeetingSession:
         self._sys_frames = []
         self._segment_start_time = time.time()  # wall-clock start of current segment
 
-        # Create processor
-        self._processor = OnlineASRProcessor(
-            backend=self.backend,
-            vad=None,  # VAD is managed here, not inside processor
-            min_chunk_size=self.min_chunk_size,
-            max_buffer_s=self.max_buffer_s,
-            language=self.language,
-        )
+        # Create processor (Whisper by default; Qwen3 via processor_factory)
+        self._processor = (self._processor_factory() if self._processor_factory
+                           else self._whisper_processor())
 
         # Reset VAD
         if self.vad:
@@ -207,6 +212,53 @@ class MeetingSession:
 
         self._start_sources()
         print("[MEETING] Resumed")
+
+    def _whisper_processor(self) -> OnlineASRProcessor:
+        return OnlineASRProcessor(
+            backend=self.backend,
+            vad=None,  # VAD is managed here, not inside processor
+            min_chunk_size=self.min_chunk_size,
+            max_buffer_s=self.max_buffer_s,
+            language=self.language,
+        )
+
+    def _switch_to_fallback(self, exc: Exception) -> None:
+        """Qwen3 failed mid-meeting: Whisper takes over; saved segments stay.
+
+        The audio of the current (unfinished) segment is handed over, so the
+        last few seconds are transcribed by Whisper instead of being lost.
+        """
+        from qwen_backend import QwenUnavailable  # noqa: F401 (documents the type)
+        old = self._processor
+        pending = getattr(old, "audio_buffer", None)
+        self._processor = (self._fallback_factory() if self._fallback_factory
+                           else self._whisper_processor())
+        if pending is not None and len(pending):
+            self._processor.insert_audio_chunk(pending)
+        logger.warning("Live meeting engine failed (%s) — continuing with Whisper", exc)
+        self._fallback_used = True
+        if self._on_engine_failed:
+            try:
+                self._on_engine_failed(exc)
+            except Exception:
+                logger.exception("on_engine_failed callback failed")
+
+    def _guarded(self, fn):
+        """Run a processor call; on QwenUnavailable switch to Whisper once."""
+        from qwen_backend import QwenUnavailable
+        try:
+            return fn()
+        except QwenUnavailable as e:
+            if getattr(self, "_fallback_used", False):
+                raise
+            self._switch_to_fallback(e)
+            return None
+
+    def _may_close_on_silence(self, silence_ms: int) -> bool:
+        """Let the live processor veto a silence close (Qwen3: a tiny
+        fragment waits for a longer pause). Whisper has no veto."""
+        ready = getattr(self._processor, "ready_to_close", None)
+        return True if ready is None else bool(ready(silence_ms))
 
     def _segment_has_text(self) -> bool:
         """True if the current segment has confirmed OR unconfirmed words.
@@ -411,11 +463,18 @@ class MeetingSession:
                 if seg_elapsed > MAX_SEGMENT_DURATION_S and self._segment_has_text():
                     self._close_and_trim_segment()
                     continue
+                # Qwen3: bound each segment's audio (every decode re-reads it all)
+                seg_full = getattr(self._processor, "segment_full", None)
+                if seg_full is not None and seg_full():
+                    self._close_and_trim_segment()
+                    continue
 
                 # Extended silence -> paragraph break (segment commit)
                 if self.vad.is_extended_silence(self.extended_silence_ms):
                     seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
-                    if seg_duration > 1.0 and self._segment_has_text():
+                    silence_ms = getattr(self.vad, "silence_ms", self.extended_silence_ms)
+                    if (seg_duration > 1.0 and self._segment_has_text()
+                            and self._may_close_on_silence(silence_ms)):
                         self._close_and_trim_segment()
                         continue
 
@@ -429,7 +488,7 @@ class MeetingSession:
                     vad_skip_count = 0
 
             # Run transcription iteration
-            result = self._processor.process_iter()
+            result = self._guarded(self._processor.process_iter)
             if result is None:
                 continue
 
@@ -482,7 +541,9 @@ class MeetingSession:
         detection (duplication).  Trimming the buffer to the segment's end
         time eliminates both problems at the source.
         """
-        text = self._processor.segment_close()
+        text = self._guarded(self._processor.segment_close)
+        if text is None:          # Qwen3 failed; Whisper now has the audio
+            return
         if text.strip():
             self._commit_segment(text)
 

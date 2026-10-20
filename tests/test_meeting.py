@@ -931,3 +931,112 @@ class TestSegmentCloseWithoutConfirmedWords:
         session = MeetingSession(backend=MockBackend(), vad=None,
                                  audio_source=MockAudioSource())
         assert session._segment_has_text() is False
+
+
+class TestQwenLiveInMeeting:
+    """v0.7.3: Meeting Mode live subtitles on Qwen3, with Whisper fallback."""
+
+    def _session(self, qwen_texts, fail_on=None, speech_chunks=10_000, **kw):
+        from types import SimpleNamespace
+        import qwen_meeting
+        from online_processor import OnlineASRProcessor
+        from qwen_backend import QwenUnavailable
+
+        class FakeQwen:
+            def __init__(self):
+                self.calls = 0
+
+            def transcribe(self, audio):
+                self.calls += 1
+                if fail_on is not None and self.calls >= fail_on:
+                    raise QwenUnavailable("sidecar died")
+                return SimpleNamespace(text=qwen_texts[min(self.calls - 1, len(qwen_texts) - 1)])
+
+        state = {"n": 0}
+
+        class Vad:
+            def reset(self):
+                state["n"] = 0
+
+            def process_chunk(self, chunk):
+                state["n"] += 1
+                sp = state["n"] < speech_chunks
+                return {"is_speech": sp, "silence_ms": 0 if sp else 1500, "speech_ms": 100}
+
+            def is_extended_silence(self, ms=None, *a, **k):
+                return state["n"] >= speech_chunks
+
+        qwen = FakeQwen()
+        failures = []
+        whisper = MockBackend(responses=["whisper takes over"] * 500)
+        session = MeetingSession(
+            backend=whisper, vad=Vad(), audio_source=MockAudioSource(),
+            processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(qwen, step=0.2,
+                                                                        min_audio_s=0.3, **kw),
+            fallback_factory=lambda: OnlineASRProcessor(backend=whisper, vad=None,
+                                                        min_chunk_size=0.3),
+            on_engine_failed=failures.append,
+            extended_silence_ms=800,
+        )
+        return session, qwen, failures
+
+    def _run(self, session, until, timeout=6):
+        session.start()
+        deadline = time.time() + timeout
+        while time.time() < deadline and not until():
+            time.sleep(0.05)
+        session.stop()
+
+    def test_default_is_still_whisper(self):
+        from online_processor import OnlineASRProcessor
+        session = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource())
+        session.start()
+        try:
+            assert isinstance(session._processor, OnlineASRProcessor)
+        finally:
+            session.stop()
+
+    def test_qwen_segment_is_committed_after_silence(self):
+        session, qwen, failures = self._session(["大家好", "大家好今天开会"], speech_chunks=30)
+        self._run(session, until=lambda: session.segments)
+        assert session.segments and "大家好" in session.segments[0].text
+        assert qwen.calls >= 2 and not failures
+
+    def test_long_speech_is_cut_at_max_segment_length(self):
+        session, qwen, failures = self._session(["一直在说话"], max_segment_s=2.0)
+        self._run(session, until=lambda: len(session.segments) >= 2)
+        assert len(session.segments) >= 2               # no unbounded segment
+
+    def test_qwen_failure_switches_the_rest_of_the_meeting_to_whisper(self):
+        from online_processor import OnlineASRProcessor
+        session, qwen, failures = self._session(["ok"], fail_on=2)
+        self._run(session, until=lambda: failures and isinstance(
+            session._processor, OnlineASRProcessor))
+        assert len(failures) == 1                       # reported once
+        assert qwen.calls == 2                          # Qwen3 not retried
+
+
+class TestShortFragmentWaits:
+    def test_loop_asks_processor_before_closing_on_short_silence(self):
+        from types import SimpleNamespace
+
+        class Proc:
+            committed = []
+            committed_history = []
+            buffer_time_offset = 0.0
+            _last_committed_raw = ""
+            last_debug = {}
+            audio_buffer = np.zeros(16000 * 2, dtype=np.float32)
+            transcript_buffer = SimpleNamespace(peek_unconfirmed=lambda: ["x"])
+
+            def __init__(self):
+                self.asked = []
+
+            def ready_to_close(self, silence_ms):
+                self.asked.append(silence_ms)
+                return False
+
+        session = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource())
+        session._processor = Proc()
+        assert session._may_close_on_silence(900) is False
+        assert session._processor.asked == [900]

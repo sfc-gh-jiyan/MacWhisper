@@ -2227,3 +2227,54 @@ def test_check_permissions_logs_status_and_warns_input_monitoring(monkeypatch, c
     assert "accessibility=True" in text and "input_monitoring=False" in text
     assert "Input Monitoring" in text
     inst._notify.assert_called()
+
+
+# ── Meeting live subtitles on Qwen3 (v0.7.3) ──────────────────
+
+def _start_meeting_capturing(monkeypatch, qwen_ok):
+    import app
+    inst = _meeting_app(meeting_subtitles=False)
+    inst.recording = False
+    inst._backend = MagicMock()
+    inst._backend_ready = MagicMock()
+    inst._backend_ready.wait.return_value = True
+    inst._vad = MagicMock()
+    inst._vad_available = True
+    inst._qwen = MagicMock()
+    inst.qwen_strip_fillers = True
+    inst.qwen_tight_spacing = True
+    inst._set_title = MagicMock()
+    inst._set_status = MagicMock()
+    inst.item_meeting = MagicMock()
+    inst._qwen_live_ok = lambda: qwen_ok
+    inst._qwen_failed = MagicMock()
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.is_recording = False
+
+        def start(self):
+            self.is_recording = True
+    monkeypatch.setattr(app, "MeetingSession", FakeSession)
+    inst._start_meeting()
+    return inst, captured
+
+
+def test_meeting_uses_qwen_live_when_ready(monkeypatch):
+    import qwen_meeting
+    inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=True)
+    proc = kw["processor_factory"]()
+    assert isinstance(proc, qwen_meeting.QwenSegmentProcessor)
+    assert proc.backend is inst._qwen.backend
+    assert kw["extended_silence_ms"] == 800
+    kw["on_engine_failed"](RuntimeError("sidecar died"))
+    inst._qwen_failed.assert_called_once()
+    assert "fallback_factory" in kw            # None = MeetingSession's own Whisper processor
+
+
+def test_meeting_stays_on_whisper_when_qwen_not_ready(monkeypatch):
+    inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=False)
+    assert kw.get("processor_factory") is None
+    assert kw.get("extended_silence_ms", 2000) == 2000
