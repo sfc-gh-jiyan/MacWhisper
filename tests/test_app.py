@@ -2183,3 +2183,38 @@ def test_main_installs_sigterm_quit():
     src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     main = src[src.index('if __name__ == "__main__":'):]
     assert "_install_sigterm_quit()" in main
+
+
+# ── Permission diagnostics (v0.7.2): ask macOS, don't guess ──
+
+def test_permission_status_reports_both(monkeypatch):
+    import app
+    monkeypatch.setattr(app, "AXIsProcessTrusted", lambda: True)
+    monkeypatch.setattr(app, "_input_monitoring_granted", lambda: False)
+    assert app._permission_status() == {"accessibility": True, "input_monitoring": False}
+
+
+def test_input_monitoring_unknown_when_api_missing(monkeypatch):
+    import app
+    import Quartz
+    def boom():
+        raise AttributeError("not available on this macOS / PyObjC")
+    monkeypatch.setattr(Quartz, "CGPreflightListenEventAccess", boom)
+    assert app._input_monitoring_granted() is None
+
+
+def test_check_permissions_logs_status_and_warns_input_monitoring(monkeypatch, caplog):
+    import logging
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._key_event_received = True
+    inst._notify = MagicMock()
+    monkeypatch.setattr(app, "_permission_status",
+                        lambda: {"accessibility": True, "input_monitoring": False})
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    with caplog.at_level(logging.WARNING):
+        inst._check_permissions()
+    text = caplog.text
+    assert "accessibility=True" in text and "input_monitoring=False" in text
+    assert "Input Monitoring" in text
+    inst._notify.assert_called()

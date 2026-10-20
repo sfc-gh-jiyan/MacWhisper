@@ -144,6 +144,21 @@ def _stream_is_file(stream, path: str) -> bool:
     return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
+def _input_monitoring_granted():
+    """True/False from macOS (CGPreflightListenEventAccess); None if unknown."""
+    try:
+        import Quartz
+        return bool(Quartz.CGPreflightListenEventAccess())
+    except Exception:
+        return None
+
+
+def _permission_status() -> dict:
+    """Ask macOS directly — the hotkeys need both, for THIS app identity."""
+    return {"accessibility": bool(AXIsProcessTrusted()),
+            "input_monitoring": _input_monitoring_granted()}
+
+
 def _install_sigterm_quit() -> None:
     """Quit normally on SIGTERM (logout/shutdown, ./run.sh restart).
 
@@ -998,13 +1013,25 @@ class TranscriberApp(rumps.App):
             pass
 
     def _check_permissions(self):
-        if not AXIsProcessTrusted():
+        status = _permission_status()
+        logger.warning("Permissions (pid %d, %s): accessibility=%s input_monitoring=%s",
+                       os.getpid(), sys.executable, status["accessibility"],
+                       status["input_monitoring"])
+        if not status["accessibility"]:
             print("[WARN] Accessibility permission NOT granted — auto-paste will fail")
             print("       → System Settings → Privacy & Security → Accessibility")
             self._notify(
                 "MacWhisper — Permission Needed",
                 "Accessibility access is required",
                 "System Settings → Privacy & Security → Accessibility",
+            )
+        if status["input_monitoring"] is False:
+            logger.warning("Input Monitoring NOT granted — hotkeys (Right ⌥) will not work. "
+                           "System Settings → Privacy & Security → Input Monitoring, then restart")
+            self._notify(
+                "MacWhisper — Permission Needed",
+                "Input Monitoring is required for the hotkeys",
+                "System Settings → Privacy & Security → Input Monitoring, then restart MacWhisper",
             )
 
         time.sleep(8)

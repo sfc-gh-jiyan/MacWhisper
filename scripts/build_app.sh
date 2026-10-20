@@ -9,15 +9,27 @@
 #
 #   ./scripts/build_app.sh                 # build + install to /Applications
 #   ./scripts/build_app.sh --dest DIR      # build into DIR (tests; no install)
+#   ./scripts/build_app.sh --probe [--dest DIR]
+#       build "MacWhisper Key Probe.app" (com.macwhisper.keyprobe): the same
+#       launcher running launcher/key_probe.py, to diagnose keyboard access
+#       of a double-clicked app without touching MacWhisper.
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MacWhisper"
+BUNDLE_ID="com.macwhisper.app"
+SCRIPT="app.py"
 DEST="/Applications"
-if [ "${1:-}" = "--dest" ]; then
-    DEST="${2:?--dest needs a directory}"
-fi
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dest) DEST="${2:?--dest needs a directory}"; shift 2 ;;
+        --probe) APP_NAME="MacWhisper Key Probe"; BUNDLE_ID="com.macwhisper.keyprobe"
+                 SCRIPT="launcher/key_probe.py"; shift ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+EXE="MacWhisper"   # executable name inside the bundle (same for the probe)
 APP="$DEST/${APP_NAME}.app"
 VERSION="$(cat "$ROOT/VERSION")"
 VENV_PY="$ROOT/venv/bin/python3"
@@ -62,14 +74,15 @@ clang -O2 -arch arm64 -Wall -Wextra -Werror \
     -DMW_REPO="\"$ROOT\"" \
     -DMW_VENV_PY="\"$VENV_PY\"" \
     -DMW_CACERT="\"$CACERT\"" \
+    -DMW_SCRIPT="\"$SCRIPT\"" \
     "$ROOT/launcher/macwhisper_launcher.c" \
-    -o "$BUNDLE/Contents/MacOS/$APP_NAME" \
+    -o "$BUNDLE/Contents/MacOS/$EXE" \
     -L"$PY_LIBDIR" -l"$PY_LIBNAME" -Wl,-rpath,"$PY_LIBDIR"
 
 # The launcher must never exec: a re-exec changes the process's pid version
 # and macOS can no longer resolve the app (no menu bar icon, permission
 # mismatch). Fail the build if any exec* symbol is linked in.
-if nm -u "$BUNDLE/Contents/MacOS/$APP_NAME" | grep -qE '^_exec[lv]'; then
+if nm -u "$BUNDLE/Contents/MacOS/$EXE" | grep -qE '^_exec[lv]'; then
     echo "ERROR: launcher links an exec* call — it must not re-exec itself." >&2
     exit 1
 fi
@@ -83,10 +96,10 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>${APP_NAME}</string>
   <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
-  <key>CFBundleIdentifier</key><string>com.macwhisper.app</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-  <key>CFBundleExecutable</key><string>${APP_NAME}</string>
+  <key>CFBundleExecutable</key><string>${EXE}</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -105,12 +118,13 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "==> Signing (ad-hoc)"
-codesign --force --sign - --identifier com.macwhisper.app "$BUNDLE"
+codesign --force --sign - --identifier "$BUNDLE_ID" \
+    --requirements "=designated => identifier \"$BUNDLE_ID\"" "$BUNDLE"
 codesign --verify --strict "$BUNDLE"
 
 echo "==> Self-test"
 # Run directly (not via LaunchServices), so pass the LSEnvironment value
-if ! MallocNanoZone=0 "$BUNDLE/Contents/MacOS/$APP_NAME" --self-test; then
+if ! MallocNanoZone=0 "$BUNDLE/Contents/MacOS/$EXE" --self-test; then
     echo "ERROR: the built app failed its self-test; nothing was installed." >&2
     exit 1
 fi

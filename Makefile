@@ -1,4 +1,4 @@
-.PHONY: smoke qa test test-full eval-meeting qwen-setup app
+.PHONY: smoke qa test test-full eval-meeting qwen-setup app reset-permissions
 
 # Use venv python if available, else system python
 PYTHON := $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python)
@@ -21,6 +21,10 @@ qa:
 # ── /Applications/MacWhisper.app (native launcher; double-click to start) ──
 app:
 	./scripts/build_app.sh
+
+# Clear MacWhisper.app's privacy permission records (then grant them again)
+reset-permissions:
+	./scripts/reset_permissions.sh
 
 # ── Qwen3-ASR sidecar env (isolated from the app venv) ──
 qwen-setup:

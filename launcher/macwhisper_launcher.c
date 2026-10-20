@@ -39,6 +39,9 @@
 #ifndef MW_CACERT
 #define MW_CACERT ""
 #endif
+#ifndef MW_SCRIPT
+#define MW_SCRIPT "app.py"   /* relative to MW_REPO (the key probe uses another) */
+#endif
 
 static const char *SELF_TEST_CODE =
     "import os, sys\n"
@@ -137,12 +140,12 @@ int main(int argc, char **argv) {
     if (self_test) {
         status = PyConfig_SetBytesString(&config, &config.run_command, SELF_TEST_CODE);
     } else {
-        status = PyConfig_SetBytesString(&config, &config.run_filename, MW_REPO "/app.py");
+        status = PyConfig_SetBytesString(&config, &config.run_filename, MW_REPO "/" MW_SCRIPT);
     }
     if (PyStatus_Exception(status))
         return fail_status(&config, status);
 
-    char *py_argv[] = {self_test ? "-c" : MW_REPO "/app.py"};
+    char *py_argv[] = {self_test ? "-c" : MW_REPO "/" MW_SCRIPT};
     status = PyConfig_SetBytesArgv(&config, 1, py_argv);
     if (PyStatus_Exception(status))
         return fail_status(&config, status);
