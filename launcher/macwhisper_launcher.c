@@ -24,7 +24,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,21 +56,20 @@ static void die(const char *what) {
     exit(1);
 }
 
-/* malloc zones are chosen at process start, so MallocNanoZone=0 (the mlx +
- * AppKit heap-corruption workaround from run.sh) only works if it is in the
- * environment BEFORE exec. Re-exec ourselves once with it set; the executable
- * (and therefore the permission identity) stays the same. */
-static void ensure_malloc_env(char **argv) {
+/* MallocNanoZone=0 (the mlx + AppKit heap-corruption workaround from run.sh)
+ * must be in the environment before the process starts, because malloc picks
+ * its zones at startup. It comes from LSEnvironment in Info.plist, which
+ * LaunchServices applies for a double-click, `open` and launch at login.
+ *
+ * Never re-exec to set it: exec gives the process a new "pid version", and
+ * macOS (RunningBoard / ControlCenter) then cannot resolve the app it
+ * launched. The menu bar icon is never created and permissions do not match
+ * ("process has mismatched pid version"). */
+static void warn_if_malloc_env_missing(void) {
     const char *v = getenv("MallocNanoZone");
-    if (v && strcmp(v, "0") == 0)
-        return;
-    char path[PATH_MAX];
-    uint32_t size = sizeof(path);
-    if (_NSGetExecutablePath(path, &size) != 0)
-        die("executable path too long");
-    setenv("MallocNanoZone", "0", 1);
-    execv(path, argv);
-    die("re-exec with MallocNanoZone=0 failed");
+    if (!v || strcmp(v, "0") != 0)
+        fprintf(stderr, "[MacWhisper launcher] MallocNanoZone=0 not set "
+                        "(start the app via LaunchServices, not the binary)\n");
 }
 
 static void redirect_output_to_log(void) {
@@ -107,7 +105,7 @@ int main(int argc, char **argv) {
     int self_test = (argc > 1 && strcmp(argv[1], "--self-test") == 0) ||
                     (self_test_file && self_test_file[0]);
 
-    ensure_malloc_env(argv);
+    (void)argv;
     if (MW_CACERT[0] && access(MW_CACERT, R_OK) == 0)
         setenv("SSL_CERT_FILE", MW_CACERT, 1);
     if (chdir(MW_REPO) != 0)
@@ -122,6 +120,7 @@ int main(int argc, char **argv) {
     } else if (!self_test) {
         redirect_output_to_log();
     }
+    warn_if_malloc_env_missing();
 
     PyConfig config;
     PyConfig_InitPythonConfig(&config);

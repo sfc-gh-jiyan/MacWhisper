@@ -66,6 +66,14 @@ clang -O2 -arch arm64 -Wall -Wextra -Werror \
     -o "$BUNDLE/Contents/MacOS/$APP_NAME" \
     -L"$PY_LIBDIR" -l"$PY_LIBNAME" -Wl,-rpath,"$PY_LIBDIR"
 
+# The launcher must never exec: a re-exec changes the process's pid version
+# and macOS can no longer resolve the app (no menu bar icon, permission
+# mismatch). Fail the build if any exec* symbol is linked in.
+if nm -u "$BUNDLE/Contents/MacOS/$APP_NAME" | grep -qE '^_exec[lv]'; then
+    echo "ERROR: launcher links an exec* call — it must not re-exec itself." >&2
+    exit 1
+fi
+
 cp "$ROOT/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 
 cat > "$BUNDLE/Contents/Info.plist" <<PLIST
@@ -84,6 +92,10 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSArchitecturePriority</key><array><string>arm64</string></array>
   <key>LSUIElement</key><true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>MallocNanoZone</key><string>0</string>
+  </dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>MacWhisper needs microphone access to transcribe your speech.</string>
   <key>NSAppleEventsUsageDescription</key>
@@ -97,7 +109,8 @@ codesign --force --sign - --identifier com.macwhisper.app "$BUNDLE"
 codesign --verify --strict "$BUNDLE"
 
 echo "==> Self-test"
-if ! "$BUNDLE/Contents/MacOS/$APP_NAME" --self-test; then
+# Run directly (not via LaunchServices), so pass the LSEnvironment value
+if ! MallocNanoZone=0 "$BUNDLE/Contents/MacOS/$APP_NAME" --self-test; then
     echo "ERROR: the built app failed its self-test; nothing was installed." >&2
     exit 1
 fi
