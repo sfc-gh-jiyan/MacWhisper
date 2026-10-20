@@ -10,7 +10,21 @@ PIDS=$(pgrep -f "(python.*app\.py|python.*qwen_sidecar\.py|MacWhisper\.app/Conte
 if [ -n "$PIDS" ]; then
     echo "Stopping previous MacWhisper (PID: $PIDS)..."
     echo "$PIDS" | xargs kill 2>/dev/null
-    sleep 0.5
+    # Wait for a normal quit (up to 10 s). Starting while the old one still
+    # runs would be refused by the single-instance lock.
+    DEADLINE=$((SECONDS + 10))
+    while :; do
+        ALIVE=""
+        for p in $PIDS; do kill -0 "$p" 2>/dev/null && ALIVE="$ALIVE $p"; done
+        [ -z "$ALIVE" ] || [ "$SECONDS" -ge "$DEADLINE" ] && break
+        sleep 0.25
+    done
+    if [ -n "$ALIVE" ]; then
+        echo "Previous MacWhisper did not quit in 10 s — forcing it (PID:$ALIVE)"
+        kill -9 $ALIVE 2>/dev/null
+        sleep 0.5
+        rm -f "$HOME/.macwhisper/.running"   # our forced stop, not a crash
+    fi
 fi
 
 if [ ! -d "$SCRIPT_DIR/venv" ]; then
