@@ -18,6 +18,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - The previous `/Applications/MacWhisper.app` was a Python script. Homebrew installs still pointed it at their own old copy. It is replaced by the native app.
 - **After updating, grant the permissions to MacWhisper once** (System Settings → Privacy & Security → Accessibility and Input Monitoring). The new app is a different program to macOS.
 
+### Fixed
+- **"MacWhisper crashed last time" after logout, shutdown or a `./run.sh` restart.** macOS (and `./run.sh`) stop the app with SIGTERM, which ended it without the normal quit steps. The next launch then showed a false crash alert, and the Qwen3 helper was not closed. SIGTERM now quits the same way as menu → Quit.
+- Every warning in `macwhisper.log` was written twice when the app was started from /Applications.
+
 ## [0.7.1] — 2026-10-19
 
 ### Added
