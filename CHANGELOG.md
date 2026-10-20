@@ -4,6 +4,20 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.2] — 2026-10-20
+
+### Added
+- **Double-click MacWhisper in /Applications.** `./install.sh` (or `make app`) now builds `/Applications/MacWhisper.app` with a native launcher that embeds Python and runs this repo's code.
+  - Privacy permissions (Microphone, Accessibility, Input Monitoring) now belong to **MacWhisper** itself. Before, they went to Python or, with `./run.sh`, to Terminal.
+  - The app always runs the current repo code; rebuild only after moving the repo or recreating `venv`.
+  - It sets the same memory setting as `./run.sh` (`MallocNanoZone=0`) and logs to `~/.macwhisper/logs/macwhisper.log`.
+- **Launch at login**: Settings → General. The switch shows the real state from macOS, including "approve in Login Items". It is unavailable (grayed out) when started with `./run.sh`.
+- **One instance only**: opening MacWhisper while it is already running shows a notification instead of starting a second copy that would fight over the hotkeys and the microphone.
+
+### Changed
+- The previous `/Applications/MacWhisper.app` was a Python script. Homebrew installs still pointed it at their own old copy. It is replaced by the native app.
+- **After updating, grant the permissions to MacWhisper once** (System Settings → Privacy & Security → Accessibility and Input Monitoring). The new app is a different program to macOS.
+
 ## [0.7.1] — 2026-10-19
 
 ### Added
