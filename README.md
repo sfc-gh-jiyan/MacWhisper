@@ -91,7 +91,9 @@ Go to **System Settings → Privacy & Security**:
 
 > **Running from Terminal?** If you use `macwhisper-mlx` or `./run.sh` instead of the .app, you must also add your **terminal app** (Terminal, iTerm, Warp, etc.) to **all three** permission categories above.
 
-> **Permissions not taking effect?** After granting permissions, you may need to quit and relaunch MacWhisper. In some cases, a system restart is needed for Input Monitoring to activate.
+> **Permissions not taking effect?** Grant first, then start MacWhisper. Permissions are read when the app starts, so quit and relaunch it after granting. Check `~/.macwhisper/logs/macwhisper.log` for `Permissions (...): accessibility=True input_monitoring=True`. If a switch looks on but the log says `False`, quit MacWhisper, run `make reset-permissions`, and grant both again.
+>
+> **No "Meeting saved" banner?** The notification goes to Notification Center. To see a banner, open System Settings → Notifications → MacWhisper and choose **Banners** or **Alerts**. If you use a Focus mode, add MacWhisper to its allowed apps.
 
 ## Usage
 

@@ -81,7 +81,9 @@ MacWhisper 需要 **三项** macOS 权限才能正常运行。**不授权这些�
 
 > **从终端启动？** 如果你使用 `macwhisper-mlx` 命令或 `./run.sh` 而不是 .app，还需要将你的**终端应用**（Terminal、iTerm、Warp 等）也添加到以上**三项**权限中。
 
-> **权限不生效？** 授权后可能需要退出并重新启动 MacWhisper。某些情况下，输入监控权限需要重启系统才能激活。
+> **权限不生效？** 先授权，再启动 MacWhisper：权限是在 App 启动时读取的，所以授权后要退出并重新打开。在 `~/.macwhisper/logs/macwhisper.log` 里查 `Permissions (...): accessibility=True input_monitoring=True`。如果开关看着是开的，日志里却是 `False`，先退出 MacWhisper，运行 `make reset-permissions`，再把两项重新授权一次。
+>
+> **会议结束没有弹出"Meeting saved"？** 通知其实已经进了通知中心。想弹横幅，打开"系统设置 → 通知 → MacWhisper"，样式选 **横幅** 或 **提示**。如果你开着专注模式，把 MacWhisper 加进允许的 App 里。
 
 ## 使用
 

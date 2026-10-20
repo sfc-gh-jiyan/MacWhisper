@@ -21,6 +21,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 - **"MacWhisper crashed last time" after logout, shutdown or a `./run.sh` restart.** macOS (and `./run.sh`) stop the app with SIGTERM, which ended it without the normal quit steps. The next launch then showed a false crash alert, and the Qwen3 helper was not closed. SIGTERM now quits the same way as menu → Quit.
 - Every warning in `macwhisper.log` was written twice when the app was started from /Applications.
+- **No menu bar icon in the double-clicked app.** The launcher re-ran itself to set `MallocNanoZone=0`, so macOS lost track of the app it had started (`process has mismatched pid version`). The variable now comes from `LSEnvironment` in Info.plist, and the build fails if the launcher can re-exec.
+- **Hotkeys dead after a rebuild although permissions looked granted.** The ad-hoc signature identified the app by its file hash, so each rebuild was a new program to macOS. The app is now identified by its bundle id (`com.macwhisper.app`), so permissions survive rebuilds.
+- `./run.sh` could leave you with no running app: it started the new one 0.5 s after stopping the old one, and the single-instance lock refused it. It now waits up to 10 s, then force-stops the old one.
+
+### Added (diagnostics)
+- At startup the log shows what macOS reports: `Permissions (...): accessibility=… input_monitoring=…`. A notification appears when Input Monitoring is missing.
+- `make reset-permissions` clears only MacWhisper's privacy permission records, for a clean re-grant. It refuses to run while MacWhisper is running.
+- `./scripts/build_app.sh --probe` builds a separate "MacWhisper Key Probe" app (same launcher, logs permission state and key names only) to diagnose keyboard access without touching MacWhisper.
 
 ## [0.7.1] — 2026-10-19
 
