@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.7.0
+MacWhisper - macOS Menu Bar App  v0.7.1
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 import json
 import logging
@@ -110,6 +110,8 @@ import crash_guard
 import error_alert
 import qwen_backend
 import qwen_engine
+import settings_window
+import shortcuts
 from qwen_backend import QwenUnavailable
 
 logger = logging.getLogger(__name__)
@@ -126,6 +128,11 @@ LOG_DIR = os.path.join(_DATA_DIR, "logs")
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
 HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
+# A combo pressed again without a release within this window is macOS key
+# auto-repeat (holding the keys), not a new press.
+COMBO_REPEAT_WINDOW_S = 1.5
+# Meeting start/stop ignores further toggles for this long (double start/stop)
+MEETING_TOGGLE_COOLDOWN_S = 1.0
 
 # Set by __main__ when the previous run did not exit cleanly (crash.log tail)
 _PREVIOUS_CRASH_TAIL: str | None = None
@@ -145,7 +152,45 @@ QWEN_MODEL_OPTIONS = {
 }
 ALL_MODEL_OPTIONS = {**MODEL_OPTIONS, **QWEN_MODEL_OPTIONS}
 ALL_MODEL_KEYS = list(ALL_MODEL_OPTIONS.keys())
-DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 0.6B (Fast, zh+en)"]
+DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 1.7B (Best, zh+en)"]
+
+
+_flag_listener_cache: dict = {}
+
+
+def _flag_listener_cls(base):
+    """Subclass of `base` (pynput keyboard.Listener) that hands each event's
+    own modifier flags to the app.
+
+    The app resyncs its modifier tracking (a lost key release must not leave
+    a modifier stuck). It must use the flags carried by the event being
+    handled, not the keyboard state "now": by the time a fast ⌃⌥M is
+    processed the keys may already be up, and the shortcut would be lost.
+    The flags are stored on `sink._event_flags` right before pynput calls
+    on_press/on_release, on the same thread.
+
+    Built from the CURRENT keyboard.Listener at listener start, so tests that
+    patch keyboard.Listener (the restart watchdog test) still take effect.
+    """
+    cls = _flag_listener_cache.get(base)
+    if cls is not None:
+        return cls
+
+    class FlagListener(base):
+        def __init__(self, sink, **kwargs):
+            super().__init__(**kwargs)
+            self._mw_sink = sink
+
+        def _handle_message(self, proxy, event_type, event, refcon, injected):
+            try:
+                import Quartz
+                self._mw_sink._event_flags = int(Quartz.CGEventGetFlags(event))
+            except Exception:
+                self._mw_sink._event_flags = None   # no resync for this event
+            return super()._handle_message(proxy, event_type, event, refcon, injected)
+
+    _flag_listener_cache[base] = cls = FlagListener
+    return cls
 
 
 def initial_engine(cfg: dict, qwen_env_exists: bool) -> str:
@@ -255,6 +300,7 @@ class TranscriberApp(rumps.App):
             "qwen_strip_fillers": getattr(self, "qwen_strip_fillers", True),
             "qwen_tight_spacing": getattr(self, "qwen_tight_spacing", True),
             "meeting_final_pass": getattr(self, "meeting_final_pass", True),
+            "shortcuts": getattr(self, "shortcuts", None) or shortcuts.merged({}),
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f)
@@ -282,6 +328,9 @@ class TranscriberApp(rumps.App):
         self.qwen_tight_spacing = cfg.get("qwen_tight_spacing", True)
         # Re-transcribe meetings with Qwen3 from in-memory audio (never written to disk)
         self.meeting_final_pass = cfg.get("meeting_final_pass", True)
+        # Keyboard shortcuts (v0.7.1): defaults fill anything missing/invalid
+        self.shortcuts = shortcuts.merged(cfg.get("shortcuts"))
+        self._apply_shortcut_hints()
 
         # Meeting mode state
         self._meeting_session: MeetingSession | None = None
@@ -328,33 +377,11 @@ class TranscriberApp(rumps.App):
             f"{translate_prefix} Translate to English", callback=self._toggle_translate
         )
 
-        # Menu grouped by mode. Items are held by reference (self.item_*), so
-        # toggles keep working inside submenus.
-        self.menu = [
-            rumps.MenuItem("Status: Ready"),
-            rumps.separator,
-            *model_menu_items,
-            rumps.separator,
-            [rumps.MenuItem("Push to Talk"), [
-                self.item_translate,
-                self.item_live,
-                self.item_save_audio,
-            ]],
-            [rumps.MenuItem("Meeting"), [
-                self.item_meeting,
-                self.item_meeting_subtitles,
-                self.item_save_meeting_audio,
-            ]],
-            rumps.separator,
-            [rumps.MenuItem("Shortcuts"), [
-                rumps.MenuItem("Hold Right Option to record"),
-                rumps.MenuItem("Switch Model: Ctrl+Shift+M"),
-                rumps.MenuItem("Toggle Translate: Ctrl+Shift+T"),
-                rumps.MenuItem("Live Subtitles: Ctrl+Shift+S"),
-                rumps.MenuItem("Meeting Mode: Ctrl+Shift+R"),
-            ]],
-            rumps.separator,
-        ]
+        # v0.7.1: slim menu (status, models, meeting, Settings…). Every option
+        # lives in the Settings window; the item_* objects are still kept so
+        # the existing toggle handlers can update their titles unchanged.
+        self._settings = None
+        self.menu = self._build_menu()
         self.status_item    = self.menu["Status: Ready"]
 
         # Hold-to-record state
@@ -370,9 +397,12 @@ class TranscriberApp(rumps.App):
         crash_guard.install_thread_excepthook(self._reporter)
         self._hotkey_stop = threading.Event()
 
-        # Hotkey modifier tracking
-        self._ctrl_pressed  = False
-        self._shift_pressed = False
+        # Hotkey modifier tracking ({"ctrl", "alt", "shift", "cmd"} held now)
+        self._held_mods: set = set()
+        self._ptt_cancelled = False   # PTT key turned out to be part of a combo
+        self._shortcuts_paused = False  # True while Settings records a shortcut
+        self._combo_down: dict = {}     # combo spec -> last press time (until released)
+        self._event_flags = None        # modifier flags of the event being handled
         self._key_event_received = False
 
         # Live subtitle overlay state
@@ -510,6 +540,58 @@ class TranscriberApp(rumps.App):
             self._set_model(label)
         return cb
 
+    def _build_menu(self) -> list:
+        settings = rumps.MenuItem("Settings…", callback=self._open_settings, key=",")
+        return [
+            rumps.MenuItem("Status: Ready"),
+            rumps.separator,
+            *[self.model_items[label] for label in ALL_MODEL_KEYS],
+            rumps.separator,
+            self.item_meeting,
+            rumps.separator,
+            settings,
+            rumps.separator,
+        ]
+
+    # ── Settings window ───────────────────────────────────────
+
+    # Preferences without a dedicated toggle handler (set from Settings)
+    _PREFS = ("meeting_final_pass", "qwen_strip_fillers", "qwen_tight_spacing")
+
+    def _open_settings(self, _):
+        if self._settings is None:
+            self._settings = settings_window.SettingsWindow(self, ALL_MODEL_KEYS)
+        self._settings.show()
+
+    def _refresh_settings(self):
+        if getattr(self, "_settings", None) is not None:
+            self._settings.refresh()
+
+    def _set_pref(self, name: str, value: bool) -> None:
+        if name not in self._PREFS:
+            raise ValueError(f"unknown preference: {name}")
+        setattr(self, name, bool(value))
+        qwen = getattr(self, "_qwen", None)
+        if qwen is not None:   # apply to the running engine without a restart
+            if name == "qwen_strip_fillers":
+                qwen.strip_fillers = bool(value)
+            elif name == "qwen_tight_spacing":
+                qwen.tight = bool(value)
+        logger.info("Preference %s = %s", name, value)
+        self._save_config()
+
+    def _set_shortcuts(self, cfg: dict) -> None:
+        self.shortcuts = shortcuts.merged(cfg)
+        self._apply_shortcut_hints()
+        logger.info("Shortcuts updated: %s", self.shortcuts)
+        self._save_config()
+
+    def _apply_shortcut_hints(self) -> None:
+        """Text that names shortcuts (meeting overlay label) follows the config."""
+        import overlay as _overlay
+        meeting = self.shortcuts.get("meeting") or []
+        _overlay.meeting_stop_hint = shortcuts.display(meeting[0]) if meeting else ""
+
     def _active_model_label(self) -> str:
         """Menu label of the engine/model actually selected."""
         repo = self.qwen_model if self.engine == "qwen" else self.current_model
@@ -542,6 +624,7 @@ class TranscriberApp(rumps.App):
                 self._warmup_model(self.current_model)
         logger.info("Model selected: %s (engine=%s)", label, self.engine)
         self._refresh_model_menu()
+        self._refresh_settings()
         self._set_status(f"Model: {label.split(' (')[0]}")
         self._save_config()
 
@@ -666,8 +749,30 @@ class TranscriberApp(rumps.App):
         self._save_config()
         print(f"[INFO] Save audio {'enabled' if self.save_audio else 'disabled'}")
 
+    def _stop_meeting_from_overlay(self):
+        """Stop button in the meeting overlay (called after the user confirms).
+
+        Never toggles: if the meeting already ended while the confirm dialog
+        was open (e.g. stopped by shortcut), this must not start a new one.
+        """
+        if self._meeting_session and self._meeting_session.is_recording:
+            logger.info("Meeting stopped from the overlay Stop button")
+            self._overlay_stop_at = time.monotonic()
+            self._stop_meeting()
+        else:
+            logger.info("Overlay Stop: meeting already ended, nothing to do")
+
     def _toggle_meeting_mode(self, _):
         """Start or stop Meeting Mode."""
+        now = time.monotonic()
+        last = max(getattr(self, "_meeting_toggled_at", -1e9),
+                   getattr(self, "_overlay_stop_at", -1e9))
+        if now - last < MEETING_TOGGLE_COOLDOWN_S:
+            # Double press, key repeat, or a shortcut queued while the Stop
+            # confirm dialog was open: never stop/start again right away
+            logger.warning("Ignoring meeting toggle %.2fs after the last start/stop", now - last)
+            return
+        self._meeting_toggled_at = now
         if self._meeting_session and self._meeting_session.is_recording:
             self._stop_meeting()
         else:
@@ -675,6 +780,9 @@ class TranscriberApp(rumps.App):
 
     def _start_meeting(self):
         """Start a new meeting recording session."""
+        if self._meeting_session and self._meeting_session.is_recording:
+            logger.warning("Meeting already running — not starting a second one")
+            return
         if self.recording:
             print("[WARN] Cannot start meeting while hold-to-record is active")
             return
@@ -852,7 +960,14 @@ class TranscriberApp(rumps.App):
         while not self._hotkey_stop.is_set():
             try:
                 logger.info("Hotkey listener starting (restart #%d)", failures)
-                with keyboard.Listener(
+                listener_cls = keyboard.Listener
+                if hasattr(listener_cls, "_handle_message"):   # real pynput (darwin)
+                    listener_cls = _flag_listener_cls(listener_cls)
+                    kwargs = {"sink": self}
+                else:
+                    kwargs = {}
+                with listener_cls(
+                    **kwargs,
                     on_press=self._guarded(self._on_press, "hotkey (key press)"),
                     on_release=self._guarded(self._on_release, "hotkey (key release)"),
                 ) as listener:
@@ -868,41 +983,137 @@ class TranscriberApp(rumps.App):
                 )
                 self._hotkey_stop.wait(min(HOTKEY_RESTART_DELAY_S * failures, 30))
 
+    # Combo action -> handler (menu actions touch AppKit: run on main thread)
+    def _combo_handlers(self):
+        return {
+            "meeting": lambda: self._toggle_meeting_mode(None),
+            "cycle_model": lambda: self._cycle_model(),
+            "translate": lambda: self._toggle_translate(None),
+            "live_subtitles": lambda: self._toggle_live_mode(None),
+        }
+
+    def _take_event_mods(self) -> set | None:
+        """Modifiers carried by the event being handled (consumed once).
+
+        None when unavailable (e.g. pynput internals changed): then the
+        tracked state is used as before, without resync.
+        """
+        flags = getattr(self, "_event_flags", None)
+        self._event_flags = None
+        return None if flags is None else shortcuts.mods_from_flags(flags)
+
+    def _ptt_spec(self) -> str:
+        return (self.shortcuts.get("push_to_talk") or shortcuts.DEFAULTS["push_to_talk"])[0]
+
     def _on_press(self, key):
         self._key_event_received = True
-        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            self._ctrl_pressed = True
-        elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
-            self._shift_pressed = True
+        mod = shortcuts.modifier_of(key)
+        if getattr(self, "_shortcuts_paused", False):
+            # Settings is recording a shortcut: track modifiers, trigger nothing
+            if mod:
+                self._held_mods.add(mod)
+            return
+        ptt = self._ptt_spec()
+        is_ptt_key = shortcuts.key_token(key) == ptt
 
-        if self._ctrl_pressed and self._shift_pressed:
-            vk = getattr(key, 'vk', None)
-            # Menu actions touch AppKit → run them on the main thread, the
-            # same path as clicking the menu item.
-            action = {
-                46: lambda: self._cycle_model(),                 # M
-                17: lambda: self._toggle_translate(None),        # T
-                1:  lambda: self._toggle_live_mode(None),        # S
-                15: lambda: self._toggle_meeting_mode(None),     # R
-            }.get(vk)
-            if action:
-                logger.debug("hotkey Ctrl+Shift vk=%s → main thread", vk)
-                self._on_main(self._guarded(action, f"shortcut Ctrl+Shift (vk={vk})"))
+        if is_ptt_key:
+            real = self._take_event_mods()
+            if real is not None and real != self._held_mods - {mod}:
+                # Includes this key's own modifier (just pressed); drop stale ones
+                if self._held_mods - real:
+                    logger.warning("Resynced stuck modifiers %s (lost key release)",
+                                   sorted(self._held_mods - real))
+                self._held_mods = set(real)
+            started = False
+            if not self.recording and shortcuts.ptt_allowed(self._held_mods, ptt):
+                # Block hold-to-record during active meeting
+                if self._meeting_session and self._meeting_session.is_recording:
+                    pass
+                else:
+                    self._ptt_cancelled = False
+                    started = True
+                    threading.Thread(target=self._start_recording, daemon=True).start()
+            if mod:
+                self._held_mods.add(mod)
                 return
+            if started or self.recording:
+                return
+            # Not dictation (e.g. ⌃⇧F8 with PTT = F8): match it as a combo below
 
-        if key == keyboard.Key.alt_r and not self.recording:
-            # Block hold-to-record during active meeting
-            if self._meeting_session and self._meeting_session.is_recording:
-                return
-            threading.Thread(target=self._start_recording, daemon=True).start()
+        if mod:
+            self._held_mods.add(mod)
+            return
+
+        if (self.recording and not self._ptt_cancelled and ptt in ("cmd_r", "ctrl_r", "shift_r")
+                and shortcuts.modifier_name(ptt) in self._held_mods):
+            # e.g. PTT = Right ⌘ and the user typed ⌘C: not dictation
+            logger.info("Key pressed while holding %s — cancelling recording", ptt)
+            self._ptt_cancelled = True
+            threading.Thread(target=self._cancel_recording, daemon=True).start()
+
+        real = self._take_event_mods()
+        if real is not None and real != self._held_mods:
+            # A lost release must not turn plain typing (⇧S) into a combo (⌃⇧S)
+            logger.warning("Resynced modifiers %s -> %s before shortcut match",
+                           sorted(self._held_mods), sorted(real))
+            self._held_mods = set(real)
+        spec = shortcuts.event_spec(key, self._held_mods)
+        action = shortcuts.match_action(spec, self.shortcuts)
+        if not action:
+            return
+        now = time.monotonic()
+        down = getattr(self, "_combo_down", None)
+        if down is None:
+            down = self._combo_down = {}
+        last = down.get(spec)
+        down[spec] = now
+        if last is not None and now - last < COMBO_REPEAT_WINDOW_S:
+            logger.debug("shortcut %s auto-repeat ignored", spec)
+            return
+        if self.recording and shortcuts.combo_uses_ptt_key(spec, ptt):
+            # e.g. ⌃⌥M pressed with Right ⌥ first: that "recording" was not speech
+            logger.info("Shortcut %s uses the Push to Talk key — cancelling recording", spec)
+            self._ptt_cancelled = True
+            threading.Thread(target=self._cancel_recording, daemon=True).start()
+        logger.debug("shortcut %s -> %s (main thread)", spec, action)
+        handler = self._combo_handlers()[action]
+
+        def run():
+            handler()
+            self._refresh_settings()   # keep an open Settings window in sync
+        self._on_main(self._guarded(run, f"shortcut {shortcuts.display(spec)}"))
 
     def _on_release(self, key):
-        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            self._ctrl_pressed = False
-        elif key in (keyboard.Key.shift, keyboard.Key.shift_r):
-            self._shift_pressed = False
-        elif key == keyboard.Key.alt_r and self.recording:
-            threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+        mod = shortcuts.modifier_of(key)
+        tok = shortcuts.key_token(key)
+        down = getattr(self, "_combo_down", None)
+        if down and tok and not mod:
+            for spec in [s for s in down if s.rsplit("+", 1)[-1] == tok]:
+                del down[spec]   # key released: the next press is a new press
+        if getattr(self, "_shortcuts_paused", False):
+            if mod:
+                self._held_mods.discard(mod)
+            return
+        if shortcuts.key_token(key) == self._ptt_spec():
+            if self._ptt_cancelled:
+                self._ptt_cancelled = False
+            elif self.recording:
+                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+        if mod:
+            self._held_mods.discard(mod)
+
+    def _cancel_recording(self):
+        """Stop a Push to Talk recording and discard it (no transcription, no paste)."""
+        if not self.recording:
+            return
+        self.recording = False
+        self._close_mic_stream()
+        if self._overlay_panel:
+            AppHelper.callAfter(self._destroy_overlay)
+        self.frames = []   # new list: the Qwen live loop exits on identity change
+        self._set_title(self._idle_icon)
+        self._set_status("Ready")
+        logger.info("Recording cancelled (shortcut used the Push to Talk key)")
 
     # ── Hold-to-Record ────────────────────────────────────────
 
@@ -1387,7 +1598,13 @@ class TranscriberApp(rumps.App):
     # ── Live Subtitles — overlay ──────────────────────────────
 
     def _create_overlay(self, mode: str = "talk"):
-        panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH)
+        if mode == "talk" and not getattr(self, "recording", True):
+            # Queued creation that lost the race with a fast release/cancel
+            logger.info("Skipping talk overlay: recording already ended")
+            return
+        on_stop = self._stop_meeting_from_overlay if mode == "meeting" else None
+        panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH,
+                                          on_stop=on_stop)
         if panel:
             self._overlay_panel = panel
             self._overlay_text = text_view

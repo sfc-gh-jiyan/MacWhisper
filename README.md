@@ -16,7 +16,8 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 - **Qwen3-ASR engine (v0.7)** — Qwen3-ASR 0.6B / 1.7B: much more accurate on mixed Chinese-English speech, 5.6× (0.6B) / 2.6× (1.7B) faster than Whisper Large, keeps English verbatim (never translates). Whisper stays loaded as an automatic fallback
 - **5 models** — Whisper Small / Medium / Large and Qwen3 0.6B / 1.7B, switchable on the fly
 - **Menu bar status** — 🎙 Ready / 🔴 Recording / 💬 Transcribing / 🌐 Translate mode
-- **Keyboard shortcuts** — `Ctrl+Shift+M` models, `Ctrl+Shift+T` translate, `Ctrl+Shift+S` live subtitles, `Ctrl+Shift+R` meeting mode
+- **Customizable shortcuts** — defaults: hold Right ⌥ to talk, `⌃⌥M` or `⌃⇧F8` meeting, `⌃⇧M` model, `⌃⇧T` translate, `⌃⇧S` live subtitles; change any of them in **Settings…**
+- **Settings window** — every option on one page (menu bar → Settings…, `⌘,`)
 - **Persistent settings** — Model choice and all toggles survive app restarts
 - **100% local** — All processing on Apple Silicon GPU, no data leaves your machine
 
@@ -61,7 +62,7 @@ make qwen-setup        # or ./scripts/setup_qwen.sh
 ./run.sh
 ```
 
-This creates a separate environment `.venv-qwen` (needs [uv](https://docs.astral.sh/uv/) or Python 3.12) and downloads Qwen3-ASR 0.6B (~2.9 GB on disk; 1.7B is ~7.6 GB and downloads when first selected). The app's own environment is not changed. Once `.venv-qwen` exists, the next launch switches to **Qwen3 0.6B** automatically. Qwen3 runs as a separate background process; its log is `~/.macwhisper/logs/qwen_sidecar.log`.
+This creates a separate environment `.venv-qwen` (needs [uv](https://docs.astral.sh/uv/) or Python 3.12) and downloads Qwen3-ASR 1.7B (~7.6 GB on disk; 0.6B is ~2.9 GB and downloads when first selected). The app's own environment is not changed. Once `.venv-qwen` exists, the next launch switches to **Qwen3 1.7B** automatically. Qwen3 runs as a separate background process; its log is `~/.macwhisper/logs/qwen_sidecar.log`.
 
 ### Required Permissions (Important!)
 
@@ -105,12 +106,15 @@ A microphone icon (🎙) appears in your menu bar. That's it — you're ready.
 
 | Action | How |
 |---|---|
-| **Record & transcribe** | Hold **Right Option**, speak, release |
-| **Live Subtitles** | **Ctrl+Shift+S** or menu toggle |
-| **Meeting Mode** | **Ctrl+Shift+R** or menu toggle |
-| **Switch model** | **Ctrl+Shift+M** or menu |
-| **Toggle translation** | **Ctrl+Shift+T** or menu |
+| **Record & transcribe** | Hold **Right ⌥**, speak, release |
+| **Meeting Mode** | **⌃⌥M** or **⌃⇧F8**, the menu, or **■ Stop** in the meeting subtitle window |
+| **Switch model** | **⌃⇧M** or the menu |
+| **Live Subtitles** | **⌃⇧S** or Settings |
+| **Toggle translation** | **⌃⇧T** or Settings |
+| **All options / change shortcuts** | Menu bar → **Settings…** (`⌘,`) |
 | **Quit** | Click menu bar icon → Quit |
+
+All shortcuts are defaults and can be changed in Settings: click a shortcut, press the new keys (Esc cancels). Push to Talk can be Right ⌥/⌘/⌃/⇧ or F1–F20. Meeting Mode moved from ⌃⇧R (v0.7.0 and earlier) to ⌃⌥M / ⌃⇧F8.
 
 ### Menu Bar Icons
 
@@ -187,7 +191,7 @@ Settings are stored in `~/.macwhisper/config.json`:
   "save_audio": false,
   "log_level": "WARNING",
   "engine": "qwen",
-  "qwen_model": "mlx-community/Qwen3-ASR-0.6B-bf16",
+  "qwen_model": "mlx-community/Qwen3-ASR-1.7B-bf16",
   "qwen_strip_fillers": true,
   "qwen_tight_spacing": true,
   "meeting_final_pass": true

@@ -4,6 +4,36 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.1] — 2026-10-19
+
+### Added
+- **Stop button in the meeting subtitle window**: a red **■ Stop** pinned to the top-right corner. It asks "End the meeting?" first. Confirming does exactly what the menu Stop does. Focus then returns to the app you were using.
+- **Settings window** (menu bar → **Settings…**, `⌘,`): every option on one page.
+  - Model.
+  - Push to Talk live subtitles, translate and save audio.
+  - Meeting subtitles, save meeting audio and the final Qwen3 transcript.
+  - Qwen3 filler removal and Chinese/English spacing.
+  - All keyboard shortcuts.
+  - Changes apply immediately and are saved.
+- **Customizable shortcuts**: click a shortcut in Settings and press the new keys. Esc cancels. Invalid keys or conflicts are explained, and you can try again. **Default** resets it. Each action can have a second shortcut.
+  - Push to Talk can be Right ⌥/⌘/⌃/⇧ or F1–F20.
+  - Global shortcuts are paused while one is being recorded.
+
+### Changed
+- **Default Qwen3 model is now 1.7B** (was 0.6B). This only applies when the config has no `qwen_model`; a saved choice is kept.
+- **Meeting shortcut: ⌃⇧R → ⌃⌥M and ⌃⇧F8**, because ⌃⇧R conflicted with CoCo. The meeting window label shows the current shortcut.
+- **Slim menu**: status, the five models, Start/Stop Meeting and Settings…. The Push to Talk / Meeting / Shortcuts submenus are gone.
+- **Push to Talk ignores the key while another modifier is held** (⌃, ⇧ or ⌘), so ⌃⌥M never starts a recording. If Right ⌥ was pressed first and ⌃⌥M follows, the accidental recording is discarded: nothing is transcribed or pasted.
+- With Push to Talk on Right ⌘/⌃/⇧, using that modifier for another shortcut (⌘C…) discards the recording. Right ⌥ behaves as before.
+
+### Fixed
+- **Meeting shortcut started a second meeting.** Holding the shortcut produced macOS key auto-repeat, and each repeat toggled the meeting (start, stop, start within one second). The same shortcut now starts and stops a meeting:
+  - Auto-repeat is ignored for every shortcut.
+  - Start/stop ignores further toggles for 1 s.
+  - A second meeting can never start while one is running.
+- A modifier "stuck" after a lost key release (for example in a password field) could silently disable Push to Talk, or turn typing into a shortcut. Modifier state now resyncs from the modifier flags of each key event. These are the flags at the moment the key was pressed, so a fast ⌃⌥M whose keys are already up when it is processed still works.
+- Tests could overwrite `~/.macwhisper/config.json`. Every test now uses temp files, and the test run fails if the real config changes.
+
 ## [0.7.0] — 2026-10-19
 
 ### Added

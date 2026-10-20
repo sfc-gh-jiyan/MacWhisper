@@ -13,6 +13,8 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pytest
 
+CTRL, ALT, SHIFT = 262144, 524288, 131072   # CGEvent/NSEvent modifier flag bits
+
 
 # ── Helpers ───────────────────────────────────────────────────
 
@@ -545,7 +547,10 @@ def test_data_dir_constant():
     import app
     assert hasattr(app, "_DATA_DIR")
     assert app._DATA_DIR.endswith(".macwhisper")
-    assert app.CONFIG_PATH.endswith(os.path.join(".macwhisper", "config.json"))
+    # CONFIG_PATH itself is redirected to a temp file for every test (conftest);
+    # check the production definition instead.
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    assert 'CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")' in src
     assert hasattr(app, "LOG_DIR")
     assert app.LOG_DIR.endswith(os.path.join(".macwhisper", "logs"))
 
@@ -1009,21 +1014,151 @@ def test_hotkey_listener_restarts_after_it_dies():
     inst._reporter.report.assert_called_once()
 
 
-def test_ctrl_shift_hotkeys_run_on_main_thread():
+def _hotkey_app():
     import app
+    import shortcuts
     inst = _bare_app()
-    inst._ctrl_pressed = True
-    inst._shift_pressed = True
+    inst._held_mods = set()
+    inst.shortcuts = shortcuts.merged({})
     inst._meeting_session = None
+    inst.recording = False
+    inst._ptt_cancelled = False
     inst._toggle_meeting_mode = MagicMock()
-    key = MagicMock()
-    key.vk = 15  # R
+    inst._cycle_model = MagicMock()
+    inst._start_recording = MagicMock()
+    inst._stop_and_transcribe = MagicMock()
+    inst._cancel_recording = MagicMock()
+    return inst
+
+
+def _press(inst, *keys):
+    for k in keys:
+        inst._on_press(k)
+
+
+def _release(inst, *keys):
+    for k in keys:
+        inst._on_release(k)
+
+
+def _run_sync_threads(monkeypatch):
+    import app
+
+    class SyncThread:
+        def __init__(self, target, args=(), daemon=None, **kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+    monkeypatch.setattr(app.threading, "Thread", SyncThread)
+
+
+def test_combo_hotkeys_run_on_main_thread():
+    import app
+    from pynput.keyboard import Key, KeyCode
+    inst = _hotkey_app()
     with patch.object(app.AppHelper, "callAfter") as call_after:
-        t = threading.Thread(target=inst._on_press, args=(key,))
+        t = threading.Thread(target=_press, args=(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ")))
         t.start()
         t.join()
     inst._toggle_meeting_mode.assert_not_called()  # not on the listener thread
     call_after.assert_called_once()
+
+
+def test_default_meeting_shortcuts_and_old_ctrl_shift_r_is_gone(monkeypatch):
+    import app
+    from pynput.keyboard import Key, KeyCode
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ")); _release(inst, Key.alt, Key.ctrl)
+    _press(inst, Key.ctrl, Key.shift, Key.f8); _release(inst, Key.shift, Key.ctrl)
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(15, char="R")); _release(inst, Key.shift, Key.ctrl)
+    assert inst._toggle_meeting_mode.call_count == 2
+
+
+def test_custom_shortcut_from_config(monkeypatch):
+    import app
+    import shortcuts
+    from pynput.keyboard import Key, KeyCode
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"cycle_model": ["ctrl+cmd+vk46"]})
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(46)); _release(inst, Key.shift, Key.ctrl)
+    inst._cycle_model.assert_not_called()                      # old default no longer bound
+    _press(inst, Key.ctrl, Key.cmd, KeyCode.from_vk(46)); _release(inst, Key.cmd, Key.ctrl)
+    inst._cycle_model.assert_called_once()
+
+
+def test_push_to_talk_custom_key(monkeypatch):
+    import shortcuts
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"push_to_talk": ["f13"]})
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()          # Right ⌥ no longer records
+    _press(inst, Key.f13)
+    inst._start_recording.assert_not_called()          # ⌥ still held: not a plain F13
+    _release(inst, Key.f13, Key.alt_r)
+    _press(inst, Key.f13)
+    inst._start_recording.assert_called_once()
+    inst.recording = True
+    _release(inst, Key.f13)
+    inst._stop_and_transcribe.assert_called_once()
+
+
+def test_ptt_not_started_while_ctrl_held(monkeypatch):
+    """⌃ then Right ⌥ (start of ⌃⌥M) must not start a recording."""
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl, Key.alt_r)
+    inst._start_recording.assert_not_called()
+
+
+def test_combo_with_right_option_cancels_started_recording(monkeypatch):
+    """Right ⌥ pressed first (recording starts), then ⌃+M: cancel, toggle meeting, no paste."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+    inst.recording = True
+    _press(inst, Key.ctrl, KeyCode.from_vk(46, char="µ"))
+    inst._cancel_recording.assert_called_once()
+    inst._toggle_meeting_mode.assert_called_once()
+    _release(inst, Key.ctrl, Key.alt_r)
+    inst._stop_and_transcribe.assert_not_called()             # nothing transcribed/pasted
+
+
+def test_ptt_ignored_during_meeting(monkeypatch):
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._meeting_session = MagicMock(is_recording=True)
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()
+
+
+def test_modifier_state_is_tracked_left_and_right():
+    from pynput.keyboard import Key
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl_r, Key.shift)
+    assert inst._held_mods == {"ctrl", "shift"}
+    _release(inst, Key.ctrl_r)
+    assert inst._held_mods == {"shift"}
+
+
+def test_shortcuts_saved_to_config(tmp_config):
+    import shortcuts
+    inst = _engine_app()
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+cmd+vk46"]})
+    inst._save_config()
+    cfg = json.loads(tmp_config.read_text())
+    assert cfg["shortcuts"]["meeting"] == ["ctrl+cmd+vk46"]
+    assert cfg["shortcuts"]["push_to_talk"] == ["alt_r"]
 
 
 def test_fast_release_closes_late_stream():
@@ -1206,12 +1341,32 @@ def test_meeting_session_gets_save_audio_flag():
     assert "save_audio=self.save_meeting_audio" in source
 
 
-def test_menu_grouped_into_submenus():
+def _menu_app():
     import app
-    source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
-    assert 'rumps.MenuItem("Push to Talk")' in source
-    assert 'rumps.MenuItem("Meeting")' in source
-    assert 'rumps.MenuItem("Shortcuts")' in source
+    inst = _engine_app()
+    inst.model_items = {k: MagicMock(title=k) for k in app.ALL_MODEL_KEYS}
+    inst.item_meeting = MagicMock(title="   Meeting Mode: Off")
+    return inst
+
+
+def test_main_menu_is_slim_models_meeting_settings():
+    """v0.7.1: no submenus; options live in the Settings window."""
+    import app
+    inst = _menu_app()
+    menu = inst._build_menu()
+    assert not any(isinstance(entry, (list, tuple)) for entry in menu)   # no submenus
+    titles = [getattr(e, "title", None) for e in menu if e is not app.rumps.separator]
+    assert titles[0] == "Status: Ready"
+    for label in app.ALL_MODEL_KEYS:
+        assert inst.model_items[label] in menu
+    assert inst.item_meeting in menu
+    assert any(t and t.startswith("Settings") for t in titles)
+
+
+def test_settings_menu_item_has_cmd_comma():
+    inst = _menu_app()
+    settings = [e for e in inst._build_menu() if getattr(e, "title", "").startswith("Settings")][0]
+    assert settings.key == ","
 
 
 # ── Test: Qwen3-ASR engine wiring (v0.7.0) ────────────────────
@@ -1453,3 +1608,455 @@ def test_alert_rearms_after_qwen_recovers():
     q.fail = True
     inst._final_text(*audio)                 # fails again -> alert 2 (not silent)
     assert inst._reporter.report.call_count == 2
+
+
+def test_stale_modifier_from_lost_release_does_not_block_ptt(monkeypatch):
+    """Lost Ctrl release (e.g. secure input) must not disable Push to Talk forever."""
+    import app
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._held_mods = {"ctrl"}                                  # stale: Ctrl is really up
+    inst._event_flags = ALT                                     # event: only Right ⌥ down
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+    assert inst._held_mods == {"alt"}
+
+
+def test_real_ctrl_still_blocks_ptt(monkeypatch):
+    import app
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._held_mods = {"ctrl"}
+    inst._event_flags = CTRL | ALT
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()
+
+
+def test_no_event_flags_keeps_tracked_state(monkeypatch):
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._event_flags = None                                    # flags unavailable
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+
+
+def test_fast_combo_uses_event_flags_not_current_state(monkeypatch):
+    """Regression: resync used the CURRENT keyboard state; a fast ⌃⌥M whose
+    modifiers were already released when M was processed was dropped."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl, Key.alt)
+    inst._event_flags = CTRL | ALT          # what the M event itself carried
+    _press(inst, KeyCode.from_vk(46, char="µ"))
+    inst._toggle_meeting_mode.assert_called_once()
+
+
+def test_event_flags_are_used_once(monkeypatch):
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._held_mods = {"ctrl", "alt"}
+    inst._event_flags = 0                   # this event: no modifiers
+    _press(inst, KeyCode.from_vk(46))
+    assert inst._event_flags is None and inst._held_mods == set()
+    inst._toggle_meeting_mode.assert_not_called()
+
+
+def test_flag_listener_hands_event_flags_to_app_before_callbacks():
+    import Quartz
+    import app
+    seen = []
+    order = []
+
+    class Sink:
+        _event_flags = None
+
+    sink = Sink()
+    lst = app._flag_listener_cls(app.keyboard.Listener)(sink, on_press=lambda k, *a: order.append(("press", sink._event_flags)),
+                            on_release=lambda k, *a: None)
+    ev = Quartz.CGEventCreateKeyboardEvent(None, 46, True)
+    Quartz.CGEventSetFlags(ev, Quartz.kCGEventFlagMaskControl | Quartz.kCGEventFlagMaskAlternate)
+    lst._handle_message(None, Quartz.kCGEventKeyDown, ev, None, False)
+    assert order and order[0][1] is not None
+    assert order[0][1] & (CTRL | ALT) == CTRL | ALT
+
+
+def test_cancel_recording_discards_audio_without_transcribing(monkeypatch):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _bare_app()
+    inst.recording = True
+    old_frames = [np.zeros((1600, 1), dtype=np.int16)]
+    inst.frames = old_frames
+    inst._overlay_panel = MagicMock()
+    inst._destroy_overlay = MagicMock()
+    inst._close_mic_stream = MagicMock()
+    inst._idle_icon = "🎙"
+    inst.transcribe_queue = MagicMock()
+    inst._cancel_recording()
+    assert inst.recording is False
+    assert inst.frames == [] and inst.frames is not old_frames      # live loop sees a new list
+    inst._close_mic_stream.assert_called_once()
+    inst._destroy_overlay.assert_called_once()
+    inst.transcribe_queue.put.assert_not_called()
+
+
+def test_overlay_stop_ends_running_meeting():
+    inst = _meeting_app(in_meeting=True)
+    inst._meeting_session.is_recording = True
+    inst._stop_meeting = MagicMock()
+    inst._start_meeting = MagicMock()
+    inst._stop_meeting_from_overlay()
+    inst._stop_meeting.assert_called_once()
+    inst._start_meeting.assert_not_called()
+
+
+def test_overlay_stop_after_meeting_already_ended_never_starts_a_new_one():
+    """Confirm dialog open while the meeting was stopped by shortcut: do nothing."""
+    inst = _meeting_app(in_meeting=False)
+    inst._stop_meeting = MagicMock()
+    inst._start_meeting = MagicMock()
+    inst._stop_meeting_from_overlay()
+    inst._stop_meeting.assert_not_called()
+    inst._start_meeting.assert_not_called()
+
+
+def test_meeting_overlay_gets_stop_callback(monkeypatch):
+    import app
+    seen = {}
+
+    def fake_create(mode, frame_path, on_stop=None):
+        seen[mode] = on_stop
+        return MagicMock(), MagicMock()
+    monkeypatch.setattr(app, "create_overlay", fake_create)
+    inst = _meeting_app()
+    inst._create_overlay(mode="meeting")
+    inst._create_overlay(mode="talk")
+    assert seen["meeting"] == inst._stop_meeting_from_overlay
+    assert seen["talk"] is None
+
+
+# ── Settings wiring (v0.7.1) ──────────────────────────────────
+
+def test_shortcuts_paused_while_recording_one(monkeypatch):
+    """Recording ⌃⌥M in Settings must not toggle the meeting."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._shortcuts_paused = True
+    _press(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ"))
+    _press(inst, Key.alt_r)
+    inst._toggle_meeting_mode.assert_not_called()
+    inst._start_recording.assert_not_called()
+    assert inst._held_mods == {"ctrl", "alt"}                  # still tracked
+    _release(inst, Key.ctrl, Key.alt, Key.alt_r)
+    assert inst._held_mods == set()
+    inst._shortcuts_paused = False
+    _press(inst, Key.ctrl, Key.alt, KeyCode.from_vk(46, char="µ"))
+    inst._toggle_meeting_mode.assert_called_once()
+
+
+def test_set_pref_saves_and_updates_running_qwen(tmp_config):
+    inst = _engine_app()
+    inst._qwen = MagicMock(strip_fillers=True, tight=True)
+    inst._set_pref("qwen_strip_fillers", False)
+    inst._set_pref("qwen_tight_spacing", False)
+    inst._set_pref("meeting_final_pass", False)
+    assert inst._qwen.strip_fillers is False and inst._qwen.tight is False
+    cfg = json.loads(tmp_config.read_text())
+    assert cfg["qwen_strip_fillers"] is False and cfg["meeting_final_pass"] is False
+
+
+def test_set_pref_rejects_unknown_name():
+    inst = _engine_app()
+    with pytest.raises(ValueError):
+        inst._set_pref("recording", True)
+
+
+def test_set_shortcuts_saves_and_applies(tmp_config):
+    import shortcuts
+    inst = _engine_app()
+    new = shortcuts.merged({"meeting": ["ctrl+cmd+vk46"]})
+    inst._set_shortcuts(new)
+    assert inst.shortcuts == new
+    assert json.loads(tmp_config.read_text())["shortcuts"]["meeting"] == ["ctrl+cmd+vk46"]
+
+
+def test_open_settings_builds_window_once(monkeypatch):
+    import app
+    inst = _menu_app()
+    created = []
+
+    class FakeWindow:
+        def __init__(self, a, labels):
+            created.append(labels)
+            self.shown = 0
+
+        def show(self):
+            self.shown += 1
+    monkeypatch.setattr(app.settings_window, "SettingsWindow", FakeWindow)
+    inst._settings = None
+    inst._open_settings(None)
+    inst._open_settings(None)
+    assert len(created) == 1 and created[0] == app.ALL_MODEL_KEYS
+    assert inst._settings.shown == 2
+
+
+def test_shortcut_action_refreshes_open_settings(monkeypatch):
+    import app
+    from pynput.keyboard import Key, KeyCode
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._shortcuts_paused = False
+    inst._settings = MagicMock()
+    inst._toggle_translate = MagicMock()
+    inst._on_main = lambda fn, *a: fn(*a)
+    inst._guarded = lambda fn, where: fn
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(17, char="T"))
+    inst._toggle_translate.assert_called_once()
+    inst._settings.refresh.assert_called_once()
+
+
+# ── v0.7.1 bug hunt ───────────────────────────────────────────
+
+def test_right_cmd_ptt_cancelled_by_cmd_c(monkeypatch):
+    """PTT = Right ⌘: ⌘C must not record-and-paste."""
+    import shortcuts
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"push_to_talk": ["cmd_r"]})
+    _press(inst, Key.cmd_r)
+    inst._start_recording.assert_called_once()
+    inst.recording = True
+    _press(inst, KeyCode.from_vk(8, char="c"))
+    inst._cancel_recording.assert_called_once()
+    _release(inst, KeyCode.from_vk(8), Key.cmd_r)
+    inst._stop_and_transcribe.assert_not_called()
+
+
+def test_right_option_ptt_unchanged_when_other_key_pressed(monkeypatch):
+    """Default Right ⌥ keeps v0.7.0 behavior exactly."""
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    _press(inst, Key.alt_r)
+    inst.recording = True
+    _press(inst, KeyCode.from_vk(0, char="å"))
+    inst._cancel_recording.assert_not_called()
+    _release(inst, KeyCode.from_vk(0), Key.alt_r)
+    inst._stop_and_transcribe.assert_called_once()
+
+
+def test_meeting_toggle_debounced_after_overlay_stop(monkeypatch):
+    """⌃⌥M pressed while the Stop confirm dialog was open must not start a new meeting."""
+    import app
+    inst = _meeting_app(in_meeting=True)
+    inst._meeting_session.is_recording = True
+    t = {"now": 100.0}
+    monkeypatch.setattr(app.time, "monotonic", lambda: t["now"])
+    inst._stop_meeting = MagicMock(side_effect=lambda: setattr(inst, "_meeting_session", None))
+    inst._start_meeting = MagicMock()
+    inst._stop_meeting_from_overlay()
+    t["now"] += 0.3
+    inst._toggle_meeting_mode(None)                  # queued shortcut
+    inst._start_meeting.assert_not_called()
+    t["now"] += 2.0
+    inst._toggle_meeting_mode(None)                  # a deliberate press later works
+    inst._start_meeting.assert_called_once()
+
+
+def test_set_model_refreshes_settings_window():
+    import app
+    inst = _menu_app()
+    inst._settings = MagicMock()
+    inst._warmup_model = MagicMock()
+    inst._set_status = MagicMock()
+    inst._set_model("Large (Best)")
+    inst._settings.refresh.assert_called_once()
+
+
+def test_combo_ending_in_ptt_key_still_fires(monkeypatch):
+    """Reviewer: PTT = F8 must not swallow ⌃⇧F8 (meeting)."""
+    import app
+    import shortcuts
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst.shortcuts = shortcuts.merged({"push_to_talk": ["f8"]})
+    _press(inst, Key.ctrl, Key.shift, Key.f8)
+    inst._start_recording.assert_not_called()
+    inst._toggle_meeting_mode.assert_called_once()
+    _release(inst, Key.f8)
+    inst._stop_and_transcribe.assert_not_called()
+
+
+def test_stale_modifier_does_not_fire_combo_while_typing(monkeypatch):
+    """Reviewer: stale ⌃ + typing ⇧S must not toggle live subtitles."""
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._toggle_live_mode = MagicMock()
+    inst._held_mods = {"ctrl", "shift"}                        # ⌃ is stale
+    inst._event_flags = SHIFT                                   # the S event: only ⇧
+    _press(inst, KeyCode.from_vk(1, char="S"))
+    inst._toggle_live_mode.assert_not_called()
+    assert inst._held_mods == {"shift"}
+
+
+def test_talk_overlay_not_created_after_recording_was_cancelled(monkeypatch):
+    """Reviewer: queued overlay creation must not outlive a cancelled recording."""
+    import app
+    created = []
+    monkeypatch.setattr(app, "create_overlay", lambda *a, **k: created.append(1) or (MagicMock(), MagicMock()))
+    inst = _meeting_app()
+    inst.recording = False
+    inst._create_overlay()                                     # talk mode, recording over
+    assert created == [] and inst._overlay_panel is None
+    inst.recording = True
+    inst._create_overlay()
+    assert created == [1]
+
+
+def test_meeting_stop_hint_follows_shortcuts():
+    import overlay
+    import shortcuts
+    inst = _engine_app()
+    inst._set_shortcuts(shortcuts.merged({"meeting": ["ctrl+cmd+vk46", "ctrl+shift+f8"]}))
+    assert overlay.meeting_stop_hint == "⌃⌘M"
+    inst._set_shortcuts(shortcuts.merged({"meeting": []}))
+    assert overlay.meeting_stop_hint == ""
+    inst._set_shortcuts(shortcuts.merged({}))
+    assert overlay.meeting_stop_hint == "⌃⌥M"
+
+
+def test_default_qwen_model_is_1_7b():
+    """User choice (2026-10-19): Qwen3 1.7B is the default engine model."""
+    import app
+    assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-1.7B-bf16"
+
+
+# ── Meeting shortcut: auto-repeat and double start (user report 19:47) ──
+
+def _meeting_hotkey_app(monkeypatch, clock):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    monkeypatch.setattr(app.time, "monotonic", lambda: clock["t"])
+    inst = _hotkey_app()
+    inst._shortcuts_paused = False
+    inst._on_main = lambda fn, *a: fn(*a)
+    inst._guarded = lambda fn, where: fn
+    del inst._toggle_meeting_mode            # use the real toggle
+    state = {"running": False, "starts": 0, "stops": 0}
+
+    def start():
+        state["running"] = True
+        state["starts"] += 1
+        inst._meeting_session = MagicMock(is_recording=True)
+
+    def stop():
+        state["running"] = False
+        state["stops"] += 1
+        inst._meeting_session = None
+    inst._start_meeting = start
+    inst._stop_meeting = stop
+    return inst, state
+
+
+def _combo(inst, clock, hold_repeats=0, step=0.05):
+    from pynput.keyboard import Key, KeyCode
+    m = KeyCode.from_vk(46, char="M")
+    inst._on_press(Key.ctrl)
+    inst._on_press(Key.shift)
+    inst._on_press(m)
+    for _ in range(hold_repeats):        # macOS key auto-repeat while held
+        clock["t"] += step
+        inst._on_press(m)
+    inst._on_release(m)
+    inst._on_release(Key.shift)
+    inst._on_release(Key.ctrl)
+
+
+def test_holding_meeting_shortcut_toggles_once(monkeypatch):
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    _combo(inst, clock, hold_repeats=20)          # held ~1 s: 20 repeat events
+    assert state == {"running": True, "starts": 1, "stops": 0}
+
+
+def test_same_shortcut_starts_then_stops(monkeypatch):
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    _combo(inst, clock)
+    clock["t"] += 5.0
+    _combo(inst, clock)
+    assert state == {"running": False, "starts": 1, "stops": 1}
+
+
+def test_second_start_within_a_second_is_ignored(monkeypatch):
+    """Even a separate press right after starting must not stop/restart it."""
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    _combo(inst, clock)
+    clock["t"] += 0.4
+    _combo(inst, clock)
+    clock["t"] += 0.4
+    _combo(inst, clock)
+    assert state == {"running": True, "starts": 1, "stops": 0}
+
+
+def test_lost_key_release_does_not_block_next_press(monkeypatch):
+    from pynput.keyboard import Key, KeyCode
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst.shortcuts = shortcuts.merged({"meeting": ["ctrl+shift+vk46"], "cycle_model": ["ctrl+shift+vk31"]})
+    m = KeyCode.from_vk(46, char="M")
+    inst._on_press(Key.ctrl); inst._on_press(Key.shift); inst._on_press(m)   # no release for M
+    clock["t"] += 3.0
+    inst._on_press(m)                                                       # a real new press
+    assert state["starts"] == 1 and state["stops"] == 1
+
+
+def test_auto_repeat_ignored_for_other_shortcuts_too(monkeypatch):
+    from pynput.keyboard import Key, KeyCode
+    import shortcuts
+    clock = {"t": 100.0}
+    inst, state = _meeting_hotkey_app(monkeypatch, clock)
+    inst._cycle_model = MagicMock()
+    inst.shortcuts = shortcuts.merged({"cycle_model": ["ctrl+shift+vk31"]})
+    o = KeyCode.from_vk(31, char="O")
+    inst._on_press(Key.ctrl); inst._on_press(Key.shift)
+    for _ in range(10):
+        inst._on_press(o); clock["t"] += 0.05
+    inst._cycle_model.assert_called_once()
+
+
+def test_start_meeting_refuses_when_one_is_running():
+    inst = _meeting_app(in_meeting=True)
+    inst._meeting_session.is_recording = True
+    running = inst._meeting_session
+    inst.recording = False
+    inst._backend_ready = MagicMock()
+    inst._start_meeting()
+    assert inst._meeting_session is running          # untouched, no second session
+    inst._backend_ready.wait.assert_not_called()

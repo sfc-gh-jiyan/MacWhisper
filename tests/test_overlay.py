@@ -112,3 +112,110 @@ def test_overlay_window_level_stays_high():
         assert panel.level() == 1000
     finally:
         overlay.destroy_overlay(panel)
+
+
+# ── Meeting overlay Stop button (v0.7.1) ──────────────────────
+
+def _real_panel(mode, on_stop=None):
+    pytest.importorskip("AppKit")
+    from AppKit import NSApplication
+    NSApplication.sharedApplication()
+    panel, _ = overlay.create_overlay(mode, None, on_stop=on_stop)
+    return panel
+
+
+def _stop_button(panel):
+    from AppKit import NSButton
+    return [v for v in panel.contentView().subviews() if isinstance(v, NSButton)]
+
+
+def test_meeting_overlay_has_stop_button_on_top():
+    panel = _real_panel("meeting", on_stop=lambda: None)
+    try:
+        buttons = _stop_button(panel)
+        assert len(buttons) == 1
+        assert "Stop" in buttons[0].title()
+        # Must be ABOVE the full-size drag view, otherwise clicks never reach it
+        assert panel.contentView().subviews()[-1] is buttons[0]
+    finally:
+        overlay.destroy_overlay(panel)
+
+
+def test_no_stop_button_for_talk_or_without_callback():
+    for mode, cb in (("talk", lambda: None), ("meeting", None)):
+        panel = _real_panel(mode, on_stop=cb)
+        try:
+            assert _stop_button(panel) == []
+        finally:
+            overlay.destroy_overlay(panel)
+
+
+@pytest.mark.parametrize("confirmed, expected_calls", [(True, 1), (False, 0)])
+def test_stop_button_asks_for_confirmation(monkeypatch, confirmed, expected_calls):
+    calls = []
+    panel = _real_panel("meeting", on_stop=lambda: calls.append(1))
+    try:
+        monkeypatch.setattr(overlay, "_confirm_stop", lambda: confirmed)
+        btn = _stop_button(panel)[0]
+        btn.performClick_(None)
+        assert len(calls) == expected_calls
+    finally:
+        overlay.destroy_overlay(panel)
+
+
+def test_stop_button_stays_top_right_when_resized():
+    from AppKit import NSMakeRect
+    panel = _real_panel("meeting", on_stop=lambda: None)
+    try:
+        btn = _stop_button(panel)[0]
+        f = panel.frame()
+        panel.setFrame_display_(NSMakeRect(f.origin.x, f.origin.y, f.size.width + 200, f.size.height + 80), False)
+        cf = panel.contentView().frame()
+        bf = btn.frame()
+        assert cf.size.width - (bf.origin.x + bf.size.width) < 20       # near right edge
+        assert cf.size.height - (bf.origin.y + bf.size.height) < 20     # near top edge
+    finally:
+        overlay.destroy_overlay(panel)
+
+
+def test_stop_callback_error_is_contained(monkeypatch, caplog):
+    def boom():
+        raise RuntimeError("stop failed")
+    panel = _real_panel("meeting", on_stop=boom)
+    try:
+        monkeypatch.setattr(overlay, "_confirm_stop", lambda: True)
+        _stop_button(panel)[0].performClick_(None)      # must not raise into AppKit
+        assert "stop failed" in caplog.text
+    finally:
+        overlay.destroy_overlay(panel)
+
+
+def test_destroy_detaches_stop_button_target():
+    panel = _real_panel("meeting", on_stop=lambda: None)
+    btn = _stop_button(panel)[0]
+    assert btn.target() is not None
+    overlay.destroy_overlay(panel)
+    assert btn.target() is None
+    assert not [k for k in overlay._delegates if isinstance(k, tuple)]
+
+
+def test_confirm_stop_returns_focus_to_previous_app(monkeypatch):
+    """After the dialog, the user's app must be frontmost again (auto-paste target)."""
+    pytest.importorskip("AppKit")
+    prev = MagicMock()
+    monkeypatch.setattr(overlay, "_frontmost_app", lambda: prev)
+    alert = MagicMock()
+    alert.runModal.return_value = 1001          # Cancel
+    monkeypatch.setattr(overlay, "_make_alert", lambda: alert)
+    assert overlay._confirm_stop() is False
+    prev.activateWithOptions_.assert_called_once()
+
+
+def test_meeting_label_shows_current_stop_shortcut(monkeypatch):
+    """Label must not advertise the removed ⌃⇧R."""
+    assert "Ctrl+Shift+R" not in overlay.meeting_label()
+    monkeypatch.setattr(overlay, "meeting_stop_hint", "⌃⌘M")
+    assert "⌃⌘M" in overlay.meeting_label()
+    monkeypatch.setattr(overlay, "meeting_stop_hint", "")
+    assert overlay.meeting_label().startswith("● Meeting Recording")
+    assert "to stop" not in overlay.meeting_label() or "Stop" in overlay.meeting_label()
