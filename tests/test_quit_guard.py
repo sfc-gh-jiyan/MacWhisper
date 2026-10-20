@@ -138,3 +138,45 @@ def test_run_cleanup_accepts_event_arguments():
                                  deadline_s=1, exit_fn=lambda c: None)
     guard.run_cleanup("sender", reason="quit")
     assert calls == [1]
+
+
+def test_deadline_waits_for_a_running_cleanup_to_finish():
+    """Review CRITICAL: run_cleanup marked itself done before cleanup finished,
+    so the deadline thread could os._exit mid-write (truncated meeting file)."""
+    events = []
+    started = threading.Event()
+
+    def slow_cleanup():
+        started.set()
+        time.sleep(0.4)                  # e.g. writing the meeting files
+        events.append("cleanup finished")
+
+    def exit_fn(code):
+        events.append("exit")
+    guard = quit_guard.QuitGuard(request_quit=lambda: None, cleanup=slow_cleanup,
+                                 deadline_s=0.05, exit_fn=exit_fn, cleanup_wait_s=5)
+    t = threading.Thread(target=guard.run_cleanup)   # the normal Quit path
+    t.start()
+    started.wait(1)
+    guard.on_signal()                                 # deadline fires during cleanup
+    deadline = time.monotonic() + 3
+    while "exit" not in events and time.monotonic() < deadline:
+        time.sleep(0.01)
+    t.join(2)
+    assert events == ["cleanup finished", "exit"]
+
+
+def test_deadline_does_not_wait_forever_for_a_stuck_cleanup():
+    exits = []
+
+    def stuck():
+        time.sleep(30)
+    guard = quit_guard.QuitGuard(request_quit=lambda: None, cleanup=stuck,
+                                 deadline_s=0.01, exit_fn=exits.append, cleanup_wait_s=0.3)
+    threading.Thread(target=guard.run_cleanup, daemon=True).start()
+    time.sleep(0.05)
+    t0 = time.monotonic()
+    guard.on_signal()
+    while not exits and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    assert exits == [0] and time.monotonic() - t0 < 2

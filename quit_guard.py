@@ -25,14 +25,17 @@ logger = logging.getLogger(__name__)
 
 
 class QuitGuard:
-    def __init__(self, request_quit, cleanup, deadline_s: float = 5.0, exit_fn=os._exit):
+    def __init__(self, request_quit, cleanup, deadline_s: float = 5.0, exit_fn=os._exit,
+                 cleanup_wait_s: float = 8.0):
         self._request_quit = request_quit
         self._cleanup = cleanup
         self._deadline_s = deadline_s
+        self._cleanup_wait_s = cleanup_wait_s
         self._exit = exit_fn
         self._lock = threading.Lock()
         self._signalled = False
-        self._cleaned = False
+        self._started = False
+        self._done = threading.Event()   # set only when cleanup has FINISHED
 
     def run_cleanup(self, *_args, **_kwargs) -> None:
         """Clean up once (also used by the normal Quit path and atexit).
@@ -40,13 +43,22 @@ class QuitGuard:
         Accepts and ignores arguments so any event emitter can call it.
         """
         with self._lock:
-            if self._cleaned:
-                return
-            self._cleaned = True
+            already = self._started
+            self._started = True
+        if already:
+            # Another path (normal Quit vs SIGTERM deadline) is cleaning up:
+            # wait for it to FINISH, so the process never exits mid-write
+            # (e.g. a half-written meeting file). Bounded if cleanup hangs.
+            if not self._done.wait(self._cleanup_wait_s):
+                logger.error("Quit cleanup still running after %.0f s — exiting anyway",
+                             self._cleanup_wait_s)
+            return
         try:
             self._cleanup()
         except Exception:
             logger.exception("Quit cleanup failed")
+        finally:
+            self._done.set()
 
     def on_signal(self) -> None:
         with self._lock:

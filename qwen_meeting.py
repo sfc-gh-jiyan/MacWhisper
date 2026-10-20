@@ -76,6 +76,7 @@ class QwenSegmentProcessor:
         self._stable = StableText()
         self._next_decode = 0.0
         self._decoded_once = False
+        self._had_speech = False
         self.transcript_buffer.reset()
 
     def insert_audio_chunk(self, audio: np.ndarray) -> None:
@@ -84,6 +85,16 @@ class QwenSegmentProcessor:
 
     def segment_seconds(self) -> float:
         return len(self.audio_buffer) / SAMPLE_RATE
+
+    def mark_speech(self) -> None:
+        """The meeting loop saw speech (VAD) in audio fed to this segment."""
+        self._had_speech = True
+
+    def has_pending_speech(self) -> bool:
+        """Untranscribed SPEECH in this segment (not just silence) — at stop
+        it gets one more decode; silence alone must not (it re-decoded and
+        duplicated the previous sentence)."""
+        return self._had_speech and self.segment_seconds() >= 0.3
 
     def segment_full(self) -> bool:
         return self.segment_seconds() >= self.max_segment_s

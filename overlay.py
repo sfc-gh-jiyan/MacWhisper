@@ -421,6 +421,7 @@ def cap_tail(text: str, limit: int = GRAY_TAIL_MAX_WIDTH) -> str:
     """
     if not text or display_width(text) <= limit:
         return text
+    limit -= 1                    # room for the leading "…"
     width = 0
     i = len(text)
     while i > 0 and width + _char_width(text[i - 1]) <= limit:

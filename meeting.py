@@ -126,6 +126,9 @@ class MeetingSession:
         self._mic_frames: list[np.ndarray] = []
         self._sys_frames: list[np.ndarray] = []
         self._frames_lock = threading.Lock()
+        # Serializes processor use between the loop thread and stop():
+        # a Qwen3 decode can outlast stop()'s wait (review CRITICAL).
+        self._proc_lock = threading.RLock()
 
         # Meeting data
         self._segments: list[MeetingSegment] = []
@@ -260,6 +263,32 @@ class MeetingSession:
         ready = getattr(self._processor, "ready_to_close", None)
         return True if ready is None else bool(ready(silence_ms))
 
+    def _whisper_close_remaining(self) -> None:
+        """At stop, after a Qwen3 failure: one Whisper pass over the audio
+        the fallback processor holds, committed as the last segment."""
+        from text_utils import BILINGUAL_PROMPT, convert_t2s
+        audio = getattr(self._processor, "audio_buffer", None)
+        if audio is None or len(audio) < 0.3 * SAMPLE_RATE:
+            return
+        try:
+            result = self.backend.transcribe(audio, language=self.language,
+                                             initial_prompt=BILINGUAL_PROMPT,
+                                             task="transcribe")
+            text = convert_t2s((result.text or "").strip())
+        except Exception:
+            logger.exception("Whisper fallback at stop failed — last segment lost")
+            return
+        if text:
+            self._commit_segment(text)
+
+    def _has_pending_segment(self) -> bool:
+        """Text OR untranscribed audio in the current segment (at stop:
+        a Qwen3 segment can have audio but no decode result yet)."""
+        if self._segment_has_text():
+            return True
+        pending = getattr(self._processor, "has_pending_speech", None)
+        return bool(pending()) if pending is not None else False
+
     def _segment_has_text(self) -> bool:
         """True if the current segment has confirmed OR unconfirmed words.
 
@@ -291,12 +320,20 @@ class MeetingSession:
         # Wait for loop to finish
         self._loop_done.wait(timeout=wait_s)
 
-        # Commit final segment
-        if self._processor:
-            if self._processor.committed or self._processor.transcript_buffer.peek_unconfirmed():
-                self._close_and_trim_segment()
-            self._processor.reset()
-            self._processor = None
+        # Commit final segment. Under the processor lock: if the loop thread
+        # is still inside a decode (wait timed out), wait for it to finish.
+        with self._proc_lock:
+            if self._processor:
+                if self._has_pending_segment():
+                    before = self._processor
+                    self._close_and_trim_segment()
+                    if self._processor is not before:
+                        # Qwen3 failed during that close: Whisper now holds
+                        # the audio. There is no "later" at stop, so decode
+                        # it in one pass instead of streaming thresholds.
+                        self._whisper_close_remaining()
+                self._processor.reset()
+                self._processor = None
 
         # Build full transcript
         full_text = self._build_transcript()
@@ -384,7 +421,15 @@ class MeetingSession:
         try:
             self._meeting_loop_impl()
         except Exception as e:
+            # Live transcription stopped (e.g. Qwen3 AND the Whisper fallback
+            # failed). Say so — the meeting can still be stopped and saved.
+            logger.exception("Meeting transcription loop stopped")
             print(f"[MEETING] Loop error: {e}")
+            if self._on_engine_failed:
+                try:
+                    self._on_engine_failed(e)
+                except Exception:
+                    logger.exception("on_engine_failed callback failed")
         finally:
             self._loop_done.set()
 
@@ -398,7 +443,7 @@ class MeetingSession:
         """
         last_mic_idx = 0
         last_sys_idx = 0
-        vad_skip_count = 0
+        self._vad_skip_count = 0
 
         while self.state == "recording":
             time.sleep(0.05)
@@ -418,89 +463,102 @@ class MeetingSession:
             if not mic_new and not sys_new:
                 continue
 
-            # Build chunks from each source
-            mic_chunk = np.concatenate(mic_new, axis=0).squeeze() if mic_new else None
-            sys_chunk = np.concatenate(sys_new, axis=0).squeeze() if sys_new else None
+            # Feed + transcribe under the processor lock: stop() takes the
+            # same lock, so it never uses the processor during a decode.
+            with self._proc_lock:
+                self._process_new_audio(mic_new, sys_new)
 
-            # Overlap priority selection
-            if mic_chunk is not None and sys_chunk is not None:
-                mic_rms = np.sqrt(np.mean(mic_chunk.astype(np.float32) ** 2))
-                sys_rms = np.sqrt(np.mean(sys_chunk.astype(np.float32) ** 2))
-                if sys_rms > mic_rms:
-                    chosen = sys_chunk
-                    logger.debug("overlap: sys wins (mic=%.1f sys=%.1f)", mic_rms, sys_rms)
-                else:
-                    # mic wins on tie (local speaker priority)
-                    chosen = mic_chunk
-                    logger.debug("overlap: mic wins (mic=%.1f sys=%.1f)", mic_rms, sys_rms)
-            elif mic_chunk is not None:
-                chosen = mic_chunk
-            else:
+
+    def _process_new_audio(self, mic_new, sys_new) -> None:
+        """One loop iteration on new audio (caller holds _proc_lock)."""
+        # Build chunks from each source
+        mic_chunk = np.concatenate(mic_new, axis=0).squeeze() if mic_new else None
+        sys_chunk = np.concatenate(sys_new, axis=0).squeeze() if sys_new else None
+
+        # Overlap priority selection
+        if mic_chunk is not None and sys_chunk is not None:
+            mic_rms = np.sqrt(np.mean(mic_chunk.astype(np.float32) ** 2))
+            sys_rms = np.sqrt(np.mean(sys_chunk.astype(np.float32) ** 2))
+            if sys_rms > mic_rms:
                 chosen = sys_chunk
+                logger.debug("overlap: sys wins (mic=%.1f sys=%.1f)", mic_rms, sys_rms)
+            else:
+                # mic wins on tie (local speaker priority)
+                chosen = mic_chunk
+                logger.debug("overlap: mic wins (mic=%.1f sys=%.1f)", mic_rms, sys_rms)
+        elif mic_chunk is not None:
+            chosen = mic_chunk
+        else:
+            chosen = sys_chunk
 
-            # Convert and feed to processor
-            audio_float = chosen.astype(np.float32) / 32768.0
-            self._processor.insert_audio_chunk(audio_float)
+        # Convert and feed to processor
+        audio_float = chosen.astype(np.float32) / 32768.0
+        self._processor.insert_audio_chunk(audio_float)
 
-            # VAD processing
-            if self.vad:
-                # Silero is a stateful RNN: each chunk must reach it exactly
-                # ONCE. Re-evaluating the same chunk (the old is_speech() call
-                # below) corrupted its hidden state and misclassified over
-                # half of real speech as silence.
-                vad_state = self.vad.process_chunk(chosen)
-                chunk_is_speech = vad_state["is_speech"]
+        # VAD processing
+        if self.vad:
+            # Silero is a stateful RNN: each chunk must reach it exactly
+            # ONCE. Re-evaluating the same chunk (the old is_speech() call
+            # below) corrupted its hidden state and misclassified over
+            # half of real speech as silence.
+            vad_state = self.vad.process_chunk(chosen)
+            chunk_is_speech = vad_state["is_speech"]
+            mark = getattr(self._processor, "mark_speech", None)
+            if mark is not None and chunk_is_speech:
+                mark()            # Qwen3: this segment has had real speech
 
-                # Safety: force segment break if current segment exceeds 30s.
-                # Natural speech rarely has 2s clean silence, so the extended-
-                # silence trigger alone can produce unbounded segments (56s+).
-                # A 30s cap keeps segments manageable and limits accumulation
-                # of transcription errors within a single segment.
-                # NOTE: use wall-clock time, NOT audio_buffer length — the
-                # buffer is capped at max_buffer_s (8s) by pre-inference trim.
-                MAX_SEGMENT_DURATION_S = 30.0
-                seg_elapsed = time.time() - self._segment_start_time
-                if seg_elapsed > MAX_SEGMENT_DURATION_S and self._segment_has_text():
+            # Safety: force segment break if current segment exceeds 30s.
+            # Natural speech rarely has 2s clean silence, so the extended-
+            # silence trigger alone can produce unbounded segments (56s+).
+            # A 30s cap keeps segments manageable and limits accumulation
+            # of transcription errors within a single segment.
+            # NOTE: use wall-clock time, NOT audio_buffer length — the
+            # buffer is capped at max_buffer_s (8s) by pre-inference trim.
+            MAX_SEGMENT_DURATION_S = 30.0
+            seg_elapsed = time.time() - self._segment_start_time
+            if seg_elapsed > MAX_SEGMENT_DURATION_S and self._segment_has_text():
+                self._close_and_trim_segment()
+                return
+            # Extended silence -> paragraph break (segment commit)
+            if self.vad.is_extended_silence(self.extended_silence_ms):
+                seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
+                silence_ms = getattr(self.vad, "silence_ms", self.extended_silence_ms)
+                if (seg_duration > 1.0 and self._segment_has_text()
+                        and self._may_close_on_silence(silence_ms)):
                     self._close_and_trim_segment()
-                    continue
-                # Qwen3: bound each segment's audio (every decode re-reads it all)
-                seg_full = getattr(self._processor, "segment_full", None)
-                if seg_full is not None and seg_full():
-                    self._close_and_trim_segment()
-                    continue
+                    return
 
-                # Extended silence -> paragraph break (segment commit)
-                if self.vad.is_extended_silence(self.extended_silence_ms):
-                    seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
-                    silence_ms = getattr(self.vad, "silence_ms", self.extended_silence_ms)
-                    if (seg_duration > 1.0 and self._segment_has_text()
-                            and self._may_close_on_silence(silence_ms)):
-                        self._close_and_trim_segment()
-                        continue
+            # VAD pre-filter: skip transcription during pure silence
+            if not chunk_is_speech:
+                self._vad_skip_count += 1
+                if self._vad_skip_count % 20 == 0:
+                    print(f"[MEETING] VAD skip (silence): {self._vad_skip_count} chunks")
+                return
+            else:
+                self._vad_skip_count = 0
 
-                # VAD pre-filter: skip transcription during pure silence
-                if not chunk_is_speech:
-                    vad_skip_count += 1
-                    if vad_skip_count % 20 == 0:
-                        print(f"[MEETING] VAD skip (silence): {vad_skip_count} chunks")
-                    continue
-                else:
-                    vad_skip_count = 0
+        # Qwen3: bound each segment's audio (every decode re-reads it all).
+        # Outside the VAD block so it holds with or without VAD.
+        seg_full = getattr(self._processor, "segment_full", None)
+        if seg_full is not None and seg_full():
+            self._close_and_trim_segment()
+            return
 
-            # Run transcription iteration
-            result = self._guarded(self._processor.process_iter)
-            if result is None:
-                continue
+        # Run transcription iteration
+        result = self._guarded(self._processor.process_iter)
+        if result is None:
+            return
 
-            confirmed, unconfirmed = result
+        confirmed, unconfirmed = result
 
-            # Notify overlay
-            if self._on_update:
-                try:
-                    debug = self._processor.last_debug if self._processor else {}
-                    self._on_update(confirmed, unconfirmed, self._segments, debug)
-                except Exception:
-                    pass
+        # Notify overlay
+        if self._on_update:
+            try:
+                debug = self._processor.last_debug if self._processor else {}
+                self._on_update(confirmed, unconfirmed, self._segments, debug)
+            except Exception:
+                pass
+
 
     # ── Internal: segment management ─────────────────────────
 
@@ -543,6 +601,9 @@ class MeetingSession:
         """
         text = self._guarded(self._processor.segment_close)
         if text is None:          # Qwen3 failed; Whisper now has the audio
+            if self.vad:
+                self.vad.reset()
+            self._segment_start_time = time.time()
             return
         if text.strip():
             self._commit_segment(text)

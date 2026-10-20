@@ -175,3 +175,16 @@ def test_normal_sentence_closes_after_short_silence():
     clock.t += 1.1
     p.process_iter()
     assert p.ready_to_close(silence_ms=900)
+
+
+def test_pending_only_after_speech_was_heard():
+    """Audio without speech (silence after a closed segment) must not get a
+    decode at stop: it duplicated the previous sentence in a replay."""
+    p, clock = _proc(["x"])
+    _feed(p, 1.0)
+    assert not p.has_pending_speech()
+    p.mark_speech()
+    assert p.has_pending_speech()
+    p.segment_close()
+    _feed(p, 1.0)                               # silence after the close
+    assert not p.has_pending_speech()

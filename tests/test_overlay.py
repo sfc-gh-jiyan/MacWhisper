@@ -236,12 +236,12 @@ def test_cap_tail_keeps_the_newest_part_with_ellipsis():
     out = overlay.cap_tail(text, 40)
     assert out.startswith("…")
     assert out.endswith("w199")                        # newest words kept
-    assert overlay.display_width(out) <= 40 + 1
+    assert overlay.display_width(out) <= 40          # "…" included
 
 
 def test_cap_tail_does_not_split_english_words():
     import overlay
-    out = overlay.cap_tail("alpha beta gamma delta epsilon", 14)
+    out = overlay.cap_tail("alpha beta gamma delta epsilon", 15)
     assert out == "…delta epsilon"
 
 
@@ -251,7 +251,7 @@ def test_cap_tail_counts_cjk_as_double_width():
     out = overlay.cap_tail(text, 20)
     assert out.startswith("…")
     assert out.endswith("九十")
-    assert overlay.display_width(out[1:]) <= 20
+    assert overlay.display_width(out) <= 20
 
 
 def test_update_overlay_caps_gray_but_not_white(monkeypatch):
