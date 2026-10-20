@@ -112,6 +112,7 @@ import qwen_backend
 import qwen_engine
 import settings_window
 import shortcuts
+import single_instance
 from qwen_backend import QwenUnavailable
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,34 @@ OVERLAY_FRAME_PATH = os.path.join(_DATA_DIR, "overlay.json")
 LOG_DIR = os.path.join(_DATA_DIR, "logs")
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
+INSTANCE_LOCK_PATH = os.path.join(_DATA_DIR, ".instance.lock")
+_INSTANCE_LOCK = None  # held for the whole process (GC would release the lock)
+
+
+def _notify_already_running() -> None:
+    """Tell the user why a second launch did nothing (no rumps app yet)."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["osascript", "-e", 'display notification "MacWhisper is already running '
+             '— look for it in the menu bar." with title "MacWhisper"'],
+            timeout=5, check=False,
+        )
+    except Exception:
+        pass
+
+
+def _claim_single_instance() -> bool:
+    """True if this process is the only MacWhisper; otherwise notify and return False."""
+    global _INSTANCE_LOCK
+    _INSTANCE_LOCK = single_instance.acquire(INSTANCE_LOCK_PATH)
+    if _INSTANCE_LOCK is not None:
+        return True
+    logging.getLogger(__name__).warning(
+        "MacWhisper is already running (pid %s) — exiting this launch",
+        single_instance.holder_pid(INSTANCE_LOCK_PATH))
+    _notify_already_running()
+    return False
 HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
 # A combo pressed again without a release within this window is macOS key
 # auto-repeat (holding the keys), not a new press.
@@ -1672,6 +1701,12 @@ if __name__ == "__main__":
     )
     # Console handler only shows WARNING+
     logging.getLogger().handlers[-1].setLevel(logging.WARNING)
+
+    # One MacWhisper only (double-click + ./run.sh would fight over hotkeys
+    # and the mic). Before the run marker, so a refused launch leaves the
+    # running app's crash marker alone.
+    if not _claim_single_instance():
+        sys.exit(0)
 
     # ── Crash evidence: hard crashes (SIGABRT/SIGSEGV) bypass Python's
     #    exception handling entirely. faulthandler writes them to crash.log,

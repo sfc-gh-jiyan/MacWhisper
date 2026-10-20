@@ -2060,3 +2060,40 @@ def test_start_meeting_refuses_when_one_is_running():
     inst._start_meeting()
     assert inst._meeting_session is running          # untouched, no second session
     inst._backend_ready.wait.assert_not_called()
+
+
+# ── Single instance (v0.7.2) ──────────────────────────────────
+
+def test_claim_single_instance_first_wins(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "INSTANCE_LOCK_PATH", str(tmp_path / ".instance.lock"))
+    monkeypatch.setattr(app, "_INSTANCE_LOCK", None)
+    notified = []
+    monkeypatch.setattr(app, "_notify_already_running", lambda: notified.append(1))
+    assert app._claim_single_instance() is True
+    assert app._INSTANCE_LOCK is not None          # kept alive for the whole process
+    assert notified == []
+
+
+def test_claim_single_instance_second_is_refused_and_told(tmp_path, monkeypatch):
+    import app
+    import single_instance
+    path = str(tmp_path / ".instance.lock")
+    other = single_instance.acquire(path)          # stands in for the running app
+    try:
+        monkeypatch.setattr(app, "INSTANCE_LOCK_PATH", path)
+        monkeypatch.setattr(app, "_INSTANCE_LOCK", None)
+        notified = []
+        monkeypatch.setattr(app, "_notify_already_running", lambda: notified.append(1))
+        assert app._claim_single_instance() is False
+        assert notified == [1]
+    finally:
+        single_instance.release(other)
+
+
+def test_single_instance_check_runs_before_run_marker():
+    """A refused 2nd launch must not touch the running app's crash marker."""
+    import app
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert main.index("_claim_single_instance()") < main.index("RunMarker(")
