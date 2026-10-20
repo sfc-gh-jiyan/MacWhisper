@@ -208,8 +208,13 @@ class MeetingSession:
         self._start_sources()
         print("[MEETING] Resumed")
 
-    def stop(self) -> str:
-        """Stop meeting and return full transcript text."""
+    def stop(self, wait_s: float = 5.0) -> str:
+        """Stop meeting and return full transcript text.
+
+        wait_s: how long to wait for the transcription loop to finish. Quit /
+        logout uses a short wait so the meeting is saved before the process
+        must exit.
+        """
         with self._state_lock:
             if self._state in ("idle", "stopped"):
                 return ""
@@ -219,7 +224,7 @@ class MeetingSession:
         self._stop_sources()
 
         # Wait for loop to finish
-        self._loop_done.wait(timeout=5)
+        self._loop_done.wait(timeout=wait_s)
 
         # Commit final segment
         if self._processor:

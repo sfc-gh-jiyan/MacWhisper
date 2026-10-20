@@ -113,7 +113,7 @@ import qwen_backend
 import qwen_engine
 import settings_window
 import shortcuts
-import signal
+import quit_guard
 import single_instance
 from qwen_backend import QwenUnavailable
 
@@ -157,27 +157,6 @@ def _permission_status() -> dict:
     """Ask macOS directly — the hotkeys need both, for THIS app identity."""
     return {"accessibility": bool(AXIsProcessTrusted()),
             "input_monitoring": _input_monitoring_granted()}
-
-
-def _install_sigterm_quit() -> None:
-    """Quit normally on SIGTERM (logout/shutdown, ./run.sh restart).
-
-    Python's default SIGTERM ends the process without atexit/before_quit, so
-    the run marker stayed and the next launch said "crashed last time", and
-    the Qwen3 sidecar was not closed. The handler only queues a normal quit
-    on the main run loop (never touches AppKit itself); Python runs it the
-    next time the main thread executes Python code (the 2 s status timer).
-    """
-    state = {"queued": False}
-
-    def _on_sigterm(signum, _frame):
-        if state["queued"]:
-            return
-        state["queued"] = True
-        logging.getLogger(__name__).warning("SIGTERM received — quitting normally")
-        AppHelper.callAfter(rumps.quit_application)
-
-    signal.signal(signal.SIGTERM, _on_sigterm)
 
 
 def _notify_already_running() -> None:
@@ -828,6 +807,38 @@ class TranscriberApp(rumps.App):
         self._set_status("Save Audio ON" if self.save_audio else "Save Audio OFF")
         self._save_config()
         print(f"[INFO] Save audio {'enabled' if self.save_audio else 'disabled'}")
+
+    def _quit_cleanup(self, marker) -> None:
+        """Everything that must happen before the process ends (menu Quit,
+        SIGTERM from logout/shutdown or ./run.sh). Each step is independent:
+        one failing must not skip the others.
+
+        An active meeting is saved (live transcript) with a short wait; the
+        Qwen3 full pass is skipped — there is no time for it at quit.
+        """
+        session = getattr(self, "_meeting_session", None)
+        if session is not None:
+            try:
+                session.stop(wait_s=2.0)
+                logger.warning("Quit during a meeting — live transcript saved: %s",
+                               getattr(session, "transcript_path", None))
+            except Exception:
+                logger.exception("Saving the meeting at quit failed")
+            try:
+                session.release_audio()
+            except Exception:
+                logger.exception("Releasing meeting audio at quit failed")
+            self._meeting_session = None
+        try:
+            marker.clear()
+        except Exception:
+            logger.exception("Clearing the run marker at quit failed")
+        qwen = getattr(self, "_qwen", None)
+        if qwen is not None:
+            try:
+                qwen.close()   # never leave the sidecar holding GPU memory
+            except Exception:
+                logger.exception("Closing the Qwen3 sidecar at quit failed")
 
     def _stop_meeting_from_overlay(self):
         """Stop button in the meeting overlay (called after the user confirms).
@@ -1788,18 +1799,22 @@ if __name__ == "__main__":
         )
     _marker.create()
     atexit.register(_marker.clear)
-    rumps.events.before_quit.register(_marker.clear)  # Quit menu → NSApp.terminate_
-    _install_sigterm_quit()   # logout/shutdown: same clean path as Quit
 
     _check_audio_device()
     try:
         _app = TranscriberApp()
 
-        def _close_qwen(*_):
-            if _app._qwen is not None:
-                _app._qwen.close()   # never leave the sidecar holding GPU memory
-        atexit.register(_close_qwen)
-        rumps.events.before_quit.register(_close_qwen)
+        # Menu Quit and SIGTERM (logout/shutdown, ./run.sh restart) share one
+        # cleanup: save an active meeting, clear the run marker, close Qwen3.
+        # SIGTERM first asks for a normal quit; if the main thread is stuck
+        # (e.g. a modal alert), the guard cleans up and exits after 8 s.
+        _guard = quit_guard.install(
+            request_quit=lambda: AppHelper.callAfter(rumps.quit_application),
+            cleanup=lambda: _app._quit_cleanup(_marker),
+            deadline_s=8.0,
+        )
+        rumps.events.before_quit.register(_guard.run_cleanup)
+        atexit.register(_guard.run_cleanup)
         _app.run()
     except Exception:
         import traceback

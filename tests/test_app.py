@@ -2143,46 +2143,55 @@ def test_main_skips_console_handler_when_stderr_is_the_log():
     assert "_stream_is_file(sys.stderr, _log_file)" in main
 
 
-# ── SIGTERM (logout/shutdown, ./run.sh restart) quits cleanly ──
+# ── Quit cleanup (v0.7.3): SIGTERM and menu Quit share it ──
 
-def test_sigterm_handler_schedules_normal_quit(monkeypatch):
-    """Regression: SIGTERM killed the app without atexit/before_quit, so the
-    run marker stayed and every next launch said "crashed last time"."""
-    import signal
+def _quit_app(in_meeting):
     import app
-    queued = []
-    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
-    quits = []
-    monkeypatch.setattr(app.rumps, "quit_application", lambda *a: quits.append(1))
-    installed = {}
-    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
-    app._install_sigterm_quit()
-    handler = installed[signal.SIGTERM]
-    handler(signal.SIGTERM, None)
-    assert quits == []                       # never touches AppKit inside the handler
-    fn, args = queued[0]
-    fn(*args)
-    assert quits == [1]
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._qwen = MagicMock()
+    if in_meeting:
+        inst._meeting_session = MagicMock(is_recording=True, transcript_path="/tmp/m.md")
+    else:
+        inst._meeting_session = None
+    return inst
 
 
-def test_sigterm_handler_quits_only_once(monkeypatch):
-    import signal
-    import app
-    queued = []
-    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
-    installed = {}
-    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
-    app._install_sigterm_quit()
-    installed[signal.SIGTERM](signal.SIGTERM, None)
-    installed[signal.SIGTERM](signal.SIGTERM, None)
-    assert len(queued) == 1
+def test_quit_cleanup_saves_active_meeting_quickly_without_final_pass():
+    """Regression: Quit / logout during a meeting lost the whole meeting."""
+    inst = _quit_app(in_meeting=True)
+    session = inst._meeting_session
+    marker = MagicMock()
+    inst._quit_cleanup(marker)
+    session.stop.assert_called_once_with(wait_s=2.0)
+    session.release_audio.assert_called_once()     # no Qwen3 final pass on quit
+    marker.clear.assert_called_once()
+    inst._qwen.close.assert_called_once()
 
 
-def test_main_installs_sigterm_quit():
+def test_quit_cleanup_without_meeting():
+    inst = _quit_app(in_meeting=False)
+    marker = MagicMock()
+    inst._quit_cleanup(marker)
+    marker.clear.assert_called_once()
+    inst._qwen.close.assert_called_once()
+
+
+def test_quit_cleanup_continues_after_a_failing_step():
+    inst = _quit_app(in_meeting=True)
+    inst._meeting_session.stop.side_effect = RuntimeError("disk full")
+    marker = MagicMock()
+    inst._quit_cleanup(marker)
+    marker.clear.assert_called_once()              # still cleared
+    inst._qwen.close.assert_called_once()          # still closed
+
+
+def test_main_uses_quit_guard_for_sigterm_and_quit():
     import app
     src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     main = src[src.index('if __name__ == "__main__":'):]
-    assert "_install_sigterm_quit()" in main
+    assert "quit_guard.install(" in main
+    assert "before_quit.register(_guard.run_cleanup)" in main
+    assert "_install_sigterm_quit" not in src
 
 
 # ── Permission diagnostics (v0.7.2): ask macOS, don't guess ──
