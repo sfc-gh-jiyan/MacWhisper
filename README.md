@@ -179,7 +179,7 @@ Measured on real recordings (mixed Chinese-English):
 |---|---|
 | Push to Talk — live subtitles and final text | Qwen3 |
 | Push to Talk in Translate mode | Whisper |
-| Meeting Mode — real-time subtitles | Whisper (unchanged) |
+| Meeting Mode — real-time subtitles | Qwen3, one sentence at a time (v0.7.3); Whisper takes over if Qwen3 fails mid-meeting |
 | Meeting Mode — final transcript after Stop | Qwen3, from in-memory audio (no audio file written) |
 | Any Qwen3 failure (not installed, crash, timeout) | Whisper on the same audio + one red alert |
 
