@@ -2113,3 +2113,73 @@ def test_open_settings_creates_login_item_lazily(monkeypatch):
     inst._open_settings(None)
     inst._open_settings(None)
     assert made == [1] and inst.login_item is not None
+
+
+# ── Log duplication when stderr IS the log file (double-clicked app) ──
+
+def test_stderr_is_log_file_detects_same_file(tmp_path):
+    import app
+    log = tmp_path / "macwhisper.log"
+    log.write_text("")
+    with open(log, "a") as same, open(tmp_path / "other.log", "a") as other:
+        assert app._stream_is_file(same, str(log)) is True
+        assert app._stream_is_file(other, str(log)) is False
+
+
+def test_stderr_is_log_file_handles_missing_and_odd_streams(tmp_path):
+    import io
+    import app
+    assert app._stream_is_file(io.StringIO(), str(tmp_path / "x.log")) is False
+    with open(tmp_path / "a.log", "a") as f:
+        assert app._stream_is_file(f, str(tmp_path / "missing.log")) is False
+
+
+def test_main_skips_console_handler_when_stderr_is_the_log():
+    """The launcher redirects stderr into macwhisper.log; a console handler
+    would then write every WARNING+ line twice."""
+    import app
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert "_stream_is_file(sys.stderr, _log_file)" in main
+
+
+# ── SIGTERM (logout/shutdown, ./run.sh restart) quits cleanly ──
+
+def test_sigterm_handler_schedules_normal_quit(monkeypatch):
+    """Regression: SIGTERM killed the app without atexit/before_quit, so the
+    run marker stayed and every next launch said "crashed last time"."""
+    import signal
+    import app
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
+    quits = []
+    monkeypatch.setattr(app.rumps, "quit_application", lambda *a: quits.append(1))
+    installed = {}
+    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
+    app._install_sigterm_quit()
+    handler = installed[signal.SIGTERM]
+    handler(signal.SIGTERM, None)
+    assert quits == []                       # never touches AppKit inside the handler
+    fn, args = queued[0]
+    fn(*args)
+    assert quits == [1]
+
+
+def test_sigterm_handler_quits_only_once(monkeypatch):
+    import signal
+    import app
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
+    installed = {}
+    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
+    app._install_sigterm_quit()
+    installed[signal.SIGTERM](signal.SIGTERM, None)
+    installed[signal.SIGTERM](signal.SIGTERM, None)
+    assert len(queued) == 1
+
+
+def test_main_installs_sigterm_quit():
+    import app
+    src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert "_install_sigterm_quit()" in main

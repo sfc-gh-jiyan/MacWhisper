@@ -12,6 +12,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
 __version__ = "0.7.2"
 
 import json
+import io
 import logging
 import threading
 import os
@@ -112,6 +113,7 @@ import qwen_backend
 import qwen_engine
 import settings_window
 import shortcuts
+import signal
 import single_instance
 from qwen_backend import QwenUnavailable
 
@@ -130,6 +132,37 @@ CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
 INSTANCE_LOCK_PATH = os.path.join(_DATA_DIR, ".instance.lock")
 _INSTANCE_LOCK = None  # held for the whole process (GC would release the lock)
+
+
+def _stream_is_file(stream, path: str) -> bool:
+    """True if `stream` writes to the file at `path` (same device + inode)."""
+    try:
+        a = os.fstat(stream.fileno())
+        b = os.stat(path)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _install_sigterm_quit() -> None:
+    """Quit normally on SIGTERM (logout/shutdown, ./run.sh restart).
+
+    Python's default SIGTERM ends the process without atexit/before_quit, so
+    the run marker stayed and the next launch said "crashed last time", and
+    the Qwen3 sidecar was not closed. The handler only queues a normal quit
+    on the main run loop (never touches AppKit itself); Python runs it the
+    next time the main thread executes Python code (the 2 s status timer).
+    """
+    state = {"queued": False}
+
+    def _on_sigterm(signum, _frame):
+        if state["queued"]:
+            return
+        state["queued"] = True
+        logging.getLogger(__name__).warning("SIGTERM received — quitting normally")
+        AppHelper.callAfter(rumps.quit_application)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
 
 def _notify_already_running() -> None:
@@ -1693,17 +1726,20 @@ if __name__ == "__main__":
     # Configure logging — configurable level to file, WARNING to console
     _log_file = os.path.join(LOG_DIR, "macwhisper.log")
     os.makedirs(LOG_DIR, exist_ok=True)
+    _handlers = [logging.FileHandler(_log_file, encoding="utf-8")]
+    # WARNING+ also to the console (./run.sh). Not when stderr IS the log
+    # (double-clicked app: the launcher redirects it there) — every line
+    # would be written twice.
+    if not _stream_is_file(sys.stderr, _log_file):
+        _console = logging.StreamHandler()
+        _console.setLevel(logging.WARNING)
+        _handlers.append(_console)
     logging.basicConfig(
         level=_file_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.FileHandler(_log_file, encoding="utf-8"),
-            logging.StreamHandler(),  # WARNING+ to console (default)
-        ],
+        handlers=_handlers,
     )
-    # Console handler only shows WARNING+
-    logging.getLogger().handlers[-1].setLevel(logging.WARNING)
 
     # One MacWhisper only (double-click + ./run.sh would fight over hotkeys
     # and the mic). Before the run marker, so a refused launch leaves the
@@ -1726,6 +1762,7 @@ if __name__ == "__main__":
     _marker.create()
     atexit.register(_marker.clear)
     rumps.events.before_quit.register(_marker.clear)  # Quit menu → NSApp.terminate_
+    _install_sigterm_quit()   # logout/shutdown: same clean path as Quit
 
     _check_audio_device()
     try:
