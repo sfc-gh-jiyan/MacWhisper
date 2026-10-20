@@ -887,3 +887,47 @@ class TestMeetingFinalTranscript:
         s = self._session(None)
         s.release_audio()
         assert s._mic_frames == [] and s._sys_frames == []
+
+
+class TestSegmentCloseWithoutConfirmedWords:
+    """v0.7.3 regression: with unstable recognition nothing ever confirmed, and
+    both segment-close triggers required committed words, so the whole
+    hypothesis stayed gray on screen and never reached the transcript."""
+
+    def test_extended_silence_closes_a_segment_with_only_gray_text(self):
+        state = {"n": 0}
+        SPEECH_CHUNKS = 48
+
+        class SilenceAfterSpeechVad:
+            def reset(self):
+                state["n"] = 0
+
+            # ~3 s of speech (1024-sample chunks), then silence: enough for
+            # several decodes (first one needs 1.5 s of buffer) before it.
+            def process_chunk(self, chunk):
+                state["n"] += 1
+                speech = state["n"] < SPEECH_CHUNKS
+                return {"is_speech": speech, "silence_ms": 0 if speech else 2500,
+                        "speech_ms": 100}
+
+            def is_extended_silence(self, *a, **k):
+                return state["n"] >= SPEECH_CHUNKS
+
+        # Every decode is different: LocalAgreement never confirms a word.
+        responses = [f"alpha{i} beta{i} gamma{i} delta{i}" for i in range(200)]
+        backend = MockBackend(responses=responses)
+        session = MeetingSession(backend=backend, vad=SilenceAfterSpeechVad(),
+                                 audio_source=MockAudioSource(), min_chunk_size=0.3)
+        session.start()
+        deadline = time.time() + 6
+        while time.time() < deadline and not session.segments:
+            time.sleep(0.05)
+        segments_before_stop = len(session.segments)
+        session.stop()
+        assert segments_before_stop >= 1, "gray-only text never became a segment"
+        assert session.segments[0].text.strip()
+
+    def test_has_text_helper(self):
+        session = MeetingSession(backend=MockBackend(), vad=None,
+                                 audio_source=MockAudioSource())
+        assert session._segment_has_text() is False

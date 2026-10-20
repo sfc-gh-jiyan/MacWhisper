@@ -208,6 +208,19 @@ class MeetingSession:
         self._start_sources()
         print("[MEETING] Resumed")
 
+    def _segment_has_text(self) -> bool:
+        """True if the current segment has confirmed OR unconfirmed words.
+
+        Both segment-close triggers used to require confirmed words. With
+        unstable recognition nothing ever confirmed, so the whole hypothesis
+        stayed gray on screen and never reached the transcript; segment_close
+        force-confirms the gray tail, so it is safe to close on either.
+        """
+        p = self._processor
+        if p is None:
+            return False
+        return bool(p.committed or p.transcript_buffer.peek_unconfirmed())
+
     def stop(self, wait_s: float = 5.0) -> str:
         """Stop meeting and return full transcript text.
 
@@ -395,14 +408,14 @@ class MeetingSession:
                 # buffer is capped at max_buffer_s (8s) by pre-inference trim.
                 MAX_SEGMENT_DURATION_S = 30.0
                 seg_elapsed = time.time() - self._segment_start_time
-                if seg_elapsed > MAX_SEGMENT_DURATION_S and self._processor.committed:
+                if seg_elapsed > MAX_SEGMENT_DURATION_S and self._segment_has_text():
                     self._close_and_trim_segment()
                     continue
 
                 # Extended silence -> paragraph break (segment commit)
                 if self.vad.is_extended_silence(self.extended_silence_ms):
                     seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
-                    if seg_duration > 1.0 and self._processor.committed:
+                    if seg_duration > 1.0 and self._segment_has_text():
                         self._close_and_trim_segment()
                         continue
 
