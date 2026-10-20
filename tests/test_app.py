@@ -1943,10 +1943,10 @@ def test_meeting_stop_hint_follows_shortcuts():
     assert overlay.meeting_stop_hint == "⌃⌥M"
 
 
-def test_default_qwen_model_is_1_7b():
-    """User choice (2026-10-19): Qwen3 1.7B is the default engine model."""
+def test_default_qwen_model_is_0_6b():
+    """User choice (2026-10-20): Qwen3 0.6B is the default engine model."""
     import app
-    assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-1.7B-bf16"
+    assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-0.6B-bf16"
 
 
 # ── Meeting shortcut: auto-repeat and double start (user report 19:47) ──

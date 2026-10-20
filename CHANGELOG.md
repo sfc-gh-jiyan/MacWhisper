@@ -6,6 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.7.3] — 2026-10-20
 
+### Changed
+- **Default Qwen3 model is 0.6B again** (1.7B since v0.7.1). It applies when the config has no `qwen_model`; a saved choice is kept. 1.7B stays in the menu.
+
 ### Added
 - **Meeting live subtitles on Qwen3.** When Qwen3 is the selected engine, the subtitles you see during a meeting now come from Qwen3 too, not only the transcript after the meeting.
   - Each sentence is re-transcribed about once a second while you speak. A segment ends after a 0.8 s pause, or at 15 s.
