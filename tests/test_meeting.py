@@ -3,6 +3,7 @@
 Tests use mock backends to avoid loading actual ML models.
 """
 
+import json
 import os
 import time
 import threading
@@ -835,3 +836,54 @@ class TestMeetingVadSinglePass:
         assert calls, "VAD was never consulted"
         assert not [c for c in calls if c[0] == "is_speech"], (
             "chunk was evaluated twice by the VAD model: %r" % calls[:6])
+
+
+class TestMeetingFinalTranscript:
+    """Final (Qwen3) pass: in-memory audio, two-section Markdown."""
+
+    def _session(self, tmpdir):
+        import meeting
+        s = MeetingSession(backend=MockBackend(responses=["x"] * 5), audio_source=MockAudioSource())
+        s._session_id = "20261019_final"
+        s._segments = [MeetingSegment(text="live words", start_time=0.0, end_time=2.0)]
+        tone = (np.ones((1600, 1)) * 1000).astype(np.int16)
+        s._mic_frames = [tone, tone]
+        s._sys_frames = [tone]
+        return s
+
+    def test_mixed_audio_sums_channels_and_clips(self):
+        s = self._session(None)
+        a = s.mixed_audio()
+        assert a.dtype == np.float32 and len(a) == 3200
+        assert a[0] == pytest.approx(2000 / 32768, rel=1e-3)   # mic + sys overlap
+        assert a[-1] == pytest.approx(1000 / 32768, rel=1e-3)  # mic only
+
+    def test_mixed_audio_empty(self):
+        s = MeetingSession(backend=MockBackend(responses=["x"]), audio_source=MockAudioSource())
+        assert len(s.mixed_audio()) == 0
+
+    def test_write_final_transcript_puts_final_first_live_second(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                s = self._session(tmpdir)
+                path = s._auto_save()
+                s.write_final_transcript("完整的最终文稿 final text", "Qwen3-ASR 0.6B")
+                md = open(path, encoding="utf-8").read()
+                assert md.index("## Final transcript") < md.index("## Live transcript")
+                assert "完整的最终文稿 final text" in md
+                assert "Qwen3-ASR 0.6B" in md
+                assert "live words" in md
+                data = json.load(open(path.replace(".md", ".json"), encoding="utf-8"))
+                assert data["final_transcript"] == "完整的最终文稿 final text"
+                assert data["final_engine"] == "Qwen3-ASR 0.6B"
+                assert not [f for f in os.listdir(tmpdir) if f.endswith(".wav")]  # no audio written
+            finally:
+                meeting.MEETINGS_DIR = orig
+
+    def test_release_audio_frees_frames(self):
+        s = self._session(None)
+        s.release_audio()
+        assert s._mic_frames == [] and s._sys_frames == []

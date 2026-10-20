@@ -31,3 +31,4 @@ setup.py
 # Runtime data
 meetings/
 .venv-eval/
+.venv-qwen/

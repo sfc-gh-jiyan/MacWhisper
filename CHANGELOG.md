@@ -4,6 +4,27 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.0] — 2026-10-19
+
+### Added
+- **Qwen3-ASR engine (optional, default after upgrade)**: Qwen3-ASR 0.6B and 1.7B join the model menu next to Whisper Small/Medium/Large. Measured on the user's own recordings:
+  - Meeting (2 recordings, mixed error rate, lower is better): Qwen3 1.7B 0.119 / 0.156 and 0.6B 0.085 / 0.188, vs Whisper real-time 0.627 / 0.203 and Whisper full pass 0.729 / 0.359.
+  - Push to Talk (221 clips, total time): 0.6B 5.6× and 1.7B 2.6× faster than Whisper Large; English inside Chinese speech is kept verbatim (0 translations).
+- **Isolated sidecar**: Qwen3 runs in its own process and venv (`.venv-qwen`, mlx-audio 0.5.9 / mlx 0.32.4). The app venv, mlx 0.31.1 and mlx-whisper are untouched. Install with `make qwen-setup`; the first run after the env exists selects Qwen3 0.6B automatically.
+- **Qwen3 live subtitles (Push to Talk)**: the utterance so far is re-transcribed every second; text both decodes agree on turns white, the rest stays gray. First text after about 1 s; live text ends within about 1% of the final text. If nothing appears after 4 s, the overlay says it is slow and that the final transcription still happens on release.
+- **Meeting final transcript**: with Qwen3 selected, after a meeting stops the whole meeting is re-transcribed from in-memory audio. The same `.md` is rewritten with "Final transcript" first and the live transcript below it; the `.json` gets `final_transcript`/`final_engine`. Audio is never written to disk by this pass (Save Meeting Audio still controls WAV files). Config: `meeting_final_pass`.
+- **Output style matching Whisper**: standalone fillers (嗯/呃/um) removed, never inside words (额外) or particles (好啊); no space between Chinese and English (`这个commit的情况`). Config: `qwen_strip_fillers`, `qwen_tight_spacing`.
+
+### Safety / revertability
+- **Whisper is always loaded** as the fallback and still handles translate mode and Meeting real-time subtitles.
+- **Automatic fallback**: if Qwen3 fails to start, times out or crashes, the same audio is transcribed by Whisper (nothing lost), one red alert explains it, and the menu marks Qwen3 "unavailable (using Whisper)". A crashed sidecar is restarted automatically (up to 2 times); after it recovers the alert re-arms.
+- **No leftover processes**: the sidecar closes on Quit and exits by itself if the app dies (measured: 0.5 s after the app was force-killed). `run.sh` also stops a stale sidecar.
+- **To go back to Whisper**: pick any Whisper model in Push to Talk → Model (saved as `"engine": "whisper"`). Code-level rollback: tag/branch `whisper-stable-0.6.2`.
+
+### Known issues
+- Quitting during the first seconds after launch, while the Whisper model is still warming up, can segfault on exit. This is pre-existing: v0.6.2 does the same. No data is lost; the next launch reports the crash.
+- Qwen3 gives no word timestamps; history entries made with Qwen3 have text only.
+
 ## [0.6.2] — 2026-10-18
 
 ### Fixed

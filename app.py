@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.6.2
+MacWhisper - macOS Menu Bar App  v0.7.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 
 import json
 import logging
@@ -108,6 +108,9 @@ from subtitle_export import save_enhanced_history
 from meeting import MeetingSession, MEETINGS_DIR
 import crash_guard
 import error_alert
+import qwen_backend
+import qwen_engine
+from qwen_backend import QwenUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,23 @@ MODEL_OPTIONS = {
     "Large (Best)":      "mlx-community/whisper-large-v3-mlx",
 }
 MODEL_KEYS = list(MODEL_OPTIONS.keys())
+
+# Qwen3-ASR models run in a separate sidecar process (.venv-qwen); Whisper
+# stays loaded alongside as the instant fallback (translate mode, errors).
+QWEN_MODEL_OPTIONS = {
+    "Qwen3 0.6B (Fast, zh+en)": "mlx-community/Qwen3-ASR-0.6B-bf16",
+    "Qwen3 1.7B (Best, zh+en)": "mlx-community/Qwen3-ASR-1.7B-bf16",
+}
+ALL_MODEL_OPTIONS = {**MODEL_OPTIONS, **QWEN_MODEL_OPTIONS}
+ALL_MODEL_KEYS = list(ALL_MODEL_OPTIONS.keys())
+DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 0.6B (Fast, zh+en)"]
+
+
+def initial_engine(cfg: dict, qwen_env_exists: bool) -> str:
+    """Engine on startup: the saved choice, else Qwen3 if its env is installed."""
+    if cfg.get("engine") in ("whisper", "qwen"):
+        return cfg["engine"]
+    return "qwen" if qwen_env_exists else "whisper"
 
 HISTORY_DIR = _DATA_DIR
 AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
@@ -230,6 +250,11 @@ class TranscriberApp(rumps.App):
             "save_meeting_audio": self.save_meeting_audio,
             "save_audio": self.save_audio,
             "log_level": self.log_level,
+            "engine": getattr(self, "engine", "whisper"),
+            "qwen_model": getattr(self, "qwen_model", DEFAULT_QWEN_MODEL),
+            "qwen_strip_fillers": getattr(self, "qwen_strip_fillers", True),
+            "qwen_tight_spacing": getattr(self, "qwen_tight_spacing", True),
+            "meeting_final_pass": getattr(self, "meeting_final_pass", True),
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f)
@@ -247,6 +272,16 @@ class TranscriberApp(rumps.App):
         self.save_meeting_audio = cfg.get("save_meeting_audio", False)
         self.save_audio     = cfg.get("save_audio", False)
         self.log_level      = cfg.get("log_level", "WARNING")
+        # Qwen3-ASR (v0.7.0): "engine" selects Qwen3 or Whisper. current_model
+        # always names the Whisper model, which stays loaded as the fallback.
+        self.engine = initial_engine(cfg, os.path.isfile(qwen_backend.default_python_path()))
+        self.qwen_model = cfg.get("qwen_model", DEFAULT_QWEN_MODEL)
+        if self.qwen_model not in QWEN_MODEL_OPTIONS.values():
+            self.qwen_model = DEFAULT_QWEN_MODEL
+        self.qwen_strip_fillers = cfg.get("qwen_strip_fillers", True)
+        self.qwen_tight_spacing = cfg.get("qwen_tight_spacing", True)
+        # Re-transcribe meetings with Qwen3 from in-memory audio (never written to disk)
+        self.meeting_final_pass = cfg.get("meeting_final_pass", True)
 
         # Meeting mode state
         self._meeting_session: MeetingSession | None = None
@@ -257,8 +292,8 @@ class TranscriberApp(rumps.App):
         # Model menu items
         self.model_items = {}
         model_menu_items = []
-        for label, repo in MODEL_OPTIONS.items():
-            prefix = "✅" if repo == self.current_model else "  "
+        for label, repo in ALL_MODEL_OPTIONS.items():
+            prefix = "✅" if label == self._active_model_label() else "  "
             title = f"{prefix} {label}"
             item = rumps.MenuItem(title, callback=self._make_model_callback(label))
             self.model_items[label] = item
@@ -355,6 +390,12 @@ class TranscriberApp(rumps.App):
         self._backend: MLXWhisperBackend | None = None
         self._backend_ready = threading.Event()
         self._warmup_model(self.current_model)
+
+        # Qwen3 sidecar (optional engine). Whisper above stays the fallback.
+        self._qwen: qwen_engine.QwenEngine | None = None
+        self._qwen_alerted = False
+        if self.engine == "qwen":
+            self._start_qwen()
 
         # VAD — created once, reset() per recording (avoids reloading Silero model)
         self._vad: VoiceActivityDetector | None = None
@@ -469,16 +510,98 @@ class TranscriberApp(rumps.App):
             self._set_model(label)
         return cb
 
+    def _active_model_label(self) -> str:
+        """Menu label of the engine/model actually selected."""
+        repo = self.qwen_model if self.engine == "qwen" else self.current_model
+        for label, r in ALL_MODEL_OPTIONS.items():
+            if r == repo:
+                return label
+        return MODEL_KEYS[0]
+
+    def _refresh_model_menu(self):
+        active = self._active_model_label()
+        qwen = getattr(self, "_qwen", None)
+        qwen_down = (self.engine == "qwen" and qwen is not None
+                     and not qwen.is_ready and bool(qwen.last_error))
+        for k, item in getattr(self, "model_items", {}).items():
+            prefix = "✅" if k == active else "  "
+            suffix = " — unavailable (using Whisper)" if (k == active and qwen_down) else ""
+            item.title = f"{prefix} {k}{suffix}"
+
     def _set_model(self, label):
-        self.current_model = MODEL_OPTIONS[label]
-        for k, item in self.model_items.items():
-            prefix = "✅" if k == label else "  "
-            item.title = f"{prefix} {k}"
-        short_name = label.split(" ")[0]
-        self._set_status(f"Model: {short_name}")
+        if label in QWEN_MODEL_OPTIONS:
+            self.engine = "qwen"
+            self.qwen_model = QWEN_MODEL_OPTIONS[label]
+            self._qwen_alerted = False
+            self._start_qwen()
+        else:
+            self.engine = "whisper"
+            if MODEL_OPTIONS[label] != self.current_model:
+                self.current_model = MODEL_OPTIONS[label]
+                # Re-warmup the new Whisper model in background
+                self._warmup_model(self.current_model)
+        logger.info("Model selected: %s (engine=%s)", label, self.engine)
+        self._refresh_model_menu()
+        self._set_status(f"Model: {label.split(' (')[0]}")
         self._save_config()
-        # Re-warmup the new model in background
-        self._warmup_model(self.current_model)
+
+    # ── Qwen3-ASR engine ──────────────────────────────────────
+
+    def _start_qwen(self):
+        """Start (or switch) the Qwen3 sidecar in the background."""
+        if self._qwen is None:
+            self._qwen = qwen_engine.QwenEngine(strip_fillers=self.qwen_strip_fillers,
+                                                tight=self.qwen_tight_spacing)
+        repo = self.qwen_model
+        self._set_status("Loading Qwen3...")
+
+        def done(ok, err):
+            if self.engine != "qwen" or repo != self.qwen_model:
+                return  # user switched again meanwhile
+            if ok:
+                logger.info("Qwen3 ready: %s", repo)
+                self._set_status(f"Ready — Qwen3 {'1.7B' if '1.7B' in repo else '0.6B'}")
+            else:
+                self._qwen_failed(f"Qwen3 could not start ({err})")
+            self._on_main(self._refresh_model_menu)
+
+        self._qwen.start_async(repo, on_done=done)
+
+    def _use_qwen(self) -> bool:
+        """Qwen3 serves this final pass: selected, started once, not translating.
+
+        Deliberately NOT gated on "ready right now": after a sidecar crash the
+        request must reach Qwen3 so it restarts it — or fails loudly (alert +
+        Whisper fallback) — instead of silently switching to Whisper. While
+        Qwen3 is still loading (never started), Whisper is used quietly.
+        """
+        qwen = getattr(self, "_qwen", None)
+        return (getattr(self, "engine", "whisper") == "qwen" and qwen is not None
+                and getattr(qwen, "started_ok", False) and not self.translate_mode)
+
+    def _qwen_live_ok(self) -> bool:
+        """Live subtitles need a sidecar that is ready NOW (no restart delays)."""
+        return self._use_qwen() and self._qwen.is_ready
+
+    def _qwen_recovered(self):
+        """Qwen3 served a request: re-arm the alert and clear the menu mark."""
+        if self._qwen_alerted:
+            logger.warning("Qwen3 recovered — using Qwen3 again")
+            self._qwen_alerted = False
+            self._on_main(self._refresh_model_menu)
+
+    def _qwen_failed(self, reason: str, exc: Exception | None = None):
+        """Qwen3 unusable: alert once per incident; Whisper takes over."""
+        logger.error("Qwen3 unavailable, using Whisper: %s", reason)
+        self._on_main(self._refresh_model_menu)
+        if self._qwen_alerted:
+            return
+        self._qwen_alerted = True
+        self._reporter.report(
+            f"Qwen3 speech engine — switched to Whisper automatically, nothing was lost. "
+            f"Reason: {reason}. Pick a Qwen3 model again in Push to Talk → Model to retry",
+            exc or RuntimeError(reason),
+        )
 
     def _toggle_translate(self, _):
         self.translate_mode = not self.translate_mode
@@ -626,7 +749,46 @@ class TranscriberApp(rumps.App):
                 OSError("meeting transcript file was not written"),
             )
 
+        session = self._meeting_session
         self._meeting_session = None
+        if path and getattr(self, "meeting_final_pass", True) and self._use_qwen():
+            threading.Thread(target=self._meeting_final_pass, args=(session,),
+                             daemon=True, name="meeting-final-pass").start()
+        elif session is not None:
+            session.release_audio()
+
+    def _meeting_final_pass(self, session):
+        """Re-transcribe the whole meeting with Qwen3 from in-memory audio.
+
+        The live transcript is already saved (and its path copied) before
+        this starts, so a failure here loses nothing. The .md is rewritten
+        in place: final transcript first, live transcript second. Audio is
+        never written to disk by this pass.
+        """
+        try:
+            audio = session.mixed_audio()
+            duration = len(audio) / SAMPLE_RATE
+            if duration < 1.0:
+                return
+            self._set_status("Meeting: final transcript (Qwen3)...")
+            logger.warning("Meeting final pass started: %.0fs audio (Qwen3)", duration)
+            t0 = time.time()
+            text = self._qwen.transcribe_final(audio)
+            label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
+                          if v == self._qwen.model_repo), "Qwen3")
+            path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass")
+            logger.warning("MEETING FINAL TRANSCRIPT — %s (%.0fs audio in %.1fs)",
+                           path, duration, time.time() - t0)
+            self._set_status("Meeting saved (final transcript ready)")
+            self._notify("MacWhisper — Final meeting transcript ready",
+                         "Same file, final version on top", path or "")
+        except QwenUnavailable as e:
+            self._qwen_failed(str(e), e)
+            self._set_status("Meeting saved (live transcript only)")
+        except Exception as e:
+            self._reporter.report("meeting final transcript (the live transcript is saved)", e)
+        finally:
+            session.release_audio()
 
     def _meeting_overlay_update(self, confirmed, unconfirmed, segments, debug=None):
         """Callback from MeetingSession to update overlay."""
@@ -650,11 +812,9 @@ class TranscriberApp(rumps.App):
         self._log_subtitle_live(confirmed, unconfirmed, debug or {}, mode="meeting")
 
     def _cycle_model(self):
-        current_idx = next(
-            i for i, v in enumerate(MODEL_OPTIONS.values()) if v == self.current_model
-        )
-        next_idx = (current_idx + 1) % len(MODEL_KEYS)
-        self._set_model(MODEL_KEYS[next_idx])
+        current_idx = ALL_MODEL_KEYS.index(self._active_model_label())
+        next_idx = (current_idx + 1) % len(ALL_MODEL_KEYS)
+        self._set_model(ALL_MODEL_KEYS[next_idx])
 
     # ── Permissions ────────────────────────────────────────────
 
@@ -776,9 +936,11 @@ class TranscriberApp(rumps.App):
             language=None,
         )
 
+        self._qwen_live_text = ""
         if self.live_mode:
             self._live_loop_done.clear()
-            threading.Thread(target=self._live_loop, daemon=True).start()
+            loop = self._qwen_live_loop if self._qwen_live_ok() else self._live_loop
+            threading.Thread(target=loop, daemon=True).start()
 
         # ── 4. Start audio capture LAST ──
         # IMPORTANT: stream.start() must come AFTER processor creation and
@@ -852,9 +1014,9 @@ class TranscriberApp(rumps.App):
         # Force-confirm remaining words from processor and capture
         # the complete real-time text (concrete evidence of what the
         # subtitle window displayed during this session).
-        realtime_text = ""
+        realtime_text = getattr(self, "_qwen_live_text", "")
         try:
-            if self._processor:
+            if self._processor and not realtime_text:
                 self._processor.segment_close()
                 realtime_text = "".join(
                     w[2] for w in self._processor.committed_history
@@ -894,6 +1056,41 @@ class TranscriberApp(rumps.App):
             self._live_loop_impl(proc)
         except Exception as e:
             self._reporter.report("live subtitles", e, while_recording=self.recording)
+        finally:
+            self._live_loop_done.set()
+
+    def _qwen_live_loop(self):
+        """Live subtitles with Qwen3: re-decode the whole utterance every 1 s.
+
+        A failure here is logged only — the final pass (after release)
+        falls back to Whisper and raises the alert if Qwen3 is really down.
+        """
+        frames_ref = self.frames  # list object for THIS recording
+
+        def update(confirmed, tail):
+            key = (confirmed, tail)
+            if key == self._last_overlay_key or not self._overlay_panel:
+                return
+            self._last_overlay_key = key
+            AppHelper.callAfter(
+                lambda c=confirmed, u=tail: update_overlay(
+                    self._overlay_panel, self._overlay_text, c, u
+                )
+            )
+            if confirmed or tail:
+                self._log_subtitle_live(confirmed, tail, {"engine": "qwen3"})
+
+        try:
+            self._qwen_live_text = qwen_engine.run_live_loop(
+                self._qwen.backend,
+                get_frames=lambda: list(frames_ref),
+                is_recording=lambda: self.recording and self.frames is frames_ref,
+                update=update,
+                on_error=lambda e: logger.warning("Qwen3 live subtitles stopped: %s", e),
+                use_timer=True,
+            )
+        except Exception as e:
+            self._reporter.report("live subtitles (Qwen3)", e, while_recording=self.recording)
         finally:
             self._live_loop_done.set()
 
@@ -1055,6 +1252,70 @@ class TranscriberApp(rumps.App):
                 self._set_title(self._idle_icon)
                 self._set_status("Ready")
 
+    def _final_text(self, audio_float, audio_int16):
+        """Final text for one utterance -> (text, model_used).
+
+        Qwen3 when selected and ready (not in translate mode); on ANY Qwen3
+        failure the SAME audio is transcribed by Whisper, so nothing is lost.
+        model_used is the model repo that produced the text. The Whisper
+        result (word timestamps for history) is kept in _last_whisper_result.
+        """
+        duration = len(audio_float) / SAMPLE_RATE
+        self._last_whisper_result = None
+        if self._use_qwen():
+            t0 = time.time()
+            try:
+                text = self._qwen.transcribe_final(audio_float)
+                self._qwen_recovered()
+                print(f"[INFO] Final transcription (Qwen3): {time.time() - t0:.1f}s "
+                      f"for {duration:.1f}s audio")
+                print(f"[INFO] Result: {text}")
+                return text, self._qwen.model_repo or self.qwen_model
+            except QwenUnavailable as e:
+                self._qwen_failed(str(e), e)
+        text, result = self._whisper_final(audio_float, duration)
+        self._last_whisper_result = result
+        return text, self.current_model
+
+    def _whisper_final(self, audio_float, duration):
+        """Whisper final pass (unchanged v0.6 behavior) -> (text, result)."""
+        # Reuse pre-warmed backend (avoids loading model again — saves ~500MB-3GB)
+        backend = self._backend
+
+        if self.translate_mode:
+            task, prompt = "translate", None
+            print(f"[INFO] Translating {duration:.1f}s audio to English...")
+        else:
+            task, prompt = "transcribe", BILINGUAL_PROMPT
+            print(f"[INFO] Transcribing {duration:.1f}s audio...")
+
+        t0 = time.time()
+        result = backend.transcribe(
+            audio_float,
+            language=None,
+            initial_prompt=prompt,
+            task=task,
+        )
+        elapsed = time.time() - t0
+
+        text = result.text.strip()
+        if prompt and text.startswith(prompt):
+            text = text[len(prompt):].strip()
+
+        text = convert_t2s(text)
+        if prompt and (text in prompt or text.rstrip("。.") in prompt):
+            text = ""
+            print("[INFO] Result (prompt echo filtered)")
+        text = strip_trailing_repetition(text)
+        hall_reason = hallucination_reason(text) if text else None
+        if hall_reason:
+            print(f"[INFO] Result (hallucination:{hall_reason}): {text}")
+            text = ""
+
+        print(f"[INFO] Final transcription: {elapsed:.1f}s for {duration:.1f}s audio")
+        print(f"[INFO] Result: {text}")
+        return text, result
+
     def _do_transcribe(self, frames, realtime_text=""):
         """Final transcription pass using the ASR backend.
 
@@ -1091,59 +1352,25 @@ class TranscriberApp(rumps.App):
                 wf.writeframes(audio.tobytes())
             print(f"[INFO] Saved audio: {wav_path}")
 
-        # Reuse pre-warmed backend (avoids loading model again — saves ~500MB-3GB)
-        backend = self._backend
+        text, model_used = self._final_text(audio_float, audio)
+        result = self._last_whisper_result
 
-        if self.translate_mode:
-            task, prompt = "translate", None
-            print(f"[INFO] Translating {duration:.1f}s audio to English...")
-        else:
-            task, prompt = "transcribe", BILINGUAL_PROMPT
-            print(f"[INFO] Transcribing {duration:.1f}s audio...")
-
-        t0 = time.time()
-        result = backend.transcribe(
-            audio_float,
-            language=None,
-            initial_prompt=prompt,
-            task=task,
-        )
-        elapsed = time.time() - t0
-
-        text = result.text.strip()
-        if prompt and text.startswith(prompt):
-            text = text[len(prompt):].strip()
-
-        text = convert_t2s(text)
-        if prompt and (text in prompt or text.rstrip("。.") in prompt):
-            text = ""
-            print("[INFO] Result (prompt echo filtered)")
-        text = strip_trailing_repetition(text)
-        hall_reason = hallucination_reason(text) if text else None
-        if hall_reason:
-            print(f"[INFO] Result (hallucination:{hall_reason}): {text}")
-            text = ""
-
-        print(f"[INFO] Final transcription: {elapsed:.1f}s for {duration:.1f}s audio")
-        print(f"[INFO] Result: {text}")
-
-        # Save enhanced history with word-level timestamps
-        all_words = result.all_words()
+        # Save enhanced history (word timestamps: Whisper only)
         save_enhanced_history(
             history_dir=MEETINGS_DIR,
             audio_file=os.path.basename(wav_path) if wav_path else None,
-            words=all_words,
+            words=result.all_words() if result is not None else [],
             text=text,
-            model=self.current_model,
+            model=model_used,
             duration_s=duration,
-            language=result.language,
+            language=result.language if result is not None else "zh",
         )
 
         # Log transcription result with both offline and real-time text
         log_entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "audio_file": os.path.basename(wav_path) if wav_path else None,
-            "model": self.current_model,
+            "model": model_used,
             "translate": self.translate_mode,
             "duration_s": round(duration, 1),
             "text": text,
@@ -1247,7 +1474,14 @@ if __name__ == "__main__":
 
     _check_audio_device()
     try:
-        TranscriberApp().run()
+        _app = TranscriberApp()
+
+        def _close_qwen(*_):
+            if _app._qwen is not None:
+                _app._qwen.close()   # never leave the sidecar holding GPU memory
+        atexit.register(_close_qwen)
+        rumps.events.before_quit.register(_close_qwen)
+        _app.run()
     except Exception:
         import traceback
         crash_log = os.path.join(LOG_DIR, "crash.log")

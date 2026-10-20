@@ -876,6 +876,7 @@ def _meeting_app(meeting_subtitles=True, in_meeting=False, panel=None):
     inst._overlay_panel = panel
     inst._overlay_text = None
     inst._last_overlay_key = ("old", "")
+    inst._reporter = MagicMock()
     return inst
 
 
@@ -1211,3 +1212,244 @@ def test_menu_grouped_into_submenus():
     assert 'rumps.MenuItem("Push to Talk")' in source
     assert 'rumps.MenuItem("Meeting")' in source
     assert 'rumps.MenuItem("Shortcuts")' in source
+
+
+# ── Test: Qwen3-ASR engine wiring (v0.7.0) ────────────────────
+
+class _FakeQwen:
+    def __init__(self, ready=True, text="千问 result", fail=False):
+        self.is_ready = ready
+        self.started_ok = ready
+        self.text = text
+        self.fail = fail
+        self.calls = 0
+        self.model_repo = "mlx-community/Qwen3-ASR-0.6B-bf16"
+        self.last_error = ""
+
+    def transcribe_final(self, audio):
+        self.calls += 1
+        if self.fail:
+            from qwen_backend import QwenUnavailable
+            raise QwenUnavailable("sidecar died")
+        return self.text
+
+
+def _engine_app(engine="qwen", qwen=None, translate=False):
+    inst = _meeting_app()
+    inst.engine = engine
+    inst.qwen_model = "mlx-community/Qwen3-ASR-0.6B-bf16"
+    inst.translate_mode = translate
+    inst._qwen = qwen if qwen is not None else _FakeQwen()
+    inst._qwen_alerted = False
+    return inst
+
+
+def test_use_qwen_only_when_selected_ready_and_not_translating():
+    assert _engine_app()._use_qwen() is True
+    assert _engine_app(engine="whisper")._use_qwen() is False
+    assert _engine_app(qwen=_FakeQwen(ready=False))._use_qwen() is False
+    assert _engine_app(translate=True)._use_qwen() is False
+
+
+def test_final_text_uses_qwen_when_available():
+    inst = _engine_app()
+    inst._whisper_final = MagicMock(return_value=("whisper text", None))
+    text, engine = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert text == "千问 result" and "Qwen3" in engine
+    inst._whisper_final.assert_not_called()
+
+
+def test_final_text_falls_back_to_whisper_on_same_audio_and_alerts():
+    inst = _engine_app(qwen=_FakeQwen(fail=True))
+    audio = np.ones(16000, dtype=np.float32) * 0.1
+    inst._whisper_final = MagicMock(return_value=("whisper text", None))
+    text, engine = inst._final_text(audio, (audio * 32768).astype(np.int16))
+    assert text == "whisper text" and engine == inst.current_model
+    assert inst._whisper_final.call_args[0][0] is audio      # same audio, nothing lost
+    inst._reporter.report.assert_called_once()
+    assert "Whisper" in inst._reporter.report.call_args[0][0]
+
+
+def test_final_text_whisper_engine_never_touches_qwen():
+    q = _FakeQwen()
+    inst = _engine_app(engine="whisper", qwen=q)
+    inst._whisper_final = MagicMock(return_value=("w", None))
+    inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert q.calls == 0
+
+
+def test_engine_and_qwen_settings_saved(tmp_config):
+    inst = _engine_app()
+    inst.qwen_strip_fillers = True
+    inst.qwen_tight_spacing = True
+    inst.meeting_final_pass = True
+    inst._save_config()
+    cfg = json.loads(tmp_config.read_text())
+    assert cfg["engine"] == "qwen"
+    assert cfg["qwen_model"] == "mlx-community/Qwen3-ASR-0.6B-bf16"
+    assert cfg["meeting_final_pass"] is True
+
+
+def test_initial_engine_defaults():
+    import app
+    assert app.initial_engine({}, qwen_env_exists=True) == "qwen"        # first upgrade
+    assert app.initial_engine({}, qwen_env_exists=False) == "whisper"
+    assert app.initial_engine({"engine": "whisper"}, qwen_env_exists=True) == "whisper"
+    assert app.initial_engine({"engine": "qwen"}, qwen_env_exists=False) == "qwen"  # keeps choice
+
+
+def test_model_menu_lists_whisper_and_qwen():
+    import app
+    labels = list(app.ALL_MODEL_OPTIONS)
+    assert labels[:3] == list(app.MODEL_OPTIONS)
+    assert any("Qwen3" in l and "0.6B" in l for l in labels)
+    assert any("Qwen3" in l and "1.7B" in l for l in labels)
+
+
+class _LiveBackend:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.is_ready = True
+
+    def transcribe(self, audio, **kw):
+        from asr_backend import TranscriptionResult
+        if self.fail:
+            from qwen_backend import QwenUnavailable
+            raise QwenUnavailable("live boom")
+        return TranscriptionResult(text="我们开始 test")
+
+
+def _qwen_live_app(backend, seconds=3):
+    import app
+    inst = _engine_app()
+    inst._qwen = MagicMock(backend=backend, is_ready=True)
+    inst.frames = [np.zeros((16000, 1), dtype=np.int16) for _ in range(seconds)]
+    inst.recording = True
+    inst._overlay_panel = MagicMock()
+    inst._overlay_text = MagicMock()
+    inst._last_overlay_key = None
+    inst._live_loop_done = threading.Event()
+    inst._log_subtitle_live = MagicMock()
+    return inst
+
+
+def test_qwen_live_loop_updates_overlay_and_signals_done(monkeypatch):
+    import app
+    calls = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: calls.append(fn))
+    inst = _qwen_live_app(_LiveBackend())
+    threading.Timer(2.5, lambda: setattr(inst, "recording", False)).start()
+    inst._qwen_live_loop()
+    assert inst._live_loop_done.is_set()
+    assert calls, "overlay never updated"
+    assert "我们开始" in inst._qwen_live_text
+
+
+def test_qwen_live_loop_failure_does_not_alert(monkeypatch):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: None)
+    inst = _qwen_live_app(_LiveBackend(fail=True))
+    threading.Timer(2.5, lambda: setattr(inst, "recording", False)).start()
+    inst._qwen_live_loop()
+    assert inst._live_loop_done.is_set()
+    inst._reporter.report.assert_not_called()      # final pass handles fallback + alert
+
+
+def test_qwen_live_loop_stops_when_next_recording_starts(monkeypatch):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: None)
+    inst = _qwen_live_app(_LiveBackend())
+    threading.Timer(1.5, lambda: setattr(inst, "frames", [])).start()   # new recording
+    t = threading.Thread(target=inst._qwen_live_loop)
+    t.start()
+    t.join(5)
+    assert not t.is_alive()
+
+
+def _final_pass_app(qwen):
+    inst = _engine_app(qwen=qwen)
+    inst._notify = MagicMock()
+    session = MagicMock()
+    session.mixed_audio.return_value = np.zeros(16000 * 5, dtype=np.float32)
+    session.write_final_transcript.return_value = "/tmp/m.md"
+    return inst, session
+
+
+def test_meeting_final_pass_rewrites_file_and_frees_audio():
+    q = _FakeQwen(text="会议最终文稿")
+    inst, session = _final_pass_app(q)
+    inst._meeting_final_pass(session)
+    text, engine = session.write_final_transcript.call_args[0]
+    assert text == "会议最终文稿" and "Qwen3" in engine
+    session.release_audio.assert_called_once()
+    inst._notify.assert_called_once()
+
+
+def test_meeting_final_pass_failure_keeps_live_transcript_and_alerts():
+    inst, session = _final_pass_app(_FakeQwen(fail=True))
+    inst._meeting_final_pass(session)
+    session.write_final_transcript.assert_not_called()      # live .md untouched
+    session.release_audio.assert_called_once()
+    inst._reporter.report.assert_called_once()
+
+
+def test_meeting_stop_whisper_engine_skips_final_pass_but_frees_audio():
+    import app
+    inst = _meeting_app(in_meeting=True)
+    inst.engine = "whisper"
+    inst._qwen = None
+    inst._idle_icon = "🎙"
+    inst.item_meeting = MagicMock()
+    inst._notify = MagicMock()
+    session = inst._meeting_session
+    session.stop.return_value = "text"
+    session.transcript_path = "/tmp/x.md"
+    session.segments = []
+    inst._meeting_final_pass = MagicMock()
+    with patch.object(app.pyperclip, "copy"):
+        inst._stop_meeting()
+    inst._meeting_final_pass.assert_not_called()
+    session.release_audio.assert_called_once()
+
+
+class _CrashedQwen(_FakeQwen):
+    """Was ready, sidecar died: is_ready False, and a retry fails too."""
+
+    def __init__(self):
+        super().__init__(ready=False, fail=True)
+        self.started_ok = True
+        self.last_error = "Qwen3 sidecar exited unexpectedly"
+
+
+def test_crashed_sidecar_is_retried_then_alerts_instead_of_silent_whisper():
+    """Regression (real-model verify): after a crash the app silently used Whisper."""
+    inst = _engine_app(qwen=_CrashedQwen())
+    inst._whisper_final = MagicMock(return_value=("whisper text", None))
+    text, model = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert text == "whisper text"
+    assert inst._qwen.calls == 1                       # Qwen3 was actually tried
+    inst._reporter.report.assert_called_once()         # and the user was told
+
+
+def test_qwen_still_loading_uses_whisper_without_alert():
+    q = _FakeQwen(ready=False)
+    q.started_ok = False                                # never became ready yet
+    inst = _engine_app(qwen=q)
+    inst._whisper_final = MagicMock(return_value=("w", None))
+    inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert q.calls == 0
+    inst._reporter.report.assert_not_called()
+
+
+def test_alert_rearms_after_qwen_recovers():
+    q = _FakeQwen(fail=True)
+    inst = _engine_app(qwen=q)
+    inst._on_main = lambda fn, *a: fn(*a)
+    inst._whisper_final = MagicMock(return_value=("w", None))
+    audio = (np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    inst._final_text(*audio)                 # fail -> alert 1
+    q.fail = False
+    inst._final_text(*audio)                 # recovered
+    q.fail = True
+    inst._final_text(*audio)                 # fails again -> alert 2 (not silent)
+    assert inst._reporter.report.call_count == 2

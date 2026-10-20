@@ -907,6 +907,8 @@ def main():
                         help=f"max_buffer_s for processor (default: {MAX_BUFFER_S})")
     parser.add_argument("--no-offline", action="store_true",
                         help="Skip offline baseline generation (faster)")
+    parser.add_argument("--spread", type=int, default=0,
+                        help="Pick N recordings spread across lengths (shortest/middle/longest)")
     parser.add_argument("--named-only", action="store_true",
                         help="Only use named WAV files (exclude timestamp-dated files like 20260328_*.wav)")
     parser.add_argument("--diagnose", action="store_true",
@@ -967,6 +969,10 @@ def main():
     pairs.sort(key=lambda p: -p["duration_s"])
     if args.wav:
         selected = pairs[:1]
+    elif args.spread > 0:
+        from test_meeting_dual import pick_by_length
+        selected = pick_by_length(pairs, n=args.spread,
+                                  length_fn=lambda p: p["duration_s"])
     elif args.top > 0:
         selected = pairs[:args.top]
     elif args.named_only:

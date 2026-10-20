@@ -528,6 +528,16 @@ class MeetingSession:
         lines.append("")
         lines.append("---")
         lines.append("")
+        final = getattr(self, "final_transcript", None)
+        if final is not None:
+            lines.append(f"## Final transcript ({self.final_engine})")
+            lines.append("")
+            lines.append(final)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            lines.append("## Live transcript (real-time subtitles)")
+            lines.append("")
 
         for i, seg in enumerate(self._segments, 1):
             ts_min = int(seg.start_time // 60)
@@ -567,6 +577,57 @@ class MeetingSession:
         except OSError as e:
             logger.error("Meeting auto-save failed: %s", e, exc_info=True)
             return None
+
+    # ── Final (post-meeting) transcript ──────────────────────
+
+    def mixed_audio(self) -> np.ndarray:
+        """Mic + system audio from memory, mixed to one float32 track.
+
+        Used for the post-meeting final pass. Nothing is written to disk.
+        """
+        with self._frames_lock:
+            mic = list(self._mic_frames)
+            sys_ = list(self._sys_frames)
+        tracks = [np.concatenate(f, axis=0).squeeze().astype(np.float32) / 32768.0
+                  for f in (mic, sys_) if f]
+        if not tracks:
+            return np.zeros(0, dtype=np.float32)
+        n = max(len(t) for t in tracks)
+        mix = np.zeros(n, dtype=np.float32)
+        for t in tracks:
+            mix[:len(t)] += t
+        return np.clip(mix, -1.0, 1.0)
+
+    def release_audio(self) -> None:
+        """Drop in-memory audio once the final pass is done."""
+        with self._frames_lock:
+            self._mic_frames = []
+            self._sys_frames = []
+
+    def write_final_transcript(self, text: str, engine: str) -> str | None:
+        """Rewrite the saved .md/.json with the final transcript first.
+
+        The live (real-time) transcript stays below it for comparison.
+        Returns the .md path, or None if the meeting was never saved.
+        """
+        if not self.transcript_path:
+            return None
+        self.final_transcript = text
+        self.final_engine = engine
+        md = self._format_markdown()
+        with open(self.transcript_path, "w", encoding="utf-8") as f:
+            f.write(md)
+        json_path = self.transcript_path[: -len(".md")] + ".json"
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {"session_id": self._session_id}
+        data = {**data, "final_transcript": text, "final_engine": engine}
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Meeting final transcript written (%s, %d chars)", engine, len(text))
+        return self.transcript_path
 
     def _write_audio(self) -> list[str]:
         """Write each captured channel to its own 16 kHz mono WAV.
