@@ -13,17 +13,10 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pytest
 
+CTRL, ALT, SHIFT = 262144, 524288, 131072   # CGEvent/NSEvent modifier flag bits
+
 
 # ── Helpers ───────────────────────────────────────────────────
-
-@pytest.fixture(autouse=True)
-def _no_real_keyboard(request, monkeypatch):
-    """Hotkey tests must not read the test machine's real modifier state."""
-    if request.node.name == "test_system_modifiers_reads_quartz":
-        return
-    import app
-    monkeypatch.setattr(app, "_system_modifiers", lambda: None)
-
 
 @pytest.fixture
 def tmp_config(tmp_path):
@@ -1050,8 +1043,6 @@ def _release(inst, *keys):
 
 def _run_sync_threads(monkeypatch):
     import app
-    # Event-logic tests must not depend on the real keyboard of the test machine
-    monkeypatch.setattr(app, "_system_modifiers", lambda: None)
 
     class SyncThread:
         def __init__(self, target, args=(), daemon=None, **kw):
@@ -1626,7 +1617,7 @@ def test_stale_modifier_from_lost_release_does_not_block_ptt(monkeypatch):
     _run_sync_threads(monkeypatch)
     inst = _hotkey_app()
     inst._held_mods = {"ctrl"}                                  # stale: Ctrl is really up
-    monkeypatch.setattr(app, "_system_modifiers", lambda: {"alt"})   # only Right ⌥ down now
+    inst._event_flags = ALT                                     # event: only Right ⌥ down
     _press(inst, Key.alt_r)
     inst._start_recording.assert_called_once()
     assert inst._held_mods == {"alt"}
@@ -1638,25 +1629,64 @@ def test_real_ctrl_still_blocks_ptt(monkeypatch):
     _run_sync_threads(monkeypatch)
     inst = _hotkey_app()
     inst._held_mods = {"ctrl"}
-    monkeypatch.setattr(app, "_system_modifiers", lambda: {"ctrl", "alt"})
+    inst._event_flags = CTRL | ALT
     _press(inst, Key.alt_r)
     inst._start_recording.assert_not_called()
 
 
-def test_system_modifier_query_failure_keeps_tracked_state(monkeypatch):
-    import app
+def test_no_event_flags_keeps_tracked_state(monkeypatch):
     from pynput.keyboard import Key
     _run_sync_threads(monkeypatch)
     inst = _hotkey_app()
-    monkeypatch.setattr(app, "_system_modifiers", lambda: None)   # API unavailable
+    inst._event_flags = None                                    # flags unavailable
     _press(inst, Key.alt_r)
     inst._start_recording.assert_called_once()
 
 
-def test_system_modifiers_reads_quartz():
+def test_fast_combo_uses_event_flags_not_current_state(monkeypatch):
+    """Regression: resync used the CURRENT keyboard state; a fast ⌃⌥M whose
+    modifiers were already released when M was processed was dropped."""
     import app
-    mods = app._system_modifiers()
-    assert mods is None or mods <= {"ctrl", "alt", "shift", "cmd"}
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    _press(inst, Key.ctrl, Key.alt)
+    inst._event_flags = CTRL | ALT          # what the M event itself carried
+    _press(inst, KeyCode.from_vk(46, char="µ"))
+    inst._toggle_meeting_mode.assert_called_once()
+
+
+def test_event_flags_are_used_once(monkeypatch):
+    import app
+    from pynput.keyboard import Key, KeyCode
+    _run_sync_threads(monkeypatch)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    inst = _hotkey_app()
+    inst._held_mods = {"ctrl", "alt"}
+    inst._event_flags = 0                   # this event: no modifiers
+    _press(inst, KeyCode.from_vk(46))
+    assert inst._event_flags is None and inst._held_mods == set()
+    inst._toggle_meeting_mode.assert_not_called()
+
+
+def test_flag_listener_hands_event_flags_to_app_before_callbacks():
+    import Quartz
+    import app
+    seen = []
+    order = []
+
+    class Sink:
+        _event_flags = None
+
+    sink = Sink()
+    lst = app._flag_listener_cls(app.keyboard.Listener)(sink, on_press=lambda k, *a: order.append(("press", sink._event_flags)),
+                            on_release=lambda k, *a: None)
+    ev = Quartz.CGEventCreateKeyboardEvent(None, 46, True)
+    Quartz.CGEventSetFlags(ev, Quartz.kCGEventFlagMaskControl | Quartz.kCGEventFlagMaskAlternate)
+    lst._handle_message(None, Quartz.kCGEventKeyDown, ev, None, False)
+    assert order and order[0][1] is not None
+    assert order[0][1] & (CTRL | ALT) == CTRL | ALT
 
 
 def test_cancel_recording_discards_audio_without_transcribing(monkeypatch):
@@ -1881,7 +1911,7 @@ def test_stale_modifier_does_not_fire_combo_while_typing(monkeypatch):
     inst = _hotkey_app()
     inst._toggle_live_mode = MagicMock()
     inst._held_mods = {"ctrl", "shift"}                        # ⌃ is stale
-    monkeypatch.setattr(app, "_system_modifiers", lambda: {"shift"})
+    inst._event_flags = SHIFT                                   # the S event: only ⇧
     _press(inst, KeyCode.from_vk(1, char="S"))
     inst._toggle_live_mode.assert_not_called()
     assert inst._held_mods == {"shift"}

@@ -31,7 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   - Auto-repeat is ignored for every shortcut.
   - Start/stop ignores further toggles for 1 s.
   - A second meeting can never start while one is running.
-- A modifier "stuck" after a lost key release (for example in a password field) could silently disable Push to Talk, or turn typing into a shortcut. Modifier state now resyncs from macOS.
+- A modifier "stuck" after a lost key release (for example in a password field) could silently disable Push to Talk, or turn typing into a shortcut. Modifier state now resyncs from the modifier flags of each key event. These are the flags at the moment the key was pressed, so a fast ⌃⌥M whose keys are already up when it is processed still works.
 - Tests could overwrite `~/.macwhisper/config.json`. Every test now uses temp files, and the test run fails if the real config changes.
 
 ## [0.7.0] — 2026-10-19

@@ -155,25 +155,42 @@ ALL_MODEL_KEYS = list(ALL_MODEL_OPTIONS.keys())
 DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 1.7B (Best, zh+en)"]
 
 
-def _system_modifiers() -> set | None:
-    """Modifiers macOS says are down right now (None if the query fails).
+_flag_listener_cache: dict = {}
 
-    pynput tracks modifiers from press/release events; a lost release (e.g.
-    secure input fields) would leave a modifier "stuck" and silently block
-    Push to Talk. This lets the next key press resync from the real state.
+
+def _flag_listener_cls(base):
+    """Subclass of `base` (pynput keyboard.Listener) that hands each event's
+    own modifier flags to the app.
+
+    The app resyncs its modifier tracking (a lost key release must not leave
+    a modifier stuck). It must use the flags carried by the event being
+    handled, not the keyboard state "now": by the time a fast ⌃⌥M is
+    processed the keys may already be up, and the shortcut would be lost.
+    The flags are stored on `sink._event_flags` right before pynput calls
+    on_press/on_release, on the same thread.
+
+    Built from the CURRENT keyboard.Listener at listener start, so tests that
+    patch keyboard.Listener (the restart watchdog test) still take effect.
     """
-    try:
-        import Quartz
-        flags = Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateCombinedSessionState)
-    except Exception:
-        return None
-    masks = {
-        "ctrl": Quartz.kCGEventFlagMaskControl,
-        "alt": Quartz.kCGEventFlagMaskAlternate,
-        "shift": Quartz.kCGEventFlagMaskShift,
-        "cmd": Quartz.kCGEventFlagMaskCommand,
-    }
-    return {m for m, mask in masks.items() if flags & mask}
+    cls = _flag_listener_cache.get(base)
+    if cls is not None:
+        return cls
+
+    class FlagListener(base):
+        def __init__(self, sink, **kwargs):
+            super().__init__(**kwargs)
+            self._mw_sink = sink
+
+        def _handle_message(self, proxy, event_type, event, refcon, injected):
+            try:
+                import Quartz
+                self._mw_sink._event_flags = int(Quartz.CGEventGetFlags(event))
+            except Exception:
+                self._mw_sink._event_flags = None   # no resync for this event
+            return super()._handle_message(proxy, event_type, event, refcon, injected)
+
+    _flag_listener_cache[base] = cls = FlagListener
+    return cls
 
 
 def initial_engine(cfg: dict, qwen_env_exists: bool) -> str:
@@ -385,6 +402,7 @@ class TranscriberApp(rumps.App):
         self._ptt_cancelled = False   # PTT key turned out to be part of a combo
         self._shortcuts_paused = False  # True while Settings records a shortcut
         self._combo_down: dict = {}     # combo spec -> last press time (until released)
+        self._event_flags = None        # modifier flags of the event being handled
         self._key_event_received = False
 
         # Live subtitle overlay state
@@ -942,7 +960,14 @@ class TranscriberApp(rumps.App):
         while not self._hotkey_stop.is_set():
             try:
                 logger.info("Hotkey listener starting (restart #%d)", failures)
-                with keyboard.Listener(
+                listener_cls = keyboard.Listener
+                if hasattr(listener_cls, "_handle_message"):   # real pynput (darwin)
+                    listener_cls = _flag_listener_cls(listener_cls)
+                    kwargs = {"sink": self}
+                else:
+                    kwargs = {}
+                with listener_cls(
+                    **kwargs,
                     on_press=self._guarded(self._on_press, "hotkey (key press)"),
                     on_release=self._guarded(self._on_release, "hotkey (key release)"),
                 ) as listener:
@@ -967,6 +992,16 @@ class TranscriberApp(rumps.App):
             "live_subtitles": lambda: self._toggle_live_mode(None),
         }
 
+    def _take_event_mods(self) -> set | None:
+        """Modifiers carried by the event being handled (consumed once).
+
+        None when unavailable (e.g. pynput internals changed): then the
+        tracked state is used as before, without resync.
+        """
+        flags = getattr(self, "_event_flags", None)
+        self._event_flags = None
+        return None if flags is None else shortcuts.mods_from_flags(flags)
+
     def _ptt_spec(self) -> str:
         return (self.shortcuts.get("push_to_talk") or shortcuts.DEFAULTS["push_to_talk"])[0]
 
@@ -982,7 +1017,7 @@ class TranscriberApp(rumps.App):
         is_ptt_key = shortcuts.key_token(key) == ptt
 
         if is_ptt_key:
-            real = _system_modifiers()
+            real = self._take_event_mods()
             if real is not None and real != self._held_mods - {mod}:
                 # Includes this key's own modifier (just pressed); drop stale ones
                 if self._held_mods - real:
@@ -1016,7 +1051,7 @@ class TranscriberApp(rumps.App):
             self._ptt_cancelled = True
             threading.Thread(target=self._cancel_recording, daemon=True).start()
 
-        real = _system_modifiers()
+        real = self._take_event_mods()
         if real is not None and real != self._held_mods:
             # A lost release must not turn plain typing (⇧S) into a combo (⌃⇧S)
             logger.warning("Resynced modifiers %s -> %s before shortcut match",
