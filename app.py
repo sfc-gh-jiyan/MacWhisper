@@ -588,6 +588,9 @@ class TranscriberApp(rumps.App):
     _PREFS = ("meeting_final_pass", "qwen_strip_fillers", "qwen_tight_spacing")
 
     def _open_settings(self, _):
+        if getattr(self, "login_item", None) is None:
+            import login_item  # loads ServiceManagement only when Settings is opened
+            self.login_item = login_item.LoginItem.for_this_app()
         if self._settings is None:
             self._settings = settings_window.SettingsWindow(self, ALL_MODEL_KEYS)
         self._settings.show()

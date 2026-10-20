@@ -72,6 +72,31 @@ class SettingsModel:
             logger.info("Settings: model -> %s", label)
             self.app._set_model(label)
 
+    # ── launch at login (state lives in macOS, not in config) ──
+    def _login(self):
+        return getattr(self.app, "login_item", None)
+
+    def login_available(self) -> bool:
+        item = self._login()
+        return bool(item is not None and item.available())
+
+    def login_enabled(self) -> bool:
+        item = self._login()
+        return bool(item is not None and item.enabled())
+
+    def login_hint(self) -> str:
+        item = self._login()
+        return item.hint() if item is not None else ""
+
+    def set_login(self, on: bool) -> str:
+        """'' on success, else the error to show."""
+        item = self._login()
+        if item is None:
+            return "Launch at login is not available"
+        ok, msg = item.set_enabled(bool(on))
+        logger.info("Settings: launch at login -> %s (%s)", on, "ok" if ok else msg)
+        return "" if ok else msg
+
     # ── shortcuts ──
     def specs(self, action: str) -> list:
         return list(self.app.shortcuts.get(action, []))
@@ -167,6 +192,9 @@ def _get_controller_cls():
         def clearClicked_(self, sender):
             self._mw_owner.on_clear(sender)
 
+        def loginChanged_(self, sender):
+            self._mw_owner.on_login(sender)
+
         def windowWillClose_(self, _notification):
             self._mw_owner.stop_recording()
             self._mw_owner.restore_focus()
@@ -192,6 +220,8 @@ class SettingsWindow:
         self._tags = {}             # tag -> payload
         self._popup = None
         self._clear_buttons = {}    # action -> NSButton (clears the 2nd shortcut)
+        self._login_box = None
+        self._login_hint = None
         self._error = None
         self._recording = None      # (action, slot) while waiting for keys
         self._monitor = None
@@ -235,6 +265,10 @@ class SettingsWindow:
             btn.setTitle_(labels[slot] if slot < len(labels) else "Add…")
         for action, btn in self._clear_buttons.items():
             btn.setHidden_(len(self.model.specs(action)) < 2)    # only when a 2nd exists
+        if self._login_box is not None:
+            self._login_box.setEnabled_(self.model.login_available())
+            self._login_box.setState_(1 if self.model.login_enabled() else 0)
+            self._login_hint.setStringValue_(self.model.login_hint())
 
     # ── build ──
     def _tag(self, payload) -> int:
@@ -245,8 +279,8 @@ class SettingsWindow:
     def _build(self) -> None:
         from AppKit import (NSWindow, NSMakeRect, NSBackingStoreBuffered, NSTextField,
                             NSButton, NSPopUpButton, NSFont, NSColor, NSBox)
-        sections = 2 + len({t.section for t in TOGGLES})   # engine + toggles + shortcuts
-        rows = 1 + len(TOGGLES) + len(shortcuts.ACTIONS) + 2   # model, toggles, shortcuts, msg+hint
+        sections = 3 + len({t.section for t in TOGGLES})   # engine + toggles + general + shortcuts
+        rows = 1 + len(TOGGLES) + 2 + len(shortcuts.ACTIONS) + 2   # model, toggles, login(2), shortcuts, msg+hint
         height = sections * (ROW_H + 6) + rows * ROW_H + PAD + 12   # 12: bottom margin
         style = 1 | 2 | 4  # titled | closable | miniaturizable
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -303,6 +337,20 @@ class SettingsWindow:
             content.addSubview_(box)
             self._checkboxes[t.key] = box
             y -= ROW_H
+
+        # General: launch at login (state read from macOS on every refresh)
+        section("General")
+        box = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + 10, y, WIDTH - 2 * PAD - 10, ROW_H))
+        box.setButtonType_(3)
+        box.setTitle_("Launch MacWhisper at login")
+        box.setTarget_(ctrl)
+        box.setAction_("loginChanged:")
+        content.addSubview_(box)
+        self._login_box = box
+        y -= ROW_H
+        self._login_hint = label("", PAD + 30, y + 4, WIDTH - 2 * PAD - 30, size=11,
+                                 color=NSColor.secondaryLabelColor())
+        y -= ROW_H
 
         # Shortcuts
         section("Keyboard shortcuts (click a shortcut, then press the new keys)")
@@ -362,6 +410,11 @@ class SettingsWindow:
     def on_model(self, sender) -> None:
         title = sender.titleOfSelectedItem()
         self._safe(lambda: self.model.set_model(title), "model change")
+
+    def on_login(self, sender) -> None:
+        err = self.model.set_login(sender.state() == 1)
+        self._show_error(err)
+        self.refresh()          # the box shows macOS's real state, not the click
 
     def on_reset(self, sender) -> None:
         _, action = self._payload(sender)

@@ -2097,3 +2097,19 @@ def test_single_instance_check_runs_before_run_marker():
     src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     main = src[src.index('if __name__ == "__main__":'):]
     assert main.index("_claim_single_instance()") < main.index("RunMarker(")
+
+
+def test_open_settings_creates_login_item_lazily(monkeypatch):
+    import app
+    import login_item
+    inst = _menu_app()
+    inst._settings = None
+    made = []
+    monkeypatch.setattr(login_item.LoginItem, "for_this_app",
+                        classmethod(lambda cls: made.append(1) or cls(None)))
+    monkeypatch.setattr(app.settings_window, "SettingsWindow",
+                        lambda a, labels: MagicMock())
+    assert getattr(inst, "login_item", None) is None
+    inst._open_settings(None)
+    inst._open_settings(None)
+    assert made == [1] and inst.login_item is not None
