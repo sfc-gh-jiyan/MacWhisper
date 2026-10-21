@@ -117,6 +117,8 @@ import shortcuts
 import correction_flow
 import correction_report
 import learn
+import llm_backend
+import vocab_miner
 import vocabulary
 import quit_guard
 import single_instance
@@ -266,6 +268,10 @@ AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
 TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
 VOCAB_PATH = os.path.join(_DATA_DIR, "vocabulary.json")
 CORRECTIONS_REPORT_PATH = os.path.join(_DATA_DIR, "corrections.md")
+MINER_STATE_PATH = os.path.join(_DATA_DIR, "vocab_miner.json")
+MINER_INTERVAL_S = 24 * 3600      # learn new vocabulary at most once a day
+MINER_CHECK_S = 30 * 60           # how often to check whether a run is due
+REVIEW_IDLE_S = 120               # ask about suggestions only after 2 min without dictation
 SUBTITLE_LOG = os.path.join(_DATA_DIR, "subtitles.jsonl")
 
 
@@ -463,6 +469,9 @@ class TranscriberApp(rumps.App):
         self._reporter = crash_guard.ErrorReporter(alert=self._show_error)
         crash_guard.install_thread_excepthook(self._reporter)
         self._hotkey_stop = threading.Event()
+        self._miner_lock = threading.Lock()
+        threading.Thread(target=self._vocab_miner_scheduler, daemon=True,
+                         name="vocab-miner-scheduler").start()
 
         # Hotkey modifier tracking ({"ctrl", "alt", "shift", "cmd"} held now)
         self._held_mods: set = set()
@@ -612,6 +621,9 @@ class TranscriberApp(rumps.App):
         report = rumps.MenuItem("Error Report (7 days)…", callback=self._open_error_report)
         add_fix = rumps.MenuItem("Add Correction…", callback=self._add_correction_dialog)
         fixes = rumps.MenuItem("Corrections & Vocabulary…", callback=self._open_corrections)
+        mine = rumps.MenuItem("Learn New Vocabulary Now", callback=lambda _: threading.Thread(
+            target=self._run_vocab_miner, kwargs={"manual": True}, daemon=True).start())
+        review = rumps.MenuItem("Review Suggestions…", callback=lambda _: self._review_suggestions(force=True))
         return [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -621,6 +633,8 @@ class TranscriberApp(rumps.App):
             rumps.separator,
             add_fix,
             fixes,
+            review,
+            mine,
             rumps.separator,
             settings,
             report,
@@ -645,6 +659,107 @@ class TranscriberApp(rumps.App):
         logger.warning("Manual corrections: %s", added or r.text)
         self._set_status(msg)
         rumps.notification("MacWhisper", "Correction", msg)
+
+    # ── Vocabulary miner (local LLM, once a day) ─────────────
+
+    def _asr_model_for_mining(self):
+        """Model name stored with new dictations; mine only those (engines mishear differently)."""
+        return self.qwen_model if getattr(self, "engine", "") == "qwen" else self.current_model
+
+    def _busy_for_mining(self) -> bool:
+        session = getattr(self, "_meeting_session", None)
+        return bool(getattr(self, "recording", False) or (session and session.is_recording))
+
+    def _vocab_miner_scheduler(self):
+        time.sleep(300)   # let startup (model loads) finish first
+        while True:
+            try:
+                if (llm_backend.llm_available() and not self._busy_for_mining()
+                        and vocab_miner.due(MINER_STATE_PATH, MINER_INTERVAL_S, time.time())):
+                    self._run_vocab_miner(manual=False)
+                if self.correction.vocab.pending() and self._idle_for_review():
+                    AppHelper.callAfter(self._review_suggestions)
+            except Exception:
+                logger.exception("Vocabulary miner scheduler error")
+            time.sleep(MINER_CHECK_S)
+
+    def _run_vocab_miner(self, manual=False):
+        """Read new dictations with the local LLM and add misheard terms to the vocabulary."""
+        if not llm_backend.llm_available():
+            if manual:
+                rumps.notification("MacWhisper", "Learn vocabulary",
+                                   "Local LLM not installed (.venv-llm missing)")
+            return
+        if not self._miner_lock.acquire(blocking=False):
+            return
+        backend = None
+        try:
+            if manual:
+                self._set_status("Learning vocabulary…")
+            vocab_miner.mark_run(MINER_STATE_PATH, time.time())
+            backend = self._llm_backend = llm_backend.LLMSidecarBackend(max_restarts=0)
+            res = vocab_miner.run(
+                backend.complete, self.correction.vocab, TRANSCRIPT_LOG, MINER_STATE_PATH,
+                model=self._asr_model_for_mining(), min_new=1 if manual else vocab_miner.MIN_NEW_DICTATIONS,
+                should_stop=self._busy_for_mining)
+            self._sync_hotwords()
+            if res.active or res.pending:
+                learned = ", ".join(f"{c.heard}→{c.correct}" for c in res.active[:6])
+                msg = f"Learned {len(res.active)} new terms" + (f": {learned}" if learned else "")
+                if res.pending:
+                    msg += f" (+{len(res.pending)} pending)"
+                self._set_status(msg)
+                rumps.notification("MacWhisper", "New vocabulary", msg + "\nSee menu → Corrections & Vocabulary…")
+            elif manual:
+                why = "stopped (you started dictating)" if res.stopped else \
+                      "no new dictations" if not res.examined else "nothing new found"
+                self._set_status(f"Vocabulary: {why}")
+                rumps.notification("MacWhisper", "Learn vocabulary", why)
+        except Exception as e:
+            logger.exception("Vocabulary miner failed")
+            if manual:
+                rumps.notification("MacWhisper", "Learn vocabulary failed", str(e)[:120])
+        finally:
+            if backend is not None:
+                backend.close()   # free GPU memory right away
+            self._llm_backend = None
+            self._miner_lock.release()
+
+    def _idle_for_review(self) -> bool:
+        last = getattr(self, "_last_dictation", None)
+        return not self._busy_for_mining() and (last is None or time.monotonic() - last >= REVIEW_IDLE_S)
+
+    def _review_suggestions(self, force=False):
+        """Ask about pending suggestions: delete the wrong lines, keep the right ones."""
+        if getattr(self, "_reviewing", False):
+            return
+        lines = vocab_miner.pending_lines(self.correction.vocab)
+        if not lines:
+            if force:
+                rumps.notification("MacWhisper", "Suggestions", "No pending suggestions")
+            return
+        if not force and (not self._idle_for_review()
+                          or time.monotonic() < getattr(self, "_review_snooze_until", 0)):
+            return
+        self._reviewing = True
+        try:
+            w = rumps.Window(
+                message=(f"{len(lines)} words MacWhisper may be mishearing.\n"
+                         "Delete the lines that are WRONG, keep the right ones, then Approve.\n"
+                         "Deleted lines are never suggested again. You can add your own: heard = correct"),
+                title="Vocabulary suggestions", default_text="\n".join(lines),
+                ok="Approve", cancel="Later", dimensions=(420, min(40 + 18 * len(lines), 320)))
+            r = w.run()
+            if not r.clicked:
+                self._review_snooze_until = time.monotonic() + MINER_INTERVAL_S   # "Later" = tomorrow
+                return
+            approved, rejected = vocab_miner.apply_review(self.correction.vocab, MINER_STATE_PATH, r.text)
+            self._sync_hotwords()
+            msg = f"Approved {len(approved)}, rejected {len(rejected)}"
+            self._set_status(msg)
+            rumps.notification("MacWhisper", "Vocabulary", msg)
+        finally:
+            self._reviewing = False
 
     def _open_corrections(self, _):
         """Write corrections.md (vocabulary + what was corrected/learned) and open it."""
@@ -905,6 +1020,13 @@ class TranscriberApp(rumps.App):
                 qwen.close()   # never leave the sidecar holding GPU memory
             except Exception:
                 logger.exception("Closing the Qwen3 sidecar at quit failed")
+        llm = getattr(self, "_llm_backend", None)
+        proc = getattr(llm, "_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:   # kill, not close(): a running generation holds the backend lock
+                proc.kill()
+            except Exception:
+                logger.exception("Stopping the LLM sidecar at quit failed")
 
     def _stop_meeting_from_overlay(self):
         """Stop button in the meeting overlay (called after the user confirms).
@@ -1222,6 +1344,8 @@ class TranscriberApp(rumps.App):
                 self._held_mods = set(real)
             started = False
             mode = shortcuts.ptt_mode(self._held_mods, ptt)
+            if getattr(self, "_reviewing", False):
+                mode = None   # never paste a dictation into the review window
             if mode == "correct" and shortcuts.match_action(
                     shortcuts.event_spec(key, self._held_mods), self.shortcuts):
                 mode = None   # ⇧+key is a user shortcut: let the combo handler take it
@@ -1319,6 +1443,7 @@ class TranscriberApp(rumps.App):
     # ── Hold-to-Record ────────────────────────────────────────
 
     def _start_recording(self):
+        self._last_dictation = time.monotonic()
         self._rec_gen += 1
         gen = self._rec_gen
         self.frames    = []

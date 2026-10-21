@@ -169,13 +169,15 @@ class Vocabulary:
             if old is not None and old.term.lower() != right.lower():
                 self.entries.remove(old)
             cur = self.find(right)
+            inferred = source in ("learned", "suggested")
             if cur is None:
                 cur = Entry(term=right, source=source,
-                            status=PENDING if source == "learned" else ACTIVE, seen=0)
+                            status=PENDING if inferred else ACTIVE, seen=0)
             aliases = cur.aliases if wrong in cur.aliases else cur.aliases + (wrong,)
             seen = cur.seen + 1 if source == "learned" else cur.seen
             status = cur.status
-            if source != "learned" or seen >= LEARN_THRESHOLD:
+            # "suggested" (AI, not sure) only becomes active through approval or retype evidence
+            if not inferred or (source == "learned" and seen >= LEARN_THRESHOLD):
                 status = ACTIVE
             entry = self._put(replace(cur, aliases=aliases, seen=seen, status=status))
         logger.info("Vocabulary %s: %r -> %r (%s, seen=%d)", entry.status, wrong, right, source, entry.seen)

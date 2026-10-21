@@ -1,0 +1,3 @@
+# Local text LLM sidecar (vocabulary learning). Separate from the app venv and .venv-qwen.
+# Model: mlx-community/Qwen3-4B-Instruct-2507-4bit (~2.3 GB, downloaded on first use).
+mlx-lm==0.32.2
