@@ -93,6 +93,7 @@ import numpy as np
 import rumps
 import pyperclip
 import sounddevice as sd
+import audio_capture
 from pynput import keyboard
 from ApplicationServices import AXIsProcessTrusted
 
@@ -1308,7 +1309,7 @@ class TranscriberApp(rumps.App):
             except Exception:
                 pass
 
-        stream = sd.InputStream(
+        stream = audio_capture.open_input_stream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16",
             blocksize=1024, callback=callback
         )
