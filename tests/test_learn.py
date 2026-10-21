@@ -65,3 +65,20 @@ def test_retype_identical():
 ])
 def test_retype_only_learns_term_fixes(prev, cur):
     assert learn.retype_corrections(prev, cur) == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("哈什 = hash", [("哈什", "hash")]),
+    ("哈时=hash; 哈什 -> hash", [("哈时", "hash"), ("哈什", "hash")]),
+    ("漫威 → memory\nCIC=>CSE", [("漫威", "memory"), ("CIC", "CSE")]),
+    ("哈什应该是hash", [("哈什", "hash")]),
+    ("", []), ("nonsense", []), ("a = a", []),
+])
+def test_parse_manual(text, expected):
+    assert learn.parse_manual(text) == expected
+
+
+def test_same_sides_detected():
+    assert learn.is_same_sides("哈什应该是哈什")
+    assert not learn.is_same_sides("哈什应该是hash")
+    assert not learn.is_same_sides("今天天气不错")

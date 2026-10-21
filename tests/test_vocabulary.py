@@ -104,3 +104,21 @@ def test_save_cleans_temp_on_error(tmp_path, monkeypatch):
     with pytest.raises(TypeError):
         v.save()
     assert not [f for f in tmp_path.iterdir() if f.suffix == ".tmp"]
+
+
+def test_reload_if_changed_picks_up_external_edit(tmp_path):
+    import os, time
+    v, p = _vocab(tmp_path, [{"term": "CSE"}])
+    assert v.reload_if_changed() is False
+    p.write_text(json.dumps({"version": 1, "entries": [{"term": "hash", "aliases": ["哈什"]}]}))
+    os.utime(p, (time.time() + 5, time.time() + 5))
+    assert v.reload_if_changed() is True
+    assert v.find("hash").aliases == ("哈什",)
+    assert v.find("CSE") is None
+
+
+def test_own_save_does_not_trigger_reload(tmp_path):
+    v, p = _vocab(tmp_path, [{"term": "CSE"}])
+    v.add_correction("哈什", "hash", source="manual")
+    v.save()
+    assert v.reload_if_changed() is False

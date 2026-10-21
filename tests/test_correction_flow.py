@@ -91,3 +91,20 @@ def test_hotword_list_echo_dropped(tmp_path):
     flow, _, _, _ = _flow(tmp_path, [Entry("CSE"), Entry("Snowflake"), Entry("Cortex")])
     assert flow.process("CSE, Snowflake, Cortex").text == ""
     assert flow.process("CSE and Snowflake").text == "CSE and Snowflake"
+
+
+def test_add_manual_pairs(tmp_path):
+    flow, v, changed, _ = _flow(tmp_path)
+    assert flow.add_manual([("哈什", "hash"), ("哈时", "hash")]) == [("哈什", "hash"), ("哈时", "hash")]
+    assert v.find("hash").aliases == ("哈什", "哈时")
+    assert changed
+    assert flow.process("这个哈什会变吗 version").text == "这个hash会变吗 version"
+
+
+def test_external_edit_is_picked_up(tmp_path):
+    import json, os, time
+    flow, v, _, _ = _flow(tmp_path)
+    p = tmp_path / "v.json"
+    p.write_text(json.dumps({"version": 1, "entries": [{"term": "hash", "aliases": ["哈什"]}]}))
+    os.utime(p, (time.time() + 5, time.time() + 5))
+    assert flow.process("这个哈什").text == "这个hash"

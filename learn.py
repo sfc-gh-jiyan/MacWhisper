@@ -110,3 +110,36 @@ def retype_corrections(prev: str, cur: str) -> list[tuple[str, str]]:
         out.append((wrong, right))
     logger.debug("Retype corrections %r -> %r: %s", prev, cur, out)
     return out
+
+
+_MANUAL_SEP = re.compile(r"\s*(?:=>|->|→|=)\s*")
+
+
+def parse_manual(text: str) -> list[tuple[str, str]]:
+    """Typed corrections, one per line or ';': "哈什 = hash", "漫威 → memory", "X 应该是 Y"."""
+    pairs = []
+    for part in re.split(r"[\n;；]+", text or ""):
+        part = part.strip()
+        if not part:
+            continue
+        bits = _MANUAL_SEP.split(part, maxsplit=1)
+        if len(bits) == 2:
+            wrong, right = _clean(bits[0]), _clean(bits[1])
+            if wrong and right and wrong.lower() != right.lower() \
+                    and len(wrong) <= MAX_TERM_LEN and len(right) <= MAX_TERM_LEN:
+                pairs.append((wrong, right))
+            continue
+        parsed = parse_command(part)
+        if parsed:
+            pairs.append(parsed)
+    return pairs
+
+
+def is_same_sides(text: str) -> bool:
+    """A spoken correction whose two sides were heard the same ("哈什应该是哈什")."""
+    t = _clean(text or "")
+    for pat in _COMMANDS:
+        m = pat.match(t)
+        if m:
+            return _clean(m.group("w")).lower() == _clean(m.group("r")).lower()
+    return False
