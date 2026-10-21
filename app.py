@@ -754,8 +754,14 @@ class TranscriberApp(rumps.App):
             return
         lines = vocab_miner.pending_lines(self.correction.vocab)
         if not lines:
-            if force:
-                rumps.notification("MacWhisper", "Suggestions", "No pending suggestions")
+            if force:   # a visible answer: banners may be hidden by macOS settings
+                runs = vocab_miner._load_state(MINER_STATE_PATH).get("runs", [])
+                last = runs[-1] if runs else None
+                info = (f"Last scan: {last['at'][:16].replace('T', ' ')} — {last['examined']} dictations, "
+                        f"{last['active']} learned, {last['pending']} suggested." if last
+                        else "No scan yet — use “Learn New Vocabulary Now”.")
+                rumps.alert(title="No suggestions waiting",
+                            message=info + "\n\nSee everything learned in “Corrections & Vocabulary…”.")
             return
         if not force and (not self._idle_for_review()
                           or time.monotonic() < getattr(self, "_review_snooze_until", 0)):

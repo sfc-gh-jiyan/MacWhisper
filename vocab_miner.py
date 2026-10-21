@@ -287,8 +287,8 @@ def run(complete, vocab: Vocabulary, log_path: str, state_path: str, model: str 
             sleep(1.0)
             waited += 1.0
         report(i, len(chunks), False)
-        prompt = PROMPT.format(known=known, texts="\n".join(chunk), limit=15)
-        reply = complete(prompt, system=SYSTEM, max_tokens=1024, timeout=180.0)
+        prompt = PROMPT.format(known=known, texts="\n".join(chunk), limit=10)
+        reply = complete(prompt, system=SYSTEM, max_tokens=700, timeout=180.0)
         found += validate(parse_response(reply), corpus, vocab.entries, rejected=rejected_pairs(state_path))
     report(len(chunks), len(chunks), False)
 
@@ -331,7 +331,11 @@ def rejected_pairs(state_path: str) -> set[tuple[str, str]]:
 
 def pending_lines(vocab: Vocabulary) -> list[str]:
     """One "heard = correct" line per pending suggestion (what the review window shows)."""
-    return [f"{a} = {e.term}" for e in vocab.pending() for a in e.aliases]
+    out = []
+    for e in vocab.pending():
+        forms = e.aliases if e.status == "pending" else e.pending_aliases
+        out += [f"{a} = {e.term}" for a in forms]
+    return out
 
 
 def apply_review(vocab: Vocabulary, state_path: str, kept_text: str):
@@ -341,13 +345,17 @@ def apply_review(vocab: Vocabulary, state_path: str, kept_text: str):
     kept = {(a.lower(), b.lower()) for a, b in parse_manual(kept_text)}
     approved, rejected = [], []
     for e in list(vocab.pending()):
-        keep = tuple(a for a in e.aliases if (a.lower(), e.term.lower()) in kept)
+        forms = e.aliases if e.status == "pending" else e.pending_aliases
+        keep = tuple(a for a in forms if (a.lower(), e.term.lower()) in kept)
         approved += [(a, e.term) for a in keep]
-        rejected += [(a, e.term) for a in e.aliases if a not in keep]
+        rejected += [(a, e.term) for a in forms if a not in keep]
         with vocab._lock:
-            vocab.remove(e.term)
-            if keep:
-                vocab._put(replace(e, aliases=keep, status="active"))
+            if e.status == "pending":
+                vocab.remove(e.term)
+                if keep:
+                    vocab._put(replace(e, aliases=keep, status="active", pending_aliases=()))
+            else:   # active term: promote kept forms, drop the rest
+                vocab._put(replace(e, aliases=e.aliases + keep, pending_aliases=()))
     # Lines the user typed themselves (not from the list) are taught as manual corrections
     listed = {(a.lower(), b.lower()) for a, b in approved + rejected}
     for a, b in parse_manual(kept_text):

@@ -218,3 +218,31 @@ def test_rejections_survive_concurrent_run(tmp_path):
     vm.apply_review(v, state, kept_text="")
     vm._update_state(state, last_timestamp="2026-10-21T10:00:00")
     assert ("one sh", "one app") in vm.rejected_pairs(state)
+
+
+def test_suggestion_for_existing_active_term_stays_pending(tmp_path):
+    v = _vocab(tmp_path, [Entry("Snowflake", aliases=("snow flake",))])
+    e = v.add_correction("Snow House", "Snowflake", source="suggested")
+    assert e.aliases == ("snow flake",)                 # not applied
+    assert e.pending_aliases == ("Snow House",)
+    assert vm.pending_lines(v) == ["Snow House = Snowflake"]
+    import corrector
+    assert corrector.correct("Snow House Query", v).text == "Snow House Query"
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="")   # user deletes it
+    assert v.find("Snowflake").pending_aliases == () and v.find("Snowflake").status == "active"
+    assert ("snow house", "snowflake") in vm.rejected_pairs(str(tmp_path / "s.json"))
+
+
+def test_approving_pending_alias_of_active_term(tmp_path):
+    v = _vocab(tmp_path, [Entry("Jira", aliases=("Gra",))])
+    v.add_correction("Gira", "Jira", source="suggested")
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Gira = Jira")
+    assert v.find("Jira").aliases == ("Gra", "Gira") and v.find("Jira").pending_aliases == ()
+
+
+def test_learned_twice_on_active_term_promotes(tmp_path):
+    v = _vocab(tmp_path, [Entry("Jira", aliases=("Gra",))])
+    v.add_correction("Gira", "Jira", source="learned")
+    assert v.find("Jira").pending_aliases == ("Gira",)
+    v.add_correction("Gira", "Jira", source="learned")
+    assert "Gira" in v.find("Jira").aliases and v.find("Jira").pending_aliases == ()
