@@ -25,6 +25,8 @@ import time
 
 import numpy as np
 
+import paths
+
 from asr_backend import ASRBackend, TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ class QwenUnavailable(RuntimeError):
 
 
 def default_python_path(repo_root: str = _REPO_ROOT) -> str:
-    return os.path.join(repo_root, ".venv-qwen", "bin", "python")
+    return paths.qwen_python(repo_root)
 
 
 class QwenSidecarBackend(ASRBackend):
@@ -57,7 +59,7 @@ class QwenSidecarBackend(ASRBackend):
         self.model_repo = model_repo
         self.python_path = python_path or default_python_path()
         self.sidecar_path = sidecar_path or os.path.join(_REPO_ROOT, "qwen_sidecar.py")
-        self.log_path = log_path or os.path.expanduser("~/.macwhisper/logs/qwen_sidecar.log")
+        self.log_path = log_path or os.path.join(paths.LOG_DIR, "qwen_sidecar.log")
         self.extra_args = list(extra_args or [])
         self.env = dict(env or {})
         self.base_timeout_s = base_timeout_s

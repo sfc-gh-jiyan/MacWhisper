@@ -27,7 +27,8 @@ from subtitle_export import export_srt, export_vtt
 logger = logging.getLogger(__name__)
 
 # Meeting data directory
-MEETINGS_DIR = os.path.join(os.path.expanduser("~/.macwhisper"), "meetings")
+import paths
+MEETINGS_DIR = os.path.join(paths.DATA_DIR, "meetings")
 
 
 @dataclass

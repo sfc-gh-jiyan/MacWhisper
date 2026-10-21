@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+import paths
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -120,6 +122,6 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Summarize MacWhisper log errors")
     ap.add_argument("--days", type=int, default=7)
-    ap.add_argument("--log", default=os.path.expanduser("~/.macwhisper/logs/macwhisper.log"))
+    ap.add_argument("--log", default=paths.MAIN_LOG)
     args = ap.parse_args()
     print(render(summarize(args.log, days=args.days), days=args.days), end="")

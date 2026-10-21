@@ -125,10 +125,11 @@ SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 1.0          # seconds — LocalAgreement confirmation latency ≈ 2x this
 MAX_BUFFER_S = 8.0            # audio buffer cap (seconds) — balance inference speed vs context
 
-_DATA_DIR = os.path.expanduser("~/.macwhisper")
+import paths
+_DATA_DIR = paths.DATA_DIR
 CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
 OVERLAY_FRAME_PATH = os.path.join(_DATA_DIR, "overlay.json")
-LOG_DIR = os.path.join(_DATA_DIR, "logs")
+LOG_DIR = paths.LOG_DIR
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 ERROR_REPORT_PATH = os.path.join(LOG_DIR, "error_report.md")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
