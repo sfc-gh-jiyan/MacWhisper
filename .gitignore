@@ -32,3 +32,4 @@ setup.py
 meetings/
 .venv-eval/
 .venv-qwen/
+.venv-llm/

@@ -15,6 +15,9 @@ from vocabulary import ACTIVE, PENDING, Vocabulary
 logger = logging.getLogger(__name__)
 
 
+_SOURCE = {"seed": "built-in", "manual": "you", "voice": "you (voice)", "ai": "AI", "learned": "learned", "suggested": "AI (pending)"}
+
+
 def _cell(s) -> str:
     return str(s).replace("|", "\\|").replace("\n", " ")
 
@@ -40,9 +43,10 @@ def render(vocab: Vocabulary, log_path: str, vocab_path: str = "", limit: int = 
     if vocab_path:
         out += [f"Vocabulary file (editable): `{vocab_path}`", ""]
 
-    out += ["## Vocabulary (active)", "", "| Term | Heard as | Uses | Note |", "|---|---|---|---|"]
+    out += ["## Vocabulary (active)", "", "| Term | Heard as | Uses | Added by | Note |", "|---|---|---|---|---|"]
     for e in sorted((e for e in vocab.entries if e.status == ACTIVE), key=lambda e: -e.hits):
-        out.append(f"| {_cell(e.term)} | {_cell(', '.join(e.aliases))} | {e.hits} | {_cell(e.note)} |")
+        out.append(f"| {_cell(e.term)} | {_cell(', '.join(e.aliases))} | {e.hits} | "
+                   f"{_SOURCE.get(e.source, e.source)} | {_cell(e.note)} |")
     pending = [e for e in vocab.entries if e.status == PENDING]
     if pending:
         out += ["", "## Pending (learned once — becomes active when seen again)", "",

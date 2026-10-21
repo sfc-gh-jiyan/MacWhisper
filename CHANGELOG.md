@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Daily vocabulary learning with a local LLM** (Qwen3-4B-Instruct, 4-bit, runs in its own `.venv-llm`; the ASR environments are untouched):
+  - Once a day, when you are not dictating or in a meeting, new dictations made with the current ASR model are read and misheard terms are proposed. The model is unloaded right after.
+  - Every suggestion is checked against the real text (must appear verbatim; numbers, grammar/translation edits, stutters, spacing/inflection changes and reversals of known terms are dropped).
+  - Only clear, repeated, single-term fixes are applied automatically (e.g. 哈什 → hash); everything else waits in **Review Suggestions…** — delete the wrong lines, Approve the rest. Rejected pairs are never suggested again.
+  - Menu: **Learn New Vocabulary Now**, **Review Suggestions…**; the corrections report shows who added each term (built-in / you / AI).
+- **See and type corrections:** **Add Correction…** (`哈什 = hash`) and **Corrections & Vocabulary…**; edits to `vocabulary.json` are picked up without a restart.
 - **Self-correction (phase A)** — MacWhisper learns your terms instead of you fixing them:
   - Vocabulary (`~/.macwhisper/vocabulary.json`): terms + how they get misheard (seeded with CSE, Snowflake, Cortex, memory).
   - Vocabulary terms are sent to Qwen3 as hotwords and added to the Whisper prompt.
