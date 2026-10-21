@@ -253,7 +253,8 @@ def chunk_texts(texts: list[str], limit: int = CHUNK_CHARS) -> list[list[str]]:
 # ── main entry ───────────────────────────────────────────────
 
 def run(complete, vocab: Vocabulary, log_path: str, state_path: str, model: str | None = None,
-        min_new: int = MIN_NEW_DICTATIONS, should_stop=lambda: False) -> MiningResult:
+        min_new: int = MIN_NEW_DICTATIONS, should_pause=lambda: False, on_progress=None,
+        sleep=None, max_pause_s: float = 1800.0) -> MiningResult:
     """complete(prompt, system=..., max_tokens=..., timeout=...) -> str (e.g. LLMSidecarBackend.complete)."""
     state = _load_state(state_path)
     since = state.get("last_timestamp", "")
@@ -270,14 +271,26 @@ def run(complete, vocab: Vocabulary, log_path: str, state_path: str, model: str 
     corpus = "\n".join(texts)
     known = ", ".join(f"{a}={e.term}" for e in vocab.active() for a in e.aliases)[:1500] or "none"
     found: list[Candidate] = []
-    for chunk in chunk_texts(texts):
-        if should_stop():
-            res.stopped = True
-            logger.info("Miner: stopped (user is dictating)")
-            return res
+    import time as _time
+    sleep = sleep or _time.sleep
+    chunks = chunk_texts(texts)
+    report = on_progress or (lambda done, total, paused: None)
+    for i, chunk in enumerate(chunks):
+        waited = 0.0
+        while should_pause():          # never compete with dictation for the GPU
+            if waited == 0.0:
+                report(i, len(chunks), True)
+            if waited >= max_pause_s:
+                res.stopped = True
+                logger.warning("Miner: gave up after waiting %.0fs for the user to finish", waited)
+                return res
+            sleep(1.0)
+            waited += 1.0
+        report(i, len(chunks), False)
         prompt = PROMPT.format(known=known, texts="\n".join(chunk), limit=15)
         reply = complete(prompt, system=SYSTEM, max_tokens=1024, timeout=180.0)
         found += validate(parse_response(reply), corpus, vocab.entries, rejected=rejected_pairs(state_path))
+    report(len(chunks), len(chunks), False)
 
     unique, seen = [], set()
     for c in found:
