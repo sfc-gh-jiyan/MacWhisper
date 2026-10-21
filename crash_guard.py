@@ -16,6 +16,7 @@ import datetime
 import faulthandler
 import logging
 import os
+import paths
 import threading
 import traceback
 
@@ -121,7 +122,7 @@ class ErrorReporter:
         ]
         if while_recording:
             lines.append("The current recording may not have been saved.")
-        lines.append("Details: ~/.macwhisper/logs/macwhisper.log")
+        lines.append("Details: " + paths.MAIN_LOG.replace(os.path.expanduser("~"), "~", 1))
         message = "\n".join(lines)
         with self._lock:
             try:

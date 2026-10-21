@@ -1,4 +1,4 @@
-.PHONY: smoke qa test test-full eval-meeting qwen-setup app reset-permissions
+.PHONY: smoke qa test test-full eval-meeting qwen-setup app reset-permissions standalone
 
 # Use venv python if available, else system python
 PYTHON := $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python)
@@ -8,7 +8,7 @@ REPORT_DIR := tests/TestReport
 # Pure logic, no ML model needed. Run after every code change.
 smoke:
 	$(PYTHON) -m pytest tests/test_app.py tests/test_meeting.py \
-	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py tests/test_qwen_sidecar.py tests/test_qwen_backend.py tests/test_qwen_text.py tests/test_qwen_engine.py tests/test_shortcuts.py tests/test_settings_window.py tests/test_single_instance.py tests/test_login_item.py tests/test_quit_guard.py tests/test_qwen_meeting.py tests/test_open_input_stream.py tests/test_error_report.py tests/test_eval_meeting_live.py \
+	  tests/test_online_processor.py tests/test_meeting_dual.py tests/test_overlay.py tests/test_crash_guard.py tests/test_error_alert.py tests/test_eval_meeting.py tests/test_compare_ptt.py tests/test_simulate_stream.py tests/test_qwen_sidecar.py tests/test_qwen_backend.py tests/test_qwen_text.py tests/test_qwen_engine.py tests/test_shortcuts.py tests/test_settings_window.py tests/test_single_instance.py tests/test_login_item.py tests/test_quit_guard.py tests/test_qwen_meeting.py tests/test_open_input_stream.py tests/test_error_report.py tests/test_paths.py tests/test_eval_meeting_live.py \
 	  -m "not slow and not hardware" -q
 
 # ── Level 2: Subtitle QA (~1-2 min) ──────────────────────
@@ -45,3 +45,7 @@ test: smoke qa
 test-full: smoke qa
 	$(PYTHON) -m pytest tests/test_meeting_dual.py -m "slow" -q
 	$(PYTHON) tests/test_replay.py --top 5 --diagnose --report-dir $(REPORT_DIR)
+
+# ── Self-contained app (phase 1, ad-hoc signed) → ~/MacWhisperStandalone ──
+standalone:
+	scripts/build_standalone.sh
