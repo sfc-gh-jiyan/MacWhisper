@@ -58,6 +58,7 @@ class QwenSidecarBackend(ASRBackend):
         self.python_path = python_path or default_python_path()
         self.sidecar_path = sidecar_path or os.path.join(_REPO_ROOT, "qwen_sidecar.py")
         self.log_path = log_path or os.path.expanduser("~/.macwhisper/logs/qwen_sidecar.log")
+        self.hotwords: list[str] = []  # vocabulary terms biasing recognition (set by the app)
         self.extra_args = list(extra_args or [])
         self.env = dict(env or {})
         self.base_timeout_s = base_timeout_s
@@ -199,6 +200,8 @@ class QwenSidecarBackend(ASRBackend):
             rid = self._next_id
             req = {"id": rid, "cmd": "transcribe",
                    "pcm16_b64": base64.b64encode(pcm16.tobytes()).decode("ascii")}
+            if self.hotwords:
+                req["hotwords"] = list(self.hotwords)
             duration = len(pcm16) / SAMPLE_RATE
             timeout = self.base_timeout_s + self.per_audio_s * duration
             t0 = time.time()

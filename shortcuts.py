@@ -198,6 +198,21 @@ def ptt_allowed(held: set, ptt_spec: str) -> bool:
     return not (set(held) - {own})
 
 
+CORRECTION_MODIFIER = "shift"   # hold ⇧ + Push to Talk = teach a correction
+
+
+def ptt_mode(held: set, ptt_spec: str) -> str | None:
+    """"dictate", "correct" (only ⇧ held besides the PTT key's own modifier) or None."""
+    _, key = split(ptt_spec)
+    own = _MOD_OF_NAME.get(key)
+    extra = set(held) - {own}
+    if not extra:
+        return "dictate"
+    if extra == {CORRECTION_MODIFIER} and own != CORRECTION_MODIFIER:
+        return "correct"
+    return None
+
+
 def combo_uses_ptt_key(combo_spec: str, ptt_spec: str) -> bool:
     """True if the combo includes the PTT key's modifier (⌃⌥M with Right ⌥)."""
     mods, _ = split(combo_spec)

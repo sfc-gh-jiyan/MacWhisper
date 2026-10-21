@@ -99,7 +99,7 @@ from ApplicationServices import AXIsProcessTrusted
 
 # ── New modular imports ──────────────────────────────────
 from text_utils import (
-    BILINGUAL_PROMPT, convert_t2s, strip_trailing_repetition,
+    BILINGUAL_PROMPT, bilingual_prompt, convert_t2s, strip_trailing_repetition,
     hallucination_reason,
 )
 from asr_backend import MLXWhisperBackend
@@ -114,6 +114,8 @@ import qwen_backend
 import qwen_engine
 import settings_window
 import shortcuts
+import correction_flow
+import vocabulary
 import quit_guard
 import single_instance
 from qwen_backend import QwenUnavailable
@@ -260,6 +262,7 @@ def initial_engine(cfg: dict, qwen_env_exists: bool) -> str:
 HISTORY_DIR = _DATA_DIR
 AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
 TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
+VOCAB_PATH = os.path.join(_DATA_DIR, "vocabulary.json")
 SUBTITLE_LOG = os.path.join(_DATA_DIR, "subtitles.jsonl")
 
 
@@ -389,6 +392,9 @@ class TranscriberApp(rumps.App):
         # Keyboard shortcuts (v0.7.1): defaults fill anything missing/invalid
         self.shortcuts = shortcuts.merged(cfg.get("shortcuts"))
         self._apply_shortcut_hints()
+        # Self-correction: user vocabulary, deterministic rules, learning
+        self.correction = correction_flow.CorrectionFlow(
+            vocabulary.Vocabulary.load(VOCAB_PATH), on_change=self._sync_hotwords)
 
         # Meeting mode state
         self._meeting_session: MeetingSession | None = None
@@ -704,11 +710,19 @@ class TranscriberApp(rumps.App):
 
     # ── Qwen3-ASR engine ──────────────────────────────────────
 
+    def _sync_hotwords(self):
+        """Push vocabulary terms to Qwen3 (they bias recognition, live and final)."""
+        qwen = getattr(self, "_qwen", None)
+        flow = getattr(self, "correction", None)
+        if qwen is not None and flow is not None:
+            qwen.set_hotwords(flow.hotwords())
+
     def _start_qwen(self):
         """Start (or switch) the Qwen3 sidecar in the background."""
         if self._qwen is None:
             self._qwen = qwen_engine.QwenEngine(strip_fillers=self.qwen_strip_fillers,
                                                 tight=self.qwen_tight_spacing)
+            self._sync_hotwords()
         repo = self.qwen_model
         self._set_status("Loading Qwen3...")
 
@@ -1170,12 +1184,17 @@ class TranscriberApp(rumps.App):
                                    sorted(self._held_mods - real))
                 self._held_mods = set(real)
             started = False
-            if not self.recording and shortcuts.ptt_allowed(self._held_mods, ptt):
+            mode = shortcuts.ptt_mode(self._held_mods, ptt)
+            if mode == "correct" and shortcuts.match_action(
+                    shortcuts.event_spec(key, self._held_mods), self.shortcuts):
+                mode = None   # ⇧+key is a user shortcut: let the combo handler take it
+            if not self.recording and mode:
                 # Block hold-to-record during active meeting
                 if self._meeting_session and self._meeting_session.is_recording:
                     pass
                 else:
                     self._ptt_cancelled = False
+                    self._ptt_mode = mode
                     started = True
                     threading.Thread(target=self._start_recording, daemon=True).start()
             if mod:
@@ -1391,7 +1410,8 @@ class TranscriberApp(rumps.App):
 
         self._set_title("💬")
         self._set_status("Transcribing...")
-        self.transcribe_queue.put((list(self.frames), realtime_text))
+        self.transcribe_queue.put((list(self.frames), realtime_text,
+                                   getattr(self, "_ptt_mode", "dictate")))
         self.frames = []  # release memory immediately
 
     # ── Live Subtitles — unified loop (replaces old chunk + worker) ──
@@ -1590,13 +1610,16 @@ class TranscriberApp(rumps.App):
     def _transcription_worker(self):
         while True:
             item = self.transcribe_queue.get()
-            # Unpack: new format is (frames, realtime_text), legacy is just frames
-            if isinstance(item, tuple) and len(item) == 2:
+            # Unpack: (frames, realtime_text, mode); older producers send fewer fields
+            mode = "dictate"
+            if isinstance(item, tuple) and len(item) == 3:
+                frames, realtime_text, mode = item
+            elif isinstance(item, tuple) and len(item) == 2:
                 frames, realtime_text = item
             else:
                 frames, realtime_text = item, ""
             try:
-                self._do_transcribe(frames, realtime_text=realtime_text)
+                self._do_transcribe(frames, realtime_text=realtime_text, mode=mode)
             except Exception as e:
                 self._reporter.report("final transcription — text was not pasted", e)
             finally:
@@ -1642,7 +1665,9 @@ class TranscriberApp(rumps.App):
             task, prompt = "translate", None
             print(f"[INFO] Translating {duration:.1f}s audio to English...")
         else:
-            task, prompt = "transcribe", BILINGUAL_PROMPT
+            flow = getattr(self, "correction", None)
+            terms = flow.hotwords(10) if flow and duration >= 1.5 else []
+            task, prompt = "transcribe", bilingual_prompt(terms)
             print(f"[INFO] Transcribing {duration:.1f}s audio...")
 
         t0 = time.time()
@@ -1659,6 +1684,9 @@ class TranscriberApp(rumps.App):
             text = text[len(prompt):].strip()
 
         text = convert_t2s(text)
+        if prompt and "Terms:" in text:
+            text = text.split("术语 Terms:")[0].split("Terms:")[0].strip()
+            print("[INFO] Removed echoed vocabulary prompt")
         if prompt and (text in prompt or text.rstrip("。.") in prompt):
             text = ""
             print("[INFO] Result (prompt echo filtered)")
@@ -1672,7 +1700,20 @@ class TranscriberApp(rumps.App):
         print(f"[INFO] Result: {text}")
         return text, result
 
-    def _do_transcribe(self, frames, realtime_text=""):
+    def _teach_correction(self, raw_text):
+        """⇧ + Push to Talk: "CIC 应该是 CSE" teaches a correction; nothing is pasted."""
+        learned = self.correction.teach(raw_text)
+        if learned:
+            wrong, right = learned
+            msg = f"Learned: {wrong} → {right}"
+            logger.warning("Correction taught by voice: %r -> %r", wrong, right)
+        else:
+            msg = f"Didn't catch a correction in: {raw_text[:60]}"
+            logger.warning("Correction command not understood: %r", raw_text)
+        self._set_status(msg)
+        rumps.notification("MacWhisper", "Correction", msg + "\nSay: \"X 应该是 Y\" / \"X should be Y\"")
+
+    def _do_transcribe(self, frames, realtime_text="", mode="dictate"):
         """Final transcription pass using the ASR backend.
 
         This runs after recording stops. For short recordings or when
@@ -1708,8 +1749,15 @@ class TranscriberApp(rumps.App):
                 wf.writeframes(audio.tobytes())
             print(f"[INFO] Saved audio: {wav_path}")
 
-        text, model_used = self._final_text(audio_float, audio)
+        raw_text, model_used = self._final_text(audio_float, audio)
         result = self._last_whisper_result
+        if mode == "correct":
+            self._teach_correction(raw_text)
+            return
+        flow = getattr(self, "correction", None)
+        processed = (flow.process(raw_text) if flow is not None
+                     else correction_flow.Processed(raw_text=raw_text, text=raw_text))
+        text = processed.text
 
         # Save enhanced history (word timestamps: Whisper only)
         save_enhanced_history(
@@ -1731,6 +1779,10 @@ class TranscriberApp(rumps.App):
             "duration_s": round(duration, 1),
             "text": text,
         }
+        if processed.corrections or processed.learned:
+            log_entry["raw_text"] = raw_text
+            log_entry["corrections"] = processed.corrections
+            log_entry["learned"] = processed.learned
         if realtime_text:
             log_entry["realtime_text"] = realtime_text
         with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as f:

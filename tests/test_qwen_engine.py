@@ -151,3 +151,21 @@ def test_start_async_reports_result():
     assert done.wait(5)
     assert result == {"ok": False, "err": "env missing"}
     assert not eng.is_ready
+
+
+def test_hotwords_applied_to_current_and_new_backends():
+    made = []
+
+    def factory(repo):
+        b = FakeBackend()
+        made.append(b)
+        return b
+
+    eng = qe.QwenEngine(backend_factory=factory)
+    eng.set_hotwords(["CSE"])
+    eng.start("m1")
+    assert made[-1].hotwords == ["CSE"]
+    eng.set_hotwords(["CSE", "Snowflake"])
+    assert made[-1].hotwords == ["CSE", "Snowflake"]
+    eng.start("m2")
+    assert made[-1].hotwords == ["CSE", "Snowflake"]
