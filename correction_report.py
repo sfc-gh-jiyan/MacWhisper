@@ -47,11 +47,12 @@ def render(vocab: Vocabulary, log_path: str, vocab_path: str = "", limit: int = 
     for e in sorted((e for e in vocab.entries if e.status == ACTIVE), key=lambda e: -e.hits):
         out.append(f"| {_cell(e.term)} | {_cell(', '.join(e.aliases))} | {e.hits} | "
                    f"{_SOURCE.get(e.source, e.source)} | {_cell(e.note)} |")
-    pending = [e for e in vocab.entries if e.status == PENDING]
+    pending = [(e.term, e.aliases if e.status == PENDING else e.pending_aliases)
+               for e in vocab.entries if e.status == PENDING or e.pending_aliases]
     if pending:
-        out += ["", "## Pending (learned once — becomes active when seen again)", "",
-                "| Term | Heard as | Seen |", "|---|---|---|"]
-        out += [f"| {_cell(e.term)} | {_cell(', '.join(e.aliases))} | {e.seen} |" for e in pending]
+        out += ["", "## Pending — waiting for your review (menu → Review Suggestions…)", "",
+                "| Term | Heard as |", "|---|---|"]
+        out += [f"| {_cell(t)} | {_cell(', '.join(forms))} |" for t, forms in pending]
 
     rows = _read_log(log_path)
     teach = [r for r in rows if r.get("type") == "teach"][-limit:]

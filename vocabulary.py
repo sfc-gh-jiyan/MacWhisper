@@ -42,6 +42,7 @@ class Entry:
     status: str = ACTIVE
     hits: int = 0
     seen: int = 1            # sightings of an inferred correction
+    pending_aliases: tuple[str, ...] = ()   # inferred forms awaiting review (not applied)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Entry":
@@ -54,11 +55,13 @@ class Entry:
             status=d.get("status", ACTIVE) if d.get("status") in (ACTIVE, PENDING) else ACTIVE,
             hits=int(d.get("hits", 0)),
             seen=int(d.get("seen", 1)),
+            pending_aliases=tuple(str(a) for a in d.get("pending_aliases", ()) if str(a).strip()),
         )
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["aliases"] = list(self.aliases)
+        d["pending_aliases"] = list(self.pending_aliases)
         return d
 
 
@@ -139,8 +142,9 @@ class Vocabulary:
             return [e for e in self.entries if e.status == ACTIVE]
 
     def pending(self) -> list[Entry]:
+        """Entries with anything awaiting review (pending entry, or pending forms of an active term)."""
         with self._lock:
-            return [e for e in self.entries if e.status == PENDING]
+            return [e for e in self.entries if e.status == PENDING or e.pending_aliases]
 
     def hotwords(self, limit: int = 50) -> list[str]:
         ranked = sorted(self.active(), key=lambda e: -e.hits)
@@ -170,10 +174,25 @@ class Vocabulary:
                 self.entries.remove(old)
             cur = self.find(right)
             inferred = source in ("learned", "suggested")
+            if inferred and cur is not None and cur.status == ACTIVE:
+                # Never apply an inferred form to an active term without review / repeated evidence
+                if wrong in cur.aliases:
+                    return cur
+                if source == "learned" and wrong in cur.pending_aliases:
+                    entry = self._put(replace(cur, aliases=cur.aliases + (wrong,),
+                                              pending_aliases=tuple(a for a in cur.pending_aliases if a != wrong)))
+                else:
+                    pend = cur.pending_aliases if wrong in cur.pending_aliases else cur.pending_aliases + (wrong,)
+                    entry = self._put(replace(cur, pending_aliases=pend))
+                logger.info("Vocabulary %s: %r -> %r (%s, pending review on active term)",
+                            entry.status, wrong, right, source)
+                return entry
             if cur is None:
                 cur = Entry(term=right, source=source,
                             status=PENDING if inferred else ACTIVE, seen=0)
             aliases = cur.aliases if wrong in cur.aliases else cur.aliases + (wrong,)
+            if not inferred:
+                cur = replace(cur, pending_aliases=tuple(a for a in cur.pending_aliases if a != wrong))
             seen = cur.seen + 1 if source == "learned" else cur.seen
             status = cur.status
             # "suggested" (AI, not sure) only becomes active through approval or retype evidence
