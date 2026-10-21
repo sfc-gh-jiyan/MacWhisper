@@ -63,7 +63,23 @@ class CorrectionFlow:
         terms = {t.lower() for t in self.vocab.hotwords(200)}
         return len(parts) >= 3 and all(p.lower() in terms for p in parts)
 
+    def _reload(self) -> None:
+        try:
+            if self.vocab.reload_if_changed():
+                self._on_change()
+        except Exception:
+            logger.exception("Reloading vocabulary failed")
+
+    def add_manual(self, pairs) -> list[tuple[str, str]]:
+        """Corrections typed by the user (menu "Add Correction…"); active at once."""
+        self._reload()
+        added = [(w, r) for w, r in pairs if self.vocab.add_correction(w, r, source="manual")]
+        if added:
+            self._changed()
+        return added
+
     def process(self, raw_text: str) -> Processed:
+        self._reload()
         if not raw_text:
             return Processed(raw_text="", text="")
         if self._is_hotword_echo(raw_text):
@@ -91,6 +107,7 @@ class CorrectionFlow:
                          corrections=result.changes, learned=learned)
 
     def teach(self, raw_text: str) -> tuple[str, str] | None:
+        self._reload()
         parsed = learn.parse_command(raw_text)
         if parsed is None:
             logger.info("Correction not understood: %r", raw_text)

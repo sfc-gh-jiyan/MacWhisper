@@ -115,6 +115,8 @@ import qwen_engine
 import settings_window
 import shortcuts
 import correction_flow
+import correction_report
+import learn
 import vocabulary
 import quit_guard
 import single_instance
@@ -263,6 +265,7 @@ HISTORY_DIR = _DATA_DIR
 AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
 TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
 VOCAB_PATH = os.path.join(_DATA_DIR, "vocabulary.json")
+CORRECTIONS_REPORT_PATH = os.path.join(_DATA_DIR, "corrections.md")
 SUBTITLE_LOG = os.path.join(_DATA_DIR, "subtitles.jsonl")
 
 
@@ -607,6 +610,8 @@ class TranscriberApp(rumps.App):
     def _build_menu(self) -> list:
         settings = rumps.MenuItem("Settings…", callback=self._open_settings, key=",")
         report = rumps.MenuItem("Error Report (7 days)…", callback=self._open_error_report)
+        add_fix = rumps.MenuItem("Add Correction…", callback=self._add_correction_dialog)
+        fixes = rumps.MenuItem("Corrections & Vocabulary…", callback=self._open_corrections)
         return [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -614,10 +619,42 @@ class TranscriberApp(rumps.App):
             rumps.separator,
             self.item_meeting,
             rumps.separator,
+            add_fix,
+            fixes,
+            rumps.separator,
             settings,
             report,
             rumps.separator,
         ]
+
+    def _add_correction_dialog(self, _):
+        """Type corrections the ASR can't hear right, e.g. "哈什 = hash"."""
+        w = rumps.Window(
+            message="One per line:  heard = correct\n例如：哈什 = hash    漫威 = memory    CIC = CSE",
+            title="Add Correction", default_text="", ok="Add", cancel="Cancel",
+            dimensions=(320, 80))
+        r = w.run()
+        if not r.clicked or not r.text.strip():
+            return
+        pairs = learn.parse_manual(r.text)
+        added = self.correction.add_manual(pairs) if pairs else []
+        if added:
+            msg = "Added: " + ", ".join(f"{a} → {b}" for a, b in added)
+        else:
+            msg = "Nothing added. Use: heard = correct (e.g. 哈什 = hash)"
+        logger.warning("Manual corrections: %s", added or r.text)
+        self._set_status(msg)
+        rumps.notification("MacWhisper", "Correction", msg)
+
+    def _open_corrections(self, _):
+        """Write corrections.md (vocabulary + what was corrected/learned) and open it."""
+        try:
+            self.correction.vocab.reload_if_changed()
+            path = correction_report.write(self.correction.vocab, TRANSCRIPT_LOG, CORRECTIONS_REPORT_PATH)
+            subprocess.Popen(["open", path])
+        except Exception as e:
+            logger.exception("Corrections report failed")
+            rumps.notification("MacWhisper", "Corrections report failed", str(e))
 
     def _open_error_report(self, _):
         """Write a de-duplicated error summary of the last 7 days and open it."""
@@ -1707,11 +1744,22 @@ class TranscriberApp(rumps.App):
             wrong, right = learned
             msg = f"Learned: {wrong} → {right}"
             logger.warning("Correction taught by voice: %r -> %r", wrong, right)
+        elif learn.is_same_sides(raw_text):
+            msg = (f"Both sides were heard the same (“{raw_text[:40]}”). "
+                   "Use menu → Add Correction… and type it, e.g. 哈什 = hash")
+            logger.warning("Correction command heard both sides the same: %r", raw_text)
         else:
             msg = f"Didn't catch a correction in: {raw_text[:60]}"
             logger.warning("Correction command not understood: %r", raw_text)
+        try:
+            with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"timestamp": datetime.datetime.now().isoformat(), "type": "teach",
+                                    "raw_text": raw_text, "learned": list(learned) if learned else None},
+                                   ensure_ascii=False) + "\n")
+        except OSError:
+            logger.exception("Could not log correction command")
         self._set_status(msg)
-        rumps.notification("MacWhisper", "Correction", msg + "\nSay: \"X 应该是 Y\" / \"X should be Y\"")
+        rumps.notification("MacWhisper", "Correction", msg)
 
     def _do_transcribe(self, frames, realtime_text="", mode="dictate"):
         """Final transcription pass using the ASR backend.

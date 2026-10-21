@@ -69,6 +69,25 @@ class Vocabulary:
 
     def __post_init__(self):
         self._lock = threading.RLock()
+        self._mtime = self._file_mtime()
+
+    def _file_mtime(self) -> float | None:
+        try:
+            return os.stat(self.path).st_mtime
+        except OSError:
+            return None
+
+    def reload_if_changed(self) -> bool:
+        """Pick up edits made to the file outside the app (e.g. in a text editor)."""
+        mtime = self._file_mtime()
+        if mtime is None or mtime == self._mtime:
+            return False
+        fresh = Vocabulary.load(self.path)
+        with self._lock:
+            self.entries = fresh.entries
+            self._mtime = self._file_mtime()
+        logger.info("Vocabulary reloaded from %s (%d entries)", self.path, len(self.entries))
+        return True
 
     # ── persistence ──────────────────────────────────────────
     @classmethod
@@ -101,6 +120,7 @@ class Vocabulary:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
+            self._mtime = self._file_mtime()
         except BaseException:
             try:
                 os.unlink(tmp)
