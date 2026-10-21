@@ -697,7 +697,7 @@ class TranscriberApp(rumps.App):
             if manual:
                 self._set_status("Learning vocabulary…")
             vocab_miner.mark_run(MINER_STATE_PATH, time.time())
-            backend = llm_backend.LLMSidecarBackend(max_restarts=0)
+            backend = self._llm_backend = llm_backend.LLMSidecarBackend(max_restarts=0)
             res = vocab_miner.run(
                 backend.complete, self.correction.vocab, TRANSCRIPT_LOG, MINER_STATE_PATH,
                 model=self._asr_model_for_mining(), min_new=1 if manual else vocab_miner.MIN_NEW_DICTATIONS,
@@ -722,6 +722,7 @@ class TranscriberApp(rumps.App):
         finally:
             if backend is not None:
                 backend.close()   # free GPU memory right away
+            self._llm_backend = None
             self._miner_lock.release()
 
     def _idle_for_review(self) -> bool:
@@ -1019,6 +1020,13 @@ class TranscriberApp(rumps.App):
                 qwen.close()   # never leave the sidecar holding GPU memory
             except Exception:
                 logger.exception("Closing the Qwen3 sidecar at quit failed")
+        llm = getattr(self, "_llm_backend", None)
+        proc = getattr(llm, "_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:   # kill, not close(): a running generation holds the backend lock
+                proc.kill()
+            except Exception:
+                logger.exception("Stopping the LLM sidecar at quit failed")
 
     def _stop_meeting_from_overlay(self):
         """Stop button in the meeting overlay (called after the user confirms).
@@ -1336,6 +1344,8 @@ class TranscriberApp(rumps.App):
                 self._held_mods = set(real)
             started = False
             mode = shortcuts.ptt_mode(self._held_mods, ptt)
+            if getattr(self, "_reviewing", False):
+                mode = None   # never paste a dictation into the review window
             if mode == "correct" and shortcuts.match_action(
                     shortcuts.event_spec(key, self._held_mods), self.shortcuts):
                 mode = None   # ⇧+key is a user shortcut: let the combo handler take it

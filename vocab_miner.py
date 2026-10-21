@@ -16,7 +16,10 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
+
+from corrector import _latin_pattern
 
 from vocabulary import Vocabulary
 
@@ -137,7 +140,8 @@ def _is_rewrite(heard: str, correct: str) -> bool:
 def auto_activate(c: "Candidate") -> bool:
     """Apply without asking only for clear, repeated, single-term fixes."""
     single = len(_words(c.heard)) <= 1 and len(_CJK.findall(c.heard)) <= 4
-    return c.confidence == "high" and single and c.count >= 2
+    english_target = bool(re.search(r"[A-Za-z]{2,}", c.correct)) and not _CJK.search(c.correct)
+    return c.confidence == "high" and single and english_target and c.count >= 2
 
 
 def validate(cands: list[dict], corpus: str, _vocab_entries, rejected=frozenset()) -> list[Candidate]:
@@ -163,7 +167,8 @@ def validate(cands: list[dict], corpus: str, _vocab_entries, rejected=frozenset(
             continue
         if _is_rewrite(heard, correct):
             continue
-        count = corpus.count(heard)
+        count = (len(_latin_pattern(heard).findall(corpus)) if re.search(r"[A-Za-z]", heard)
+                 else corpus.count(heard))
         if count == 0:
             logger.debug("Miner: dropped %r (not in transcripts)", heard)
             continue
@@ -181,6 +186,19 @@ def _load_state(path: str) -> dict:
             return json.load(f)
     except (OSError, ValueError):
         return {}
+
+
+_STATE_LOCK = threading.Lock()
+
+
+def _update_state(path: str, **fields) -> dict:
+    """Read-modify-write under a lock so concurrent writers never lose each other's fields."""
+    with _STATE_LOCK:
+        state = _load_state(path)
+        for k, v in fields.items():
+            state[k] = v(state) if callable(v) else v
+        _save_state(path, state)
+        return state
 
 
 def _save_state(path: str, state: dict) -> None:
@@ -272,11 +290,10 @@ def run(complete, vocab: Vocabulary, log_path: str, state_path: str, model: str 
             continue
         (res.active if entry.status == "active" else res.pending).append(c)
     vocab.save()
-    state["last_timestamp"] = rows[-1][0]
-    state.setdefault("runs", []).append({"at": rows[-1][0], "examined": len(rows),
-                                         "active": len(res.active), "pending": len(res.pending)})
-    state["runs"] = state["runs"][-30:]
-    _save_state(state_path, state)
+    run_info = {"at": rows[-1][0], "examined": len(rows),
+                "active": len(res.active), "pending": len(res.pending)}
+    _update_state(state_path, last_timestamp=rows[-1][0],
+                  runs=lambda s: (s.get("runs", []) + [run_info])[-30:])
     logger.warning("Vocabulary miner: %d dictations, %d active, %d pending: %s",
                    len(rows), len(res.active), len(res.pending),
                    [(c.heard, c.correct) for c in res.active + res.pending])
@@ -290,9 +307,7 @@ def due(state_path: str, interval_s: float, now: float) -> bool:
 
 
 def mark_run(state_path: str, now: float) -> None:
-    state = _load_state(state_path)
-    state["last_run_epoch"] = now
-    _save_state(state_path, state)
+    _update_state(state_path, last_run_epoch=now)
 
 
 # ── user review of pending suggestions ───────────────────────
@@ -313,12 +328,13 @@ def apply_review(vocab: Vocabulary, state_path: str, kept_text: str):
     kept = {(a.lower(), b.lower()) for a, b in parse_manual(kept_text)}
     approved, rejected = [], []
     for e in list(vocab.pending()):
-        for a in e.aliases:
-            (approved if (a.lower(), e.term.lower()) in kept else rejected).append((a, e.term))
-        if any((a.lower(), e.term.lower()) in kept for a in e.aliases):
-            vocab.approve(e.term)
-        else:
+        keep = tuple(a for a in e.aliases if (a.lower(), e.term.lower()) in kept)
+        approved += [(a, e.term) for a in keep]
+        rejected += [(a, e.term) for a in e.aliases if a not in keep]
+        with vocab._lock:
             vocab.remove(e.term)
+            if keep:
+                vocab._put(replace(e, aliases=keep, status="active"))
     # Lines the user typed themselves (not from the list) are taught as manual corrections
     listed = {(a.lower(), b.lower()) for a, b in approved + rejected}
     for a, b in parse_manual(kept_text):
@@ -326,8 +342,7 @@ def apply_review(vocab: Vocabulary, state_path: str, kept_text: str):
             vocab.add_correction(a, b, source="manual")
             approved.append((a, b))
     vocab.save()
-    state = _load_state(state_path)
-    state["rejected"] = sorted({tuple(p) for p in state.get("rejected", [])} | set(rejected))
-    _save_state(state_path, state)
+    _update_state(state_path, rejected=lambda s: sorted(
+        {tuple(p) for p in s.get("rejected", [])} | set(rejected)))
     logger.warning("Vocabulary review: approved %s, rejected %s", approved, rejected)
     return approved, rejected

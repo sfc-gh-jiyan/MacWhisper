@@ -176,3 +176,32 @@ def test_review_approves_kept_and_remembers_rejected(tmp_path):
     out = vm.validate([{"heard": "One SH", "correct": "One App", "confidence": "high"}], "One SH",
                       _vocab_entries=[], rejected=vm.rejected_pairs(state))
     assert out == []
+
+
+def test_auto_activate_requires_english_target():
+    assert vm.auto_activate(vm.Candidate("memory", "内存", "high", count=5)) is False
+    assert vm.auto_activate(vm.Candidate("哈什", "hash", "high", count=2)) is True
+
+
+def test_latin_count_uses_word_boundaries():
+    out = vm.validate([{"heard": "CI", "correct": "CSE", "confidence": "high"}], "CICD CICD CI",
+                      _vocab_entries=[])
+    assert out[0].count == 1
+
+
+def test_partial_review_keeps_only_kept_aliases(tmp_path):
+    v = _vocab(tmp_path)
+    v.add_correction("Gira", "Jira", source="suggested")
+    v.add_correction("Java Management", "Jira", source="suggested")
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Gira = Jira")
+    assert v.find("Jira").aliases == ("Gira",) and v.find("Jira").status == "active"
+
+
+def test_rejections_survive_concurrent_run(tmp_path):
+    state = str(tmp_path / "s.json")
+    vm._save_state(state, {"last_timestamp": "", "rejected": []})
+    v = _vocab(tmp_path)
+    v.add_correction("One SH", "One App", source="suggested")
+    vm.apply_review(v, state, kept_text="")
+    vm._update_state(state, last_timestamp="2026-10-21T10:00:00")
+    assert ("one sh", "one app") in vm.rejected_pairs(state)
