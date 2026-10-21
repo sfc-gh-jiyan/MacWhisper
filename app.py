@@ -698,10 +698,25 @@ class TranscriberApp(rumps.App):
                 self._set_status("Learning vocabulary…")
             vocab_miner.mark_run(MINER_STATE_PATH, time.time())
             backend = self._llm_backend = llm_backend.LLMSidecarBackend(max_restarts=0)
+            started = []
+
+            def progress(done, total, paused):
+                if not started:
+                    started.append(1)
+                    rumps.notification("MacWhisper", "Learning vocabulary",
+                                       f"Reading your recent dictations ({total} parts). "
+                                       "It pauses while you dictate.")
+                if paused:
+                    self._set_status(f"Learning vocabulary… {done}/{total} (paused while you dictate)")
+                    return
+                self._set_status(f"Learning vocabulary… {done}/{total}")
+                if not self._busy_for_mining():
+                    self._set_title(f"📖 {done}/{total}")
+
             res = vocab_miner.run(
                 backend.complete, self.correction.vocab, TRANSCRIPT_LOG, MINER_STATE_PATH,
                 model=self._asr_model_for_mining(), min_new=1 if manual else vocab_miner.MIN_NEW_DICTATIONS,
-                should_stop=self._busy_for_mining)
+                should_pause=self._busy_for_mining, on_progress=progress)
             self._sync_hotwords()
             if res.active or res.pending:
                 learned = ", ".join(f"{c.heard}→{c.correct}" for c in res.active[:6])
@@ -710,11 +725,13 @@ class TranscriberApp(rumps.App):
                     msg += f" (+{len(res.pending)} pending)"
                 self._set_status(msg)
                 rumps.notification("MacWhisper", "New vocabulary", msg + "\nSee menu → Corrections & Vocabulary…")
-            elif manual:
-                why = "stopped (you started dictating)" if res.stopped else \
-                      "no new dictations" if not res.examined else "nothing new found"
+            elif manual or res.stopped:
+                why = "stopped (you kept dictating for 30 min)" if res.stopped else \
+                      "no new dictations" if not res.examined else "done — nothing new found"
                 self._set_status(f"Vocabulary: {why}")
                 rumps.notification("MacWhisper", "Learn vocabulary", why)
+            if manual and self.correction.vocab.pending() and not self._busy_for_mining():
+                AppHelper.callAfter(lambda: self._review_suggestions(force=True))
         except Exception as e:
             logger.exception("Vocabulary miner failed")
             if manual:
@@ -723,6 +740,8 @@ class TranscriberApp(rumps.App):
             if backend is not None:
                 backend.close()   # free GPU memory right away
             self._llm_backend = None
+            if not self._busy_for_mining():
+                self._set_title(self._idle_icon)
             self._miner_lock.release()
 
     def _idle_for_review(self) -> bool:

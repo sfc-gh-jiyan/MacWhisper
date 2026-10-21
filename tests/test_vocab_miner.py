@@ -84,12 +84,25 @@ def test_run_needs_minimum_new_dictations(tmp_path):
     assert res.skipped and not called
 
 
-def test_run_stops_when_asked(tmp_path):
-    log = _log(tmp_path, ["x 哈什 " * 200] * 10)
-    called = []
+def test_run_pauses_while_busy_then_finishes_with_progress(tmp_path):
+    log = _log(tmp_path, ["x 哈什 " * 400] * 10)          # several chunks
+    busy = iter([True, True, False] + [False] * 50)
+    progress, called, slept = [], [], []
     res = vm.run(lambda *a, **k: called.append(1) or "[]", _vocab(tmp_path), log,
-                 str(tmp_path / "s.json"), model=MODEL, min_new=1, should_stop=lambda: True)
-    assert res.stopped and not called
+                 str(tmp_path / "s.json"), model=MODEL, min_new=1,
+                 should_pause=lambda: next(busy), on_progress=lambda d, t, p: progress.append((d, t, p)),
+                 sleep=slept.append)
+    assert not res.stopped and called
+    assert slept                                          # waited while busy
+    assert progress[0][2] is True                          # reported "paused"
+    assert progress[-1][0] == progress[-1][1]              # finished all chunks
+
+
+def test_run_gives_up_after_long_pause(tmp_path):
+    log = _log(tmp_path, ["x 哈什"] * 3)
+    res = vm.run(lambda *a, **k: "[]", _vocab(tmp_path), log, str(tmp_path / "s.json"), model=MODEL,
+                 min_new=1, should_pause=lambda: True, sleep=lambda s: None, max_pause_s=5)
+    assert res.stopped
 
 
 def test_chunks_split_long_history():
