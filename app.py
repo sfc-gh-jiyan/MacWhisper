@@ -130,6 +130,7 @@ CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
 OVERLAY_FRAME_PATH = os.path.join(_DATA_DIR, "overlay.json")
 LOG_DIR = os.path.join(_DATA_DIR, "logs")
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
+ERROR_REPORT_PATH = os.path.join(LOG_DIR, "error_report.md")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
 INSTANCE_LOCK_PATH = os.path.join(_DATA_DIR, ".instance.lock")
 _INSTANCE_LOCK = None  # held for the whole process (GC would release the lock)
@@ -599,6 +600,7 @@ class TranscriberApp(rumps.App):
 
     def _build_menu(self) -> list:
         settings = rumps.MenuItem("Settings…", callback=self._open_settings, key=",")
+        report = rumps.MenuItem("Error Report (7 days)…", callback=self._open_error_report)
         return [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -607,8 +609,20 @@ class TranscriberApp(rumps.App):
             self.item_meeting,
             rumps.separator,
             settings,
+            report,
             rumps.separator,
         ]
+
+    def _open_error_report(self, _):
+        """Write a de-duplicated error summary of the last 7 days and open it."""
+        import error_report
+        try:
+            path = error_report.write_report(
+                os.path.join(LOG_DIR, "macwhisper.log"), ERROR_REPORT_PATH, days=7)
+            subprocess.Popen(["open", path])
+        except Exception as e:
+            logger.exception("Error report failed")
+            rumps.notification("MacWhisper", "Error report failed", str(e))
 
     # ── Settings window ───────────────────────────────────────
 
