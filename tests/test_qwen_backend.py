@@ -133,3 +133,14 @@ def test_sidecar_killed_between_requests_records_exit_code(tmp_path):
         assert "exited (code" in b.last_error
     finally:
         b.close()
+
+
+def test_hotwords_sent_to_sidecar(tmp_path):
+    b = _backend(tmp_path)
+    try:
+        b.hotwords = ["CSE", "Snowflake", "memory"]
+        assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese hw=3"
+        b.hotwords = []
+        assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese"
+    finally:
+        b.close()

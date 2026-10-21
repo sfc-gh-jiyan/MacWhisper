@@ -147,3 +147,13 @@ def test_non_ascii_digits_rejected():
     with pytest.raises(ValueError):
         sc.normalize("ctrl+vk²")
     assert sc.merged({"meeting": ["ctrl+vk²"]})["meeting"] == sc.DEFAULTS["meeting"]
+
+
+def test_ptt_mode():
+    assert sc.ptt_mode(set(), "alt_r") == "dictate"
+    assert sc.ptt_mode({"alt"}, "alt_r") == "dictate"
+    assert sc.ptt_mode({"alt", "shift"}, "alt_r") == "correct"
+    assert sc.ptt_mode({"shift"}, "f13") == "correct"
+    assert sc.ptt_mode({"alt", "ctrl"}, "alt_r") is None
+    assert sc.ptt_mode({"shift", "ctrl"}, "alt_r") is None
+    assert sc.ptt_mode({"shift"}, "shift_r") == "dictate"

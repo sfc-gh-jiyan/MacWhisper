@@ -4,6 +4,18 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **Self-correction (phase A)** — MacWhisper learns your terms instead of you fixing them:
+  - Vocabulary (`~/.macwhisper/vocabulary.json`): terms + how they get misheard (seeded with CSE, Snowflake, Cortex, memory).
+  - Vocabulary terms are sent to Qwen3 as hotwords and added to the Whisper prompt.
+  - Rules on every dictation: spelled acronyms joined (`C S E` → `CSE`, stutters like `I I` kept), aliases replaced (`CIC` → `CSE`, `漫威` → `memory` only in mixed Chinese/English text), canonical casing.
+  - Teach by voice: hold **⇧ + Push to Talk** and say "CIC 应该是 CSE" / "change CIC to CSE" — nothing is pasted, the correction is active at once.
+  - Retype learning: re-dictating nearly the same sentence within 30 s records the changed words; a correction becomes active after it is seen twice.
+  - `transcripts.jsonl` keeps `raw_text`, `corrections` and `learned` when something changed.
+  - `tests/eval_corrections.py` replays saved transcripts through the rules (text only) to check for false positives.
+
 ## [0.7.3] — 2026-10-20
 
 ### Changed

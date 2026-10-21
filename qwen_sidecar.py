@@ -33,6 +33,7 @@ import numpy as np
 
 SAMPLE_RATE = 16000
 DEFAULT_LANGUAGE = "Chinese"  # keeps code-switched English verbatim (no translation)
+MAX_HOTWORDS = 64      # keep the prompt (and decode latency) small
 
 
 def decode_audio(pcm16_b64: str) -> np.ndarray:
@@ -61,7 +62,12 @@ def handle(req: dict, model_fn) -> dict:
     try:
         audio = decode_audio(req["pcm16_b64"])
         t0 = time.time()
-        text = model_fn(audio, req.get("language") or DEFAULT_LANGUAGE)
+        language = req.get("language") or DEFAULT_LANGUAGE
+        hotwords = req.get("hotwords")
+        if isinstance(hotwords, list) and hotwords:
+            text = model_fn(audio, language, [str(h) for h in hotwords][:MAX_HOTWORDS])
+        else:
+            text = model_fn(audio, language)
         return {"id": rid, "ok": True, "text": text or "",
                 "infer_s": round(time.time() - t0, 3),
                 "audio_s": round(len(audio) / SAMPLE_RATE, 2)}
@@ -73,14 +79,20 @@ def load_model_fn(model_repo: str):
     from mlx_audio.stt.utils import load
     model = load(model_repo)
 
-    def run(audio: np.ndarray, language: str) -> str:
+    def run(audio: np.ndarray, language: str, hotwords=None) -> str:
+        if hotwords and not getattr(run, "no_hotwords", False):
+            try:
+                return model.generate(audio, language=language, hotwords=hotwords).text
+            except TypeError as e:   # older mlx-audio: no hotwords argument
+                run.no_hotwords = True
+                print(f"hotwords unsupported ({e}); continuing without", file=sys.stderr, flush=True)
         return model.generate(audio, language=language).text
 
     run(np.zeros(SAMPLE_RATE, dtype=np.float32), DEFAULT_LANGUAGE)  # warm Metal kernels
     return run
 
 
-def fake_model_fn(audio: np.ndarray, language: str) -> str:
+def fake_model_fn(audio: np.ndarray, language: str, hotwords=None) -> str:
     """Deterministic stand-in for tests: text encodes length and language."""
     if os.environ.get("QWEN_FAKE_CRASH_AFTER"):
         fake_model_fn.calls = getattr(fake_model_fn, "calls", 0) + 1
@@ -89,7 +101,8 @@ def fake_model_fn(audio: np.ndarray, language: str) -> str:
     delay = float(os.environ.get("QWEN_FAKE_DELAY_S", "0"))
     if delay:
         time.sleep(delay)
-    return f"fake {len(audio) / SAMPLE_RATE:.1f}s {language}"
+    text = f"fake {len(audio) / SAMPLE_RATE:.1f}s {language}"
+    return f"{text} hw={len(hotwords)}" if hotwords else text
 
 
 def watch_parent(interval: float = 2.0) -> None:

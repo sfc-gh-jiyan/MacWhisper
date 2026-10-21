@@ -2278,3 +2278,47 @@ def test_meeting_stays_on_whisper_when_qwen_not_ready(monkeypatch):
     inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=False)
     assert kw.get("processor_factory") is None
     assert kw.get("extended_silence_ms", 2000) == 2000
+
+
+def _correction_app(tmp_path, asr_text):
+    import app
+    import correction_flow
+    import vocabulary
+    from asr_backend import TranscriptionResult
+
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst.translate_mode = False
+    inst.current_model = "mlx-community/whisper-small-mlx"
+    inst.save_audio = False
+    inst._live_loop_done = threading.Event()
+    inst._live_loop_done.set()
+    inst._backend = MagicMock()
+    inst._backend.transcribe.return_value = TranscriptionResult(text=asr_text, segments=[])
+    vocab = vocabulary.Vocabulary(path=str(tmp_path / "vocabulary.json"),
+                                  entries=[vocabulary.Entry("CSE", aliases=("CIC",))])
+    inst.correction = correction_flow.CorrectionFlow(vocab)
+    return app, inst
+
+
+def test_dictation_applies_vocabulary_and_logs_raw(tmp_path):
+    app, inst = _correction_app(tmp_path, "我是一个C I C")
+    log = tmp_path / "transcripts.jsonl"
+    with patch("app.TRANSCRIPT_LOG", str(log)), patch("app.MEETINGS_DIR", str(tmp_path)), \
+         patch("app.AUDIO_DIR", str(tmp_path / "audio")), patch("app._DATA_DIR", str(tmp_path)), \
+         patch.object(inst, "_auto_paste") as paste:
+        inst._do_transcribe(_make_frames(5, 1024))
+    paste.assert_called_once_with("我是一个CSE ")
+    entry = json.loads(log.read_text().splitlines()[-1])
+    assert entry["text"] == "我是一个CSE" and entry["raw_text"] == "我是一个C I C"
+
+
+def test_correction_mode_teaches_and_never_pastes(tmp_path):
+    app, inst = _correction_app(tmp_path, "漫威应该是memory")
+    with patch("app.TRANSCRIPT_LOG", str(tmp_path / "t.jsonl")), \
+         patch("app.MEETINGS_DIR", str(tmp_path)), patch("app._DATA_DIR", str(tmp_path)), \
+         patch("app.rumps.notification"), patch.object(inst, "_set_status"), \
+         patch.object(inst, "_auto_paste") as paste:
+        inst._do_transcribe(_make_frames(5, 1024), mode="correct")
+    paste.assert_not_called()
+    assert inst.correction.vocab.find("memory").status == "active"
+    assert (tmp_path / "vocabulary.json").exists()

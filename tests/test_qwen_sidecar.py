@@ -57,3 +57,29 @@ def test_parse_line_rejects_garbage():
     assert qs.parse_line("not json") is None
     assert qs.parse_line(json.dumps([1, 2])) is None
     assert qs.parse_line(json.dumps({"cmd": "ping"})) == {"cmd": "ping"}
+
+
+def test_hotwords_passed_to_model():
+    seen = {}
+
+    def model_fn(audio, language, hotwords=None):
+        seen["hw"] = hotwords
+        return "ok"
+
+    qs.handle({"id": 8, "cmd": "transcribe", "pcm16_b64": _pcm_b64([0]), "hotwords": ["CSE", "Snowflake"]},
+              model_fn)
+    assert seen["hw"] == ["CSE", "Snowflake"]
+
+
+def test_no_hotwords_keeps_two_arg_call():
+    calls = []
+    qs.handle({"id": 9, "cmd": "transcribe", "pcm16_b64": _pcm_b64([0])},
+              lambda audio, language: calls.append(language) or "ok")
+    assert calls
+
+
+def test_bad_hotwords_ignored():
+    calls = []
+    qs.handle({"id": 10, "cmd": "transcribe", "pcm16_b64": _pcm_b64([0]), "hotwords": "CSE"},
+              lambda audio, language: calls.append(1) or "ok")
+    assert calls

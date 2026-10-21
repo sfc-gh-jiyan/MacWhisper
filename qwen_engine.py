@@ -36,6 +36,7 @@ class QwenEngine:
         self._ok = False
         self.started_ok = False   # became ready at least once for this model
         self.last_error = ""
+        self.hotwords: list[str] = []
         self._lock = threading.Lock()
 
     @property
@@ -52,6 +53,7 @@ class QwenEngine:
                 except Exception:
                     logger.debug("closing previous Qwen backend failed", exc_info=True)
             self.backend = self._factory(model_repo)
+            self.backend.hotwords = list(self.hotwords)
             self.model_repo = model_repo
             self.started_ok = False
             self._ok = bool(self.backend.start())
@@ -60,6 +62,13 @@ class QwenEngine:
                                                    "Qwen3 sidecar failed to start")
             logger.info("QwenEngine start %s -> ready=%s %s", model_repo, self._ok, self.last_error)
             return self._ok
+
+    def set_hotwords(self, terms) -> None:
+        """Vocabulary terms that bias recognition (kept across sidecar restarts)."""
+        self.hotwords = list(terms)
+        if self.backend is not None:
+            self.backend.hotwords = list(self.hotwords)
+        logger.debug("Qwen hotwords: %d terms", len(self.hotwords))
 
     def start_async(self, model_repo: str, on_done=None) -> None:
         def run():
