@@ -124,6 +124,11 @@ class VoiceActivityDetector:
         silence_ms = int(self._silence_samples * 1000 / self.sample_rate)
         return silence_ms >= self.min_silence_ms
 
+    @property
+    def silence_ms(self) -> int:
+        """Current continuous silence, in ms (read-only)."""
+        return int(self._silence_samples * 1000 / self.sample_rate)
+
     def is_extended_silence(self, threshold_ms: int = 2000) -> bool:
         """Return True if silence exceeds a longer threshold.
 

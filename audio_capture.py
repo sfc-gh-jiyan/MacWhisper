@@ -23,6 +23,38 @@ SAMPLE_RATE = 16000
 
 logger = logging.getLogger(__name__)
 
+_PA_REINIT_LOCK = threading.Lock()
+
+
+def _reinit_portaudio() -> None:
+    """Re-initialize PortAudio so it re-enumerates audio devices.
+
+    PortAudio snapshots the device list at init; after a device change
+    (headset, Bluetooth, dock, sleep/wake) opening a stream can fail with
+    -9986 until the list is refreshed.
+    """
+    with _PA_REINIT_LOCK:
+        try:
+            sd._terminate()
+        except Exception as e:
+            logger.warning("PortAudio terminate failed: %s", e)
+        try:
+            sd._initialize()
+        except Exception as e:
+            logger.warning("PortAudio initialize failed: %s", e)
+
+
+def open_input_stream(**kwargs) -> sd.InputStream:
+    """Open an sd.InputStream; on PortAudioError refresh devices and retry once."""
+    try:
+        return sd.InputStream(**kwargs)
+    except sd.PortAudioError as e:
+        logger.warning("Opening input stream failed (%s) — re-initializing PortAudio and retrying", e)
+        _reinit_portaudio()
+        stream = sd.InputStream(**kwargs)
+        logger.info("Input stream opened after PortAudio re-init")
+        return stream
+
 
 class AudioSource(ABC):
     """Abstract audio source interface.
@@ -74,7 +106,7 @@ class MicrophoneSource(AudioSource):
             if self._callback is not None:
                 self._callback(indata.copy())
 
-        self._stream = sd.InputStream(
+        self._stream = open_input_stream(
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",

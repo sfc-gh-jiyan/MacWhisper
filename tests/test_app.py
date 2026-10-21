@@ -1943,10 +1943,10 @@ def test_meeting_stop_hint_follows_shortcuts():
     assert overlay.meeting_stop_hint == "⌃⌥M"
 
 
-def test_default_qwen_model_is_1_7b():
-    """User choice (2026-10-19): Qwen3 1.7B is the default engine model."""
+def test_default_qwen_model_is_0_6b():
+    """User choice (2026-10-20): Qwen3 0.6B is the default engine model."""
     import app
-    assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-1.7B-bf16"
+    assert app.DEFAULT_QWEN_MODEL == "mlx-community/Qwen3-ASR-0.6B-bf16"
 
 
 # ── Meeting shortcut: auto-repeat and double start (user report 19:47) ──
@@ -2143,46 +2143,55 @@ def test_main_skips_console_handler_when_stderr_is_the_log():
     assert "_stream_is_file(sys.stderr, _log_file)" in main
 
 
-# ── SIGTERM (logout/shutdown, ./run.sh restart) quits cleanly ──
+# ── Quit cleanup (v0.7.3): SIGTERM and menu Quit share it ──
 
-def test_sigterm_handler_schedules_normal_quit(monkeypatch):
-    """Regression: SIGTERM killed the app without atexit/before_quit, so the
-    run marker stayed and every next launch said "crashed last time"."""
-    import signal
+def _quit_app(in_meeting):
     import app
-    queued = []
-    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
-    quits = []
-    monkeypatch.setattr(app.rumps, "quit_application", lambda *a: quits.append(1))
-    installed = {}
-    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
-    app._install_sigterm_quit()
-    handler = installed[signal.SIGTERM]
-    handler(signal.SIGTERM, None)
-    assert quits == []                       # never touches AppKit inside the handler
-    fn, args = queued[0]
-    fn(*args)
-    assert quits == [1]
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._qwen = MagicMock()
+    if in_meeting:
+        inst._meeting_session = MagicMock(is_recording=True, transcript_path="/tmp/m.md")
+    else:
+        inst._meeting_session = None
+    return inst
 
 
-def test_sigterm_handler_quits_only_once(monkeypatch):
-    import signal
-    import app
-    queued = []
-    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append((fn, a)))
-    installed = {}
-    monkeypatch.setattr(app.signal, "signal", lambda sig, h: installed.setdefault(sig, h))
-    app._install_sigterm_quit()
-    installed[signal.SIGTERM](signal.SIGTERM, None)
-    installed[signal.SIGTERM](signal.SIGTERM, None)
-    assert len(queued) == 1
+def test_quit_cleanup_saves_active_meeting_quickly_without_final_pass():
+    """Regression: Quit / logout during a meeting lost the whole meeting."""
+    inst = _quit_app(in_meeting=True)
+    session = inst._meeting_session
+    marker = MagicMock()
+    inst._quit_cleanup(marker)
+    session.stop.assert_called_once_with(wait_s=2.0)
+    session.release_audio.assert_called_once()     # no Qwen3 final pass on quit
+    marker.clear.assert_called_once()
+    inst._qwen.close.assert_called_once()
 
 
-def test_main_installs_sigterm_quit():
+def test_quit_cleanup_without_meeting():
+    inst = _quit_app(in_meeting=False)
+    marker = MagicMock()
+    inst._quit_cleanup(marker)
+    marker.clear.assert_called_once()
+    inst._qwen.close.assert_called_once()
+
+
+def test_quit_cleanup_continues_after_a_failing_step():
+    inst = _quit_app(in_meeting=True)
+    inst._meeting_session.stop.side_effect = RuntimeError("disk full")
+    marker = MagicMock()
+    inst._quit_cleanup(marker)
+    marker.clear.assert_called_once()              # still cleared
+    inst._qwen.close.assert_called_once()          # still closed
+
+
+def test_main_uses_quit_guard_for_sigterm_and_quit():
     import app
     src = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
     main = src[src.index('if __name__ == "__main__":'):]
-    assert "_install_sigterm_quit()" in main
+    assert "quit_guard.install(" in main
+    assert "before_quit.register(_guard.run_cleanup)" in main
+    assert "_install_sigterm_quit" not in src
 
 
 # ── Permission diagnostics (v0.7.2): ask macOS, don't guess ──
@@ -2218,3 +2227,54 @@ def test_check_permissions_logs_status_and_warns_input_monitoring(monkeypatch, c
     assert "accessibility=True" in text and "input_monitoring=False" in text
     assert "Input Monitoring" in text
     inst._notify.assert_called()
+
+
+# ── Meeting live subtitles on Qwen3 (v0.7.3) ──────────────────
+
+def _start_meeting_capturing(monkeypatch, qwen_ok):
+    import app
+    inst = _meeting_app(meeting_subtitles=False)
+    inst.recording = False
+    inst._backend = MagicMock()
+    inst._backend_ready = MagicMock()
+    inst._backend_ready.wait.return_value = True
+    inst._vad = MagicMock()
+    inst._vad_available = True
+    inst._qwen = MagicMock()
+    inst.qwen_strip_fillers = True
+    inst.qwen_tight_spacing = True
+    inst._set_title = MagicMock()
+    inst._set_status = MagicMock()
+    inst.item_meeting = MagicMock()
+    inst._qwen_live_ok = lambda: qwen_ok
+    inst._qwen_failed = MagicMock()
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.is_recording = False
+
+        def start(self):
+            self.is_recording = True
+    monkeypatch.setattr(app, "MeetingSession", FakeSession)
+    inst._start_meeting()
+    return inst, captured
+
+
+def test_meeting_uses_qwen_live_when_ready(monkeypatch):
+    import qwen_meeting
+    inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=True)
+    proc = kw["processor_factory"]()
+    assert isinstance(proc, qwen_meeting.QwenSegmentProcessor)
+    assert proc.backend is inst._qwen.backend
+    assert kw["extended_silence_ms"] == 800
+    kw["on_engine_failed"](RuntimeError("sidecar died"))
+    inst._qwen_failed.assert_called_once()
+    assert "fallback_factory" in kw            # None = MeetingSession's own Whisper processor
+
+
+def test_meeting_stays_on_whisper_when_qwen_not_ready(monkeypatch):
+    inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=False)
+    assert kw.get("processor_factory") is None
+    assert kw.get("extended_silence_ms", 2000) == 2000

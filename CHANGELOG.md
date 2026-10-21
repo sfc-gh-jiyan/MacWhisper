@@ -4,6 +4,32 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.3] — 2026-10-20
+
+### Changed
+- **Default Qwen3 model is 0.6B again** (1.7B since v0.7.1). It applies when the config has no `qwen_model`; a saved choice is kept. 1.7B stays in the menu.
+
+### Added
+- **Meeting live subtitles on Qwen3.** When Qwen3 is the selected engine, the subtitles you see during a meeting now come from Qwen3 too, not only the transcript after the meeting.
+  - Each sentence is re-transcribed about once a second while you speak. A segment ends after a 0.8 s pause, or at 15 s.
+  - If Qwen3 fails mid-meeting, Whisper takes over for the rest of it; nothing already transcribed is lost, and you get one alert.
+  - Measured on 3 meeting recordings with the app running (Qwen3 1.7B vs Whisper large-v3):
+
+    | | Qwen3 | Whisper |
+    |---|---|---|
+    | Error rate (MER), 31 s / 36 s recording | 0.12–0.14 / 0.13–0.16 | 0.66 / 0.39 |
+    | First words on screen | 1.4–2.0 s | 2.4–12.6 s |
+    | Slowest decode | 0.75 s (never over 1 s) | up to 7.7 s |
+
+    The Qwen3 range covers two runs, since these numbers vary between runs.
+  - Whisper meetings work as before. The Qwen3 full pass after the meeting still runs.
+- `tests/eval_meeting_live.py` replays meeting recordings in real time through the real meeting pipeline and reports error rate, latency and decode times.
+
+### Fixed
+- **SIGTERM (logout, shutdown, `./run.sh` restart) sometimes did nothing for 10+ s.** Python only runs a signal handler when the main thread runs Python code, and the main thread sits in macOS's event loop (worse while an alert is open). SIGTERM is now picked up immediately; if a normal quit does not finish within 8 s, MacWhisper cleans up and exits anyway.
+- **Quitting during a meeting lost the meeting.** Menu → Quit, logout and shutdown now save the live transcript first.
+- **Gray subtitle text covered the window.** Gray (not yet confirmed) text is limited to about one line; the newest words are kept. In Whisper meetings, text that never got confirmed now ends its segment after a pause and reaches the transcript, instead of staying gray.
+
 ## [0.7.2] — 2026-10-20
 
 ### Added

@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.7.2
+MacWhisper - macOS Menu Bar App  v0.7.3
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + T  toggle translate mode (all speech -> English)
@@ -9,7 +9,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 import json
 import io
@@ -93,6 +93,7 @@ import numpy as np
 import rumps
 import pyperclip
 import sounddevice as sd
+import audio_capture
 from pynput import keyboard
 from ApplicationServices import AXIsProcessTrusted
 
@@ -113,7 +114,7 @@ import qwen_backend
 import qwen_engine
 import settings_window
 import shortcuts
-import signal
+import quit_guard
 import single_instance
 from qwen_backend import QwenUnavailable
 
@@ -157,27 +158,6 @@ def _permission_status() -> dict:
     """Ask macOS directly — the hotkeys need both, for THIS app identity."""
     return {"accessibility": bool(AXIsProcessTrusted()),
             "input_monitoring": _input_monitoring_granted()}
-
-
-def _install_sigterm_quit() -> None:
-    """Quit normally on SIGTERM (logout/shutdown, ./run.sh restart).
-
-    Python's default SIGTERM ends the process without atexit/before_quit, so
-    the run marker stayed and the next launch said "crashed last time", and
-    the Qwen3 sidecar was not closed. The handler only queues a normal quit
-    on the main run loop (never touches AppKit itself); Python runs it the
-    next time the main thread executes Python code (the 2 s status timer).
-    """
-    state = {"queued": False}
-
-    def _on_sigterm(signum, _frame):
-        if state["queued"]:
-            return
-        state["queued"] = True
-        logging.getLogger(__name__).warning("SIGTERM received — quitting normally")
-        AppHelper.callAfter(rumps.quit_application)
-
-    signal.signal(signal.SIGTERM, _on_sigterm)
 
 
 def _notify_already_running() -> None:
@@ -229,7 +209,7 @@ QWEN_MODEL_OPTIONS = {
 }
 ALL_MODEL_OPTIONS = {**MODEL_OPTIONS, **QWEN_MODEL_OPTIONS}
 ALL_MODEL_KEYS = list(ALL_MODEL_OPTIONS.keys())
-DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 1.7B (Best, zh+en)"]
+DEFAULT_QWEN_MODEL = QWEN_MODEL_OPTIONS["Qwen3 0.6B (Fast, zh+en)"]
 
 
 _flag_listener_cache: dict = {}
@@ -829,6 +809,38 @@ class TranscriberApp(rumps.App):
         self._save_config()
         print(f"[INFO] Save audio {'enabled' if self.save_audio else 'disabled'}")
 
+    def _quit_cleanup(self, marker) -> None:
+        """Everything that must happen before the process ends (menu Quit,
+        SIGTERM from logout/shutdown or ./run.sh). Each step is independent:
+        one failing must not skip the others.
+
+        An active meeting is saved (live transcript) with a short wait; the
+        Qwen3 full pass is skipped — there is no time for it at quit.
+        """
+        session = getattr(self, "_meeting_session", None)
+        if session is not None:
+            try:
+                session.stop(wait_s=2.0)
+                logger.warning("Quit during a meeting — live transcript saved: %s",
+                               getattr(session, "transcript_path", None))
+            except Exception:
+                logger.exception("Saving the meeting at quit failed")
+            try:
+                session.release_audio()
+            except Exception:
+                logger.exception("Releasing meeting audio at quit failed")
+            self._meeting_session = None
+        try:
+            marker.clear()
+        except Exception:
+            logger.exception("Clearing the run marker at quit failed")
+        qwen = getattr(self, "_qwen", None)
+        if qwen is not None:
+            try:
+                qwen.close()   # never leave the sidecar holding GPU memory
+            except Exception:
+                logger.exception("Closing the Qwen3 sidecar at quit failed")
+
     def _stop_meeting_from_overlay(self):
         """Stop button in the meeting overlay (called after the user confirms).
 
@@ -881,6 +893,7 @@ class TranscriberApp(rumps.App):
             on_update=self._meeting_overlay_update,
             capture_system_audio=True,
             save_audio=self.save_meeting_audio,
+            **self._meeting_live_engine(),
         )
 
         # Show overlay (unless the user turned Meeting Subtitles off)
@@ -892,6 +905,32 @@ class TranscriberApp(rumps.App):
         self.item_meeting.title = "✅ Meeting Mode: Recording"
         self._set_status("Meeting recording...")
         print("[INFO] Meeting Mode started")
+
+    def _meeting_live_engine(self) -> dict:
+        """MeetingSession kwargs for live subtitles (v0.7.3).
+
+        Qwen3 when it is the selected engine and its sidecar is ready now:
+        one segment at a time, closed after 0.8 s of silence (Whisper keeps
+        2 s). If Qwen3 fails mid-meeting, Whisper takes over the rest of the
+        meeting and the usual one-time alert is shown. Otherwise: Whisper,
+        unchanged.
+        """
+        if not self._qwen_live_ok():
+            logger.info("Meeting live subtitles: Whisper")
+            return {}
+        import qwen_meeting
+        qwen = self._qwen
+        strip = getattr(self, "qwen_strip_fillers", True)
+        tight = getattr(self, "qwen_tight_spacing", True)
+        logger.info("Meeting live subtitles: Qwen3 (segments, Whisper fallback)")
+        return {
+            "processor_factory": lambda: qwen_meeting.QwenSegmentProcessor(
+                qwen.backend, strip_fillers=strip, tight=tight),
+            "fallback_factory": None,     # MeetingSession builds its Whisper processor
+            "on_engine_failed": lambda exc: self._qwen_failed(
+                f"live meeting subtitles: {exc}", exc),
+            "extended_silence_ms": 800,
+        }
 
     def _stop_meeting(self):
         """Stop the current meeting session."""
@@ -1270,7 +1309,7 @@ class TranscriberApp(rumps.App):
             except Exception:
                 pass
 
-        stream = sd.InputStream(
+        stream = audio_capture.open_input_stream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16",
             blocksize=1024, callback=callback
         )
@@ -1788,18 +1827,22 @@ if __name__ == "__main__":
         )
     _marker.create()
     atexit.register(_marker.clear)
-    rumps.events.before_quit.register(_marker.clear)  # Quit menu → NSApp.terminate_
-    _install_sigterm_quit()   # logout/shutdown: same clean path as Quit
 
     _check_audio_device()
     try:
         _app = TranscriberApp()
 
-        def _close_qwen(*_):
-            if _app._qwen is not None:
-                _app._qwen.close()   # never leave the sidecar holding GPU memory
-        atexit.register(_close_qwen)
-        rumps.events.before_quit.register(_close_qwen)
+        # Menu Quit and SIGTERM (logout/shutdown, ./run.sh restart) share one
+        # cleanup: save an active meeting, clear the run marker, close Qwen3.
+        # SIGTERM first asks for a normal quit; if the main thread is stuck
+        # (e.g. a modal alert), the guard cleans up and exits after 8 s.
+        _guard = quit_guard.install(
+            request_quit=lambda: AppHelper.callAfter(rumps.quit_application),
+            cleanup=lambda: _app._quit_cleanup(_marker),
+            deadline_s=8.0,
+        )
+        rumps.events.before_quit.register(_guard.run_cleanup)
+        atexit.register(_guard.run_cleanup)
         _app.run()
     except Exception:
         import traceback

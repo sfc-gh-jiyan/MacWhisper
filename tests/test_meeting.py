@@ -887,3 +887,227 @@ class TestMeetingFinalTranscript:
         s = self._session(None)
         s.release_audio()
         assert s._mic_frames == [] and s._sys_frames == []
+
+
+class TestSegmentCloseWithoutConfirmedWords:
+    """v0.7.3 regression: with unstable recognition nothing ever confirmed, and
+    both segment-close triggers required committed words, so the whole
+    hypothesis stayed gray on screen and never reached the transcript."""
+
+    def test_extended_silence_closes_a_segment_with_only_gray_text(self):
+        state = {"n": 0}
+        SPEECH_CHUNKS = 48
+
+        class SilenceAfterSpeechVad:
+            def reset(self):
+                state["n"] = 0
+
+            # ~3 s of speech (1024-sample chunks), then silence: enough for
+            # several decodes (first one needs 1.5 s of buffer) before it.
+            def process_chunk(self, chunk):
+                state["n"] += 1
+                speech = state["n"] < SPEECH_CHUNKS
+                return {"is_speech": speech, "silence_ms": 0 if speech else 2500,
+                        "speech_ms": 100}
+
+            def is_extended_silence(self, *a, **k):
+                return state["n"] >= SPEECH_CHUNKS
+
+        # Every decode is different: LocalAgreement never confirms a word.
+        responses = [f"alpha{i} beta{i} gamma{i} delta{i}" for i in range(200)]
+        backend = MockBackend(responses=responses)
+        session = MeetingSession(backend=backend, vad=SilenceAfterSpeechVad(),
+                                 audio_source=MockAudioSource(), min_chunk_size=0.3)
+        session.start()
+        deadline = time.time() + 6
+        while time.time() < deadline and not session.segments:
+            time.sleep(0.05)
+        segments_before_stop = len(session.segments)
+        session.stop()
+        assert segments_before_stop >= 1, "gray-only text never became a segment"
+        assert session.segments[0].text.strip()
+
+    def test_has_text_helper(self):
+        session = MeetingSession(backend=MockBackend(), vad=None,
+                                 audio_source=MockAudioSource())
+        assert session._segment_has_text() is False
+
+
+class TestQwenLiveInMeeting:
+    """v0.7.3: Meeting Mode live subtitles on Qwen3, with Whisper fallback."""
+
+    def _session(self, qwen_texts, fail_on=None, speech_chunks=10_000, **kw):
+        from types import SimpleNamespace
+        import qwen_meeting
+        from online_processor import OnlineASRProcessor
+        from qwen_backend import QwenUnavailable
+
+        class FakeQwen:
+            def __init__(self):
+                self.calls = 0
+
+            def transcribe(self, audio):
+                self.calls += 1
+                if fail_on is not None and self.calls >= fail_on:
+                    raise QwenUnavailable("sidecar died")
+                return SimpleNamespace(text=qwen_texts[min(self.calls - 1, len(qwen_texts) - 1)])
+
+        state = {"n": 0}
+
+        class Vad:
+            def reset(self):
+                state["n"] = 0
+
+            def process_chunk(self, chunk):
+                state["n"] += 1
+                sp = state["n"] < speech_chunks
+                return {"is_speech": sp, "silence_ms": 0 if sp else 1500, "speech_ms": 100}
+
+            def is_extended_silence(self, ms=None, *a, **k):
+                return state["n"] >= speech_chunks
+
+        qwen = FakeQwen()
+        failures = []
+        whisper = MockBackend(responses=["whisper takes over"] * 500)
+        session = MeetingSession(
+            backend=whisper, vad=Vad(), audio_source=MockAudioSource(),
+            processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(qwen, step=0.2,
+                                                                        min_audio_s=0.3, **kw),
+            fallback_factory=lambda: OnlineASRProcessor(backend=whisper, vad=None,
+                                                        min_chunk_size=0.3),
+            on_engine_failed=failures.append,
+            extended_silence_ms=800,
+        )
+        return session, qwen, failures
+
+    def _run(self, session, until, timeout=6):
+        session.start()
+        deadline = time.time() + timeout
+        while time.time() < deadline and not until():
+            time.sleep(0.05)
+        session.stop()
+
+    def test_default_is_still_whisper(self):
+        from online_processor import OnlineASRProcessor
+        session = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource())
+        session.start()
+        try:
+            assert isinstance(session._processor, OnlineASRProcessor)
+        finally:
+            session.stop()
+
+    def test_qwen_segment_is_committed_after_silence(self):
+        session, qwen, failures = self._session(["大家好", "大家好今天开会"], speech_chunks=30)
+        self._run(session, until=lambda: session.segments)
+        assert session.segments and "大家好" in session.segments[0].text
+        assert qwen.calls >= 2 and not failures
+
+    def test_long_speech_is_cut_at_max_segment_length(self):
+        session, qwen, failures = self._session(["一直在说话"], max_segment_s=2.0)
+        self._run(session, until=lambda: len(session.segments) >= 2)
+        assert len(session.segments) >= 2               # no unbounded segment
+
+    def test_qwen_failure_switches_the_rest_of_the_meeting_to_whisper(self):
+        from online_processor import OnlineASRProcessor
+        session, qwen, failures = self._session(["ok"], fail_on=2)
+        self._run(session, until=lambda: failures and isinstance(
+            session._processor, OnlineASRProcessor))
+        assert len(failures) == 1                       # reported once
+        assert qwen.calls == 2                          # Qwen3 not retried
+
+
+class TestShortFragmentWaits:
+    def test_loop_asks_processor_before_closing_on_short_silence(self):
+        from types import SimpleNamespace
+
+        class Proc:
+            committed = []
+            committed_history = []
+            buffer_time_offset = 0.0
+            _last_committed_raw = ""
+            last_debug = {}
+            audio_buffer = np.zeros(16000 * 2, dtype=np.float32)
+            transcript_buffer = SimpleNamespace(peek_unconfirmed=lambda: ["x"])
+
+            def __init__(self):
+                self.asked = []
+
+            def ready_to_close(self, silence_ms):
+                self.asked.append(silence_ms)
+                return False
+
+        session = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource())
+        session._processor = Proc()
+        assert session._may_close_on_silence(900) is False
+        assert session._processor.asked == [900]
+
+
+class TestStopVsLoopRace:
+    """Review CRITICAL: stop(wait_s) used the processor while the loop
+    thread could still be inside a (slow) Qwen3 decode."""
+
+    def _slow_session(self, decode_s, texts=("大家好今天开会",), fail=False):
+        from types import SimpleNamespace
+        import qwen_meeting
+        from qwen_backend import QwenUnavailable
+        state = {"inside": 0, "overlap": 0, "calls": 0}
+
+        class SlowQwen:
+            def transcribe(self, audio):
+                state["calls"] += 1
+                state["inside"] += 1
+                if state["inside"] > 1:
+                    state["overlap"] += 1
+                time.sleep(decode_s)
+                state["inside"] -= 1
+                if fail and state["calls"] >= 2:
+                    raise QwenUnavailable("died")
+                return SimpleNamespace(text=texts[0])
+
+        class Vad:
+            def reset(self):
+                pass
+
+            def process_chunk(self, c):
+                return {"is_speech": True, "silence_ms": 0, "speech_ms": 100}
+
+            def is_extended_silence(self, *a, **k):
+                return False
+        whisper = MockBackend(responses=["whisper text here"] * 200)
+        failures = []
+        session = MeetingSession(
+            backend=whisper, vad=Vad(), audio_source=MockAudioSource(),
+            processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(
+                SlowQwen(), step=0.1, min_audio_s=0.3),
+            on_engine_failed=failures.append)
+        return session, state, failures
+
+    def test_stop_never_overlaps_a_running_decode(self):
+        session, state, _ = self._slow_session(decode_s=1.0)
+        session.start()
+        time.sleep(1.2)                       # a decode is in progress
+        session.stop(wait_s=0.1)              # wait times out on purpose
+        assert state["overlap"] == 0
+        assert session.segments, "last segment lost"
+
+    def test_first_segment_without_text_yet_is_still_saved(self):
+        # min_audio_s=0.3 then a slow first decode: at stop() the segment
+        # has > 0.3 s of audio but no decoded text yet.
+        session, state, _ = self._slow_session(decode_s=0.6)
+        session.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and state["calls"] < 1:
+            time.sleep(0.01)                  # first decode has started
+        assert state["calls"] == 1 and state["inside"] == 1
+        session.stop()
+        assert session.segments and "大家好" in session.segments[0].text
+
+    def test_qwen_failure_in_final_close_falls_back_to_whisper(self):
+        session, state, failures = self._slow_session(decode_s=0.01, fail=True)
+        session.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and not (state["calls"] >= 1 and state["inside"] == 0):
+            time.sleep(0.01)                  # first decode done; next one fails
+        session.stop()
+        assert failures                        # reported
+        assert session.segments, "last segment lost after fallback"

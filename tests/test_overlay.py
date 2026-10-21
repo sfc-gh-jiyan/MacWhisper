@@ -219,3 +219,62 @@ def test_meeting_label_shows_current_stop_shortcut(monkeypatch):
     monkeypatch.setattr(overlay, "meeting_stop_hint", "")
     assert overlay.meeting_label().startswith("● Meeting Recording")
     assert "to stop" not in overlay.meeting_label() or "Stop" in overlay.meeting_label()
+
+
+# ── Gray (unconfirmed) text cap (v0.7.3) ──────────────────────
+
+def test_cap_tail_keeps_short_text():
+    import overlay
+    assert overlay.cap_tail("hello world", 120) == "hello world"
+    assert overlay.cap_tail("", 120) == ""
+
+
+def test_cap_tail_keeps_the_newest_part_with_ellipsis():
+    """Regression: gray text had no limit and covered the whole window."""
+    import overlay
+    text = " ".join(f"w{i}" for i in range(200))
+    out = overlay.cap_tail(text, 40)
+    assert out.startswith("…")
+    assert out.endswith("w199")                        # newest words kept
+    assert overlay.display_width(out) <= 40          # "…" included
+
+
+def test_cap_tail_does_not_split_english_words():
+    import overlay
+    out = overlay.cap_tail("alpha beta gamma delta epsilon", 15)
+    assert out == "…delta epsilon"
+
+
+def test_cap_tail_counts_cjk_as_double_width():
+    import overlay
+    text = "一二三四五六七八九十" * 10                      # 100 CJK chars = width 200
+    out = overlay.cap_tail(text, 20)
+    assert out.startswith("…")
+    assert out.endswith("九十")
+    assert overlay.display_width(out) <= 20
+
+
+def test_update_overlay_caps_gray_but_not_white(monkeypatch):
+    import overlay
+    seen = {}
+
+    class TS:
+        def setAttributedString_(self, s):
+            seen["text"] = str(s.string())
+
+    class TV:
+        def textStorage(self):
+            return TS()
+
+        def string(self):
+            return seen.get("text", "")
+
+        def scrollRangeToVisible_(self, r):
+            pass
+    white = "confirmed " * 50
+    gray = " ".join(f"g{i}" for i in range(300))
+    overlay.update_overlay(object(), TV(), white, gray, mode="talk")
+    text = seen["text"]
+    assert white.strip() in text                       # white untouched
+    assert "g0 " not in text and "g299" in text        # gray capped, newest kept
+    assert "…" in text

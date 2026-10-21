@@ -399,6 +399,42 @@ def create_overlay(mode: str = "talk", frame_path: str | None = None, on_stop=No
     return panel, text_view
 
 
+# Gray (unconfirmed) text is capped to about one line of the subtitle window
+# (CJK counts double width), keeping the NEWEST part. Uncapped, an unstable
+# hypothesis could turn a whole 8-16 s buffer gray and cover the window.
+GRAY_TAIL_MAX_WIDTH = 120
+
+
+def _char_width(ch: str) -> int:
+    import unicodedata
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def display_width(text: str) -> int:
+    return sum(_char_width(c) for c in text)
+
+
+def cap_tail(text: str, limit: int = GRAY_TAIL_MAX_WIDTH) -> str:
+    """Keep the newest `limit` display columns of `text`, prefixed with "…".
+
+    Cuts at a word boundary for space-separated text; CJK can cut anywhere.
+    """
+    if not text or display_width(text) <= limit:
+        return text
+    limit -= 1                    # room for the leading "…"
+    width = 0
+    i = len(text)
+    while i > 0 and width + _char_width(text[i - 1]) <= limit:
+        i -= 1
+        width += _char_width(text[i])
+    kept = text[i:]
+    if i > 0 and text[i - 1] not in " \n" and " " in kept:
+        prev = text[i - 1]
+        if prev.isascii() and prev.isalnum():      # started mid-word: drop the fragment
+            kept = kept.split(" ", 1)[1]
+    return "…" + kept.lstrip()
+
+
 def update_overlay(panel, text_view, confirmed: str, unconfirmed: str, mode: str = "talk"):
     """Update overlay text. Never moves or resizes the panel.
 
@@ -430,7 +466,7 @@ def update_overlay(panel, text_view, confirmed: str, unconfirmed: str, mode: str
         return re.sub(r'([。！？.!?])\s*', r'\1\n', text).rstrip('\n')
 
     confirmed_fmt = _format(confirmed)
-    unconfirmed_fmt = _format(unconfirmed)
+    unconfirmed_fmt = _format(cap_tail(unconfirmed))
 
     attr_str = NSMutableAttributedString.alloc().init()
 
