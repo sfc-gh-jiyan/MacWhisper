@@ -133,7 +133,9 @@ LOG_DIR = paths.LOG_DIR
 CRASH_LOG_PATH = os.path.join(LOG_DIR, "crash.log")
 ERROR_REPORT_PATH = os.path.join(LOG_DIR, "error_report.md")
 RUN_MARKER_PATH = os.path.join(_DATA_DIR, ".running")
-INSTANCE_LOCK_PATH = os.path.join(_DATA_DIR, ".instance.lock")
+# Always ~/.macwhisper, even for the standalone build (own data dir): the two
+# builds must never run together (both grab the hotkeys and the mic).
+INSTANCE_LOCK_PATH = os.path.join(os.path.expanduser("~/.macwhisper"), ".instance.lock")
 _INSTANCE_LOCK = None  # held for the whole process (GC would release the lock)
 
 

@@ -70,3 +70,12 @@ def test_creates_parent_directory(tmp_path):
     held = si.acquire(path)
     assert held is not None
     si.release(held)
+
+
+def test_lock_is_shared_with_standalone_build(tmp_path):
+    """MACWHISPER_DATA_DIR moves data, never the instance lock (one app at a time)."""
+    import os, subprocess, sys
+    env = dict(os.environ, MACWHISPER_DATA_DIR=str(tmp_path))
+    out = subprocess.run([sys.executable, "-c", "import app; print(app.INSTANCE_LOCK_PATH)"],
+                         env=env, capture_output=True, text=True, timeout=120).stdout.strip()
+    assert out == os.path.join(os.path.expanduser("~/.macwhisper"), ".instance.lock")
