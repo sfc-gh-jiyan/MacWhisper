@@ -157,3 +157,13 @@ def test_ptt_mode():
     assert sc.ptt_mode({"alt", "ctrl"}, "alt_r") is None
     assert sc.ptt_mode({"shift", "ctrl"}, "alt_r") is None
     assert sc.ptt_mode({"shift"}, "shift_r") == "dictate"
+
+
+def test_key_is_down_side_modifier_uses_hid_state(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sc, "_hid_key_state", lambda vk: calls.append(vk) or True)
+    assert sc.key_is_down("alt_r") is True and calls == [61]
+
+
+def test_key_is_down_unknown_key_returns_none():
+    assert sc.key_is_down("f13") is None
