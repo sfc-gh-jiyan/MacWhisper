@@ -19,6 +19,8 @@ from vocabulary import ACTIVE, Vocabulary
 logger = logging.getLogger(__name__)
 
 RETYPE_WINDOW_S = 30.0   # a re-dictation this soon after the last one is a retype
+ECHO_MIN_TERMS = 3      # list terms in one output before it can be an echo
+ECHO_MAX_REST = 0.2     # share of letters left once list terms are removed
 HITS_SAVE_INTERVAL_S = 60.0  # hit counters are flushed at most this often
 
 
@@ -59,9 +61,16 @@ class CorrectionFlow:
 
     def _is_hotword_echo(self, text: str) -> bool:
         """ASR on silence can return just the biasing list ("CSE, Snowflake, Cortex")."""
-        parts = [p for p in re.split(r"[\s,，、。.]+", text) if p]
-        terms = {t.lower() for t in self.vocab.hotwords(200)}
-        return len(parts) >= 3 and all(p.lower() in terms for p in parts)
+        terms = sorted({t for t in self.vocab.hotwords(200) if t.strip()}, key=len, reverse=True)
+        if not terms:
+            return False
+        pattern = re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
+        hits = len(pattern.findall(text))
+        rest = pattern.sub(" ", text)
+        letters = lambda s: len(re.findall(r"\w", s))
+        total = letters(text)
+        # Mostly list terms with little else (lists, repeats, a junk tail) — not speech
+        return hits >= ECHO_MIN_TERMS and total > 0 and letters(rest) <= ECHO_MAX_REST * total
 
     def _reload(self) -> None:
         try:
