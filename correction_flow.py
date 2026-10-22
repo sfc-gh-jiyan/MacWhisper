@@ -59,7 +59,7 @@ class CorrectionFlow:
         e = self.vocab.find(wrong)
         return e is not None and right in e.aliases
 
-    def _is_hotword_echo(self, text: str) -> bool:
+    def is_hotword_echo(self, text: str) -> bool:
         """ASR on silence can return just the biasing list ("CSE, Snowflake, Cortex")."""
         terms = sorted({t for t in self.vocab.hotwords(200) if t.strip()}, key=len, reverse=True)
         if not terms:
@@ -91,7 +91,7 @@ class CorrectionFlow:
         self._reload()
         if not raw_text:
             return Processed(raw_text="", text="")
-        if self._is_hotword_echo(raw_text):
+        if self.is_hotword_echo(raw_text):
             logger.warning("Dropped vocabulary echo: %r", raw_text)
             return Processed(raw_text=raw_text, text="")
         result = corrector.correct(raw_text, self.vocab)
