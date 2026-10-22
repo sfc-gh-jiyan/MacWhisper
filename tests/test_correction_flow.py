@@ -108,3 +108,28 @@ def test_external_edit_is_picked_up(tmp_path):
     p.write_text(json.dumps({"version": 1, "entries": [{"term": "hash", "aliases": ["哈什"]}]}))
     os.utime(p, (time.time() + 5, time.time() + 5))
     assert flow.process("这个哈什").text == "这个hash"
+
+
+REAL_TERMS = ["Snowflake", "MCP", "会话", "CSE", "memory", "Jira", "Confluence page", "Natoma",
+              "roadmap", "SRP", "CoCo session", "Cortex", "Atlassian", "Fivetran", "hash",
+              "connections.toml", "Tri-Secret", "TL;DR", "Cloud Support Engineer", "KB", "BCR",
+              "caveat", "轮询", "hook", "function area", "负担"]
+
+
+def test_real_echo_with_multiword_terms_and_repeat_dropped(tmp_path):
+    """Silence on Qwen3 (2026-10-21): the list twice, multi-word terms, junk tail."""
+    flow, _, _, _ = _flow(tmp_path, [Entry(t) for t in REAL_TERMS])
+    once = ("Snowflake, MCP,会话, CSE, memory, Jira, Confluence page, Natoma, roadmap, SRP, "
+            "CoCo session, Cortex, Atlassian, Fivetran, hash, connections.toml, Tri-Secret, TL;DR, "
+            "Cloud Support Engineer, KB, BCR, caveat,轮询, hook, function area,负担, pron and cron")
+    assert flow.process(once + " " + once).text == ""
+    assert flow.process("Snowflake, MCP, CSE, Jira, Cortex").text == ""
+
+
+def test_real_sentences_with_terms_kept(tmp_path):
+    flow, _, _, _ = _flow(tmp_path, [Entry(t) for t in REAL_TERMS])
+    for s in ["我需要在Jira里面开一个ticket给CSE看一下这个Snowflake的问题",
+              "Check the Confluence page and the roadmap before the CoCo session",
+              "MCP and Cortex",
+              "Snowflake, MCP, CSE, Jira and Cortex are the main things I use every day at work"]:
+        assert flow.process(s).text != "", s
