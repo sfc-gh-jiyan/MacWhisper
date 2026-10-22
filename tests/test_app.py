@@ -2322,3 +2322,26 @@ def test_correction_mode_teaches_and_never_pastes(tmp_path):
     paste.assert_not_called()
     assert inst.correction.vocab.find("memory").status == "active"
     assert (tmp_path / "vocabulary.json").exists()
+
+
+class _EchoBackend(_LiveBackend):
+    def transcribe(self, *a, **k):
+        from asr_backend import TranscriptionResult
+        return TranscriptionResult(text="Snowflake, MCP, CSE, Jira, Confluence page, Cortex")
+
+
+def test_qwen_live_preview_hides_vocabulary_echo(monkeypatch, tmp_path):
+    """Holding PTT in silence: the live preview must not show the hotword list."""
+    import app
+    import correction_flow
+    from vocabulary import Entry, Vocabulary
+    shown = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn())
+    monkeypatch.setattr(app, "update_overlay", lambda panel, tv, c, u: shown.append(c + u))
+    inst = _qwen_live_app(_EchoBackend())
+    v = Vocabulary(path=str(tmp_path / "v.json"),
+                   entries=[Entry(t) for t in ("Snowflake", "MCP", "CSE", "Jira", "Confluence page", "Cortex")])
+    inst.correction = correction_flow.CorrectionFlow(v, on_change=lambda: None)
+    threading.Timer(2.5, lambda: setattr(inst, "recording", False)).start()
+    inst._qwen_live_loop()
+    assert not any("Snowflake" in s for s in shown), shown

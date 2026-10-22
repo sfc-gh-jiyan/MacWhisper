@@ -1630,7 +1630,11 @@ class TranscriberApp(rumps.App):
         """
         frames_ref = self.frames  # list object for THIS recording
 
+        flow = getattr(self, "correction", None)
+
         def update(confirmed, tail):
+            if flow is not None and flow.is_hotword_echo(confirmed + " " + tail):
+                confirmed, tail = "", ""   # silence read back as the vocabulary list
             key = (confirmed, tail)
             if key == self._last_overlay_key or not self._overlay_panel:
                 return
