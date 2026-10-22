@@ -256,22 +256,6 @@ def mods_from_flags(flags: int) -> set:
     return {name for name, bit in _NS_FLAG_MODS if flags & bit}
 
 
-def _hid_key_state(keycode: int) -> bool:
-    import Quartz
-    return bool(Quartz.CGEventSourceKeyState(Quartz.kCGEventSourceStateHIDSystemState, keycode))
-
-
-def key_is_down(token: str) -> bool | None:
-    """Physical state of a side-modifier key from the HID system; None if not checkable."""
-    vk = next((k for k, name in _SIDE_MODIFIER_VK.items() if name == token), None)
-    if vk is None:
-        return None
-    try:
-        return _hid_key_state(vk)
-    except Exception:
-        return None
-
-
 def side_modifier_name(keycode: int) -> str | None:
     """Right-side modifier key name for a flagsChanged keyCode (PTT candidates)."""
     return _SIDE_MODIFIER_VK.get(keycode)
