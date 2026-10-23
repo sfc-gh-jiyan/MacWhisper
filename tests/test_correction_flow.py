@@ -133,3 +133,22 @@ def test_real_sentences_with_terms_kept(tmp_path):
               "MCP and Cortex",
               "Snowflake, MCP, CSE, Jira and Cortex are the main things I use every day at work"]:
         assert flow.process(s).text != "", s
+
+
+def test_single_term_on_silence_dropped(tmp_path):
+    """Holding PTT in silence (2026-10-23): Qwen returned just '会话。'."""
+    flow, _, _, _ = _flow(tmp_path, [Entry(t) for t in REAL_TERMS])
+    assert flow.process("会话。", heard_speech=False).text == ""
+    assert flow.process("CSE, Jira", heard_speech=False).text == ""
+
+
+def test_single_term_kept_when_speech_heard_or_unknown(tmp_path):
+    flow, _, _, _ = _flow(tmp_path, [Entry(t) for t in REAL_TERMS])
+    assert flow.process("会话。", heard_speech=True).text == "会话。"
+    assert flow.process("会话。").text == "会话。"                      # no VAD: keep
+
+
+def test_real_words_kept_even_if_vad_missed_speech(tmp_path):
+    flow, _, _, _ = _flow(tmp_path, [Entry(t) for t in REAL_TERMS])
+    assert flow.process("这个是intentional的。", heard_speech=False).text != ""
+    assert flow.process("会话结束了", heard_speech=False).text != ""

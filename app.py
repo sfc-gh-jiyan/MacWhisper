@@ -195,6 +195,8 @@ HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
 # A combo pressed again without a release within this window is macOS key
 # auto-repeat (holding the keys), not a new press.
 COMBO_REPEAT_WINDOW_S = 1.5
+# Less speech than this (Silero VAD) = silence: a lone vocabulary word is an echo
+MIN_SPEECH_MS = 200
 # Meeting start/stop ignores further toggles for this long (double start/stop)
 MEETING_TOGGLE_COOLDOWN_S = 1.0
 
@@ -1937,6 +1939,19 @@ class TranscriberApp(rumps.App):
         self._set_status(msg)
         rumps.notification("MacWhisper", "Correction", msg)
 
+    def _heard_speech(self, audio) -> bool | None:
+        """Did the recording contain any speech? None when VAD is unavailable (= don't know)."""
+        if not getattr(self, "_vad_available", False):
+            return None
+        try:
+            ms = self._vad.speech_ms(audio)
+        except Exception:
+            logger.exception("VAD speech check failed")
+            return None
+        if ms is not None:
+            logger.info("VAD: %d ms of speech in %.1f s", ms, len(audio) / SAMPLE_RATE)
+        return None if ms is None else ms >= MIN_SPEECH_MS
+
     def _do_transcribe(self, frames, realtime_text="", mode="dictate"):
         """Final transcription pass using the ASR backend.
 
@@ -1979,7 +1994,8 @@ class TranscriberApp(rumps.App):
             self._teach_correction(raw_text)
             return
         flow = getattr(self, "correction", None)
-        processed = (flow.process(raw_text) if flow is not None
+        heard = self._heard_speech(audio)
+        processed = (flow.process(raw_text, heard_speech=heard) if flow is not None
                      else correction_flow.Processed(raw_text=raw_text, text=raw_text))
         text = processed.text
 

@@ -87,10 +87,21 @@ class CorrectionFlow:
             self._changed()
         return added
 
-    def process(self, raw_text: str) -> Processed:
+    def only_terms(self, text: str) -> bool:
+        """Text is nothing but vocabulary terms and punctuation (e.g. "会话。")."""
+        terms = sorted({t for t in self.vocab.hotwords(200) if t.strip()}, key=len, reverse=True)
+        if not terms or not text.strip():
+            return False
+        pattern = re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
+        return bool(pattern.search(text)) and not re.search(r"\w", pattern.sub(" ", text))
+
+    def process(self, raw_text: str, heard_speech: bool | None = None) -> Processed:
         self._reload()
         if not raw_text:
             return Processed(raw_text="", text="")
+        if heard_speech is False and self.only_terms(raw_text):
+            logger.warning("Dropped vocabulary echo on silence: %r", raw_text)
+            return Processed(raw_text=raw_text, text="")
         if self.is_hotword_echo(raw_text):
             logger.warning("Dropped vocabulary echo: %r", raw_text)
             return Processed(raw_text=raw_text, text="")
