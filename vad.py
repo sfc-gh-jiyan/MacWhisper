@@ -89,6 +89,27 @@ class VoiceActivityDetector:
                 return True
         return False
 
+    def speech_ms(self, audio: np.ndarray) -> int | None:
+        """Milliseconds of speech in a whole recording (Silero); None if Silero is unavailable."""
+        if not self._use_silero:
+            return None
+        import torch
+
+        audio_f32 = (audio.astype(np.float32) / 32768.0 if audio.dtype == np.int16
+                     else audio.astype(np.float32)).squeeze()
+        window = 512
+        reset = getattr(self._model, "reset_states", None)
+        if reset:
+            reset()                       # independent of the live loop's stream state
+        speech = 0
+        for start in range(0, len(audio_f32) - window + 1, window):
+            if self._model(torch.from_numpy(audio_f32[start:start + window]),
+                           self.sample_rate).item() >= self.threshold:
+                speech += 1
+        if reset:
+            reset()
+        return int(speech * window * 1000 / self.sample_rate)
+
     def _rms_is_speech(self, audio_chunk: np.ndarray,
                        threshold: float) -> bool:
         audio = audio_chunk.squeeze().astype(np.float64)

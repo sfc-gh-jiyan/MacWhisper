@@ -195,6 +195,8 @@ HOTKEY_RESTART_DELAY_S = 2.0   # backoff base when the pynput listener dies
 # A combo pressed again without a release within this window is macOS key
 # auto-repeat (holding the keys), not a new press.
 COMBO_REPEAT_WINDOW_S = 1.5
+# Less speech than this (Silero VAD) = silence: a lone vocabulary word is an echo
+MIN_SPEECH_MS = 200
 # Meeting start/stop ignores further toggles for this long (double start/stop)
 MEETING_TOGGLE_COOLDOWN_S = 1.0
 
@@ -650,7 +652,10 @@ class TranscriberApp(rumps.App):
         r = w.run()
         if not r.clicked or not r.text.strip():
             return
-        pairs = learn.parse_manual(r.text)
+        pairs = [p for p in learn.parse_manual(r.text)
+                 if not vocab_miner.typed_risks(self.correction.vocab, *p)
+                 or self._confirm_review_line(p, None, vocab_miner.typed_risks(self.correction.vocab, *p))
+                 == "typed"]
         added = self.correction.add_manual(pairs) if pairs else []
         if added:
             msg = "Added: " + ", ".join(f"{a} → {b}" for a, b in added)
@@ -770,21 +775,40 @@ class TranscriberApp(rumps.App):
         try:
             w = rumps.Window(
                 message=(f"{len(lines)} words MacWhisper may be mishearing.\n"
-                         "Delete the lines that are WRONG, keep the right ones, then Approve.\n"
-                         "Deleted lines are never suggested again. You can add your own: heard = correct"),
+                         "Each line is:  what MacWhisper HEARD  =  what it SHOULD BE   (e.g. 哈什 = hash)\n"
+                         "Delete the lines that are wrong, keep the right ones, then Approve.\n"
+                         "Deleted lines are never suggested again. To fix a wrong right side, edit the RIGHT side."),
                 title="Vocabulary suggestions", default_text="\n".join(lines),
                 ok="Approve", cancel="Later", dimensions=(420, min(40 + 18 * len(lines), 320)))
             r = w.run()
             if not r.clicked:
                 self._review_snooze_until = time.monotonic() + MINER_INTERVAL_S   # "Later" = tomorrow
                 return
-            approved, rejected = vocab_miner.apply_review(self.correction.vocab, MINER_STATE_PATH, r.text)
+            approved, rejected = vocab_miner.apply_review(
+                self.correction.vocab, MINER_STATE_PATH, r.text, confirm=self._confirm_review_line)
             self._sync_hotwords()
             msg = f"Approved {len(approved)}, rejected {len(rejected)}"
             self._set_status(msg)
             rumps.notification("MacWhisper", "Vocabulary", msg)
         finally:
             self._reviewing = False
+
+    @staticmethod
+    def _confirm_review_line(typed, alternative, reasons) -> str:
+        """Ask before applying a review line that looks reversed or harmful."""
+        heard, correct = typed
+        msg = (f"“{heard} = {correct}” would change “{heard}” into “{correct}” every time.\n\n"
+               + "\n".join(f"• {r}" for r in reasons))
+        if alternative:
+            msg += f"\n\nDid you mean: when you say “{alternative[1]}” and it is heard as " \
+                   f"“{alternative[0]}”, fix it to “{alternative[1]}”?"
+            r = rumps.alert(title="Check this correction", message=msg,
+                            ok=f"Use {alternative[0]} → {alternative[1]}", cancel="Skip",
+                            other=f"Keep {heard} → {correct}")
+            return {1: "alternative", -1: "typed"}.get(r, "skip")
+        r = rumps.alert(title="Check this correction", message=msg,
+                        ok="Skip", cancel=None, other=f"Keep {heard} → {correct}")
+        return "typed" if r == -1 else "skip"
 
     def _open_corrections(self, _):
         """Write corrections.md (vocabulary + what was corrected/learned) and open it."""
@@ -1633,7 +1657,8 @@ class TranscriberApp(rumps.App):
         flow = getattr(self, "correction", None)
 
         def update(confirmed, tail):
-            if flow is not None and flow.is_hotword_echo(confirmed + " " + tail):
+            shown = confirmed + " " + tail
+            if flow is not None and (flow.is_hotword_echo(shown) or flow.only_terms(shown)):
                 confirmed, tail = "", ""   # silence read back as the vocabulary list
             key = (confirmed, tail)
             if key == self._last_overlay_key or not self._overlay_panel:
@@ -1915,6 +1940,19 @@ class TranscriberApp(rumps.App):
         self._set_status(msg)
         rumps.notification("MacWhisper", "Correction", msg)
 
+    def _heard_speech(self, audio) -> bool | None:
+        """Did the recording contain any speech? None when VAD is unavailable (= don't know)."""
+        if not getattr(self, "_vad_available", False):
+            return None
+        try:
+            ms = self._vad.speech_ms(audio)
+        except Exception:
+            logger.exception("VAD speech check failed")
+            return None
+        if ms is not None:
+            logger.info("VAD: %d ms of speech in %.1f s", ms, len(audio) / SAMPLE_RATE)
+        return None if ms is None else ms >= MIN_SPEECH_MS
+
     def _do_transcribe(self, frames, realtime_text="", mode="dictate"):
         """Final transcription pass using the ASR backend.
 
@@ -1957,7 +1995,8 @@ class TranscriberApp(rumps.App):
             self._teach_correction(raw_text)
             return
         flow = getattr(self, "correction", None)
-        processed = (flow.process(raw_text) if flow is not None
+        heard = self._heard_speech(audio)
+        processed = (flow.process(raw_text, heard_speech=heard) if flow is not None
                      else correction_flow.Processed(raw_text=raw_text, text=raw_text))
         text = processed.text
 
