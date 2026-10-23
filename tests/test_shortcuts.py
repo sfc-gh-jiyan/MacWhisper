@@ -159,10 +159,13 @@ def test_ptt_mode():
     assert sc.ptt_mode({"shift"}, "shift_r") == "dictate"
 
 
-def test_key_is_down_side_modifier_uses_hid_state(monkeypatch):
-    calls = []
-    monkeypatch.setattr(sc, "_hid_key_state", lambda vk: calls.append(vk) or True)
-    assert sc.key_is_down("alt_r") is True and calls == [61]
+def test_key_is_down_reads_the_right_side_flag_bit(monkeypatch):
+    monkeypatch.setattr(sc, "_hid_flags", lambda: 0x80000 | 0x40)      # ⌥ + right-⌥ bit
+    assert sc.key_is_down("alt_r") is True
+    monkeypatch.setattr(sc, "_hid_flags", lambda: 0x80000 | 0x20)      # only LEFT ⌥ held
+    assert sc.key_is_down("alt_r") is False
+    monkeypatch.setattr(sc, "_hid_flags", lambda: 0)
+    assert sc.key_is_down("alt_r") is False
 
 
 def test_key_is_down_unknown_key_returns_none():

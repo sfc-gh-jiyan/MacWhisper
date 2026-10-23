@@ -256,18 +256,24 @@ def mods_from_flags(flags: int) -> set:
     return {name for name, bit in _NS_FLAG_MODS if flags & bit}
 
 
-def _hid_key_state(keycode: int) -> bool:
+# Device-dependent modifier bits (IOKit NX_DEVICE*KEYMASK): one per physical side.
+# Measured on this Mac (2026-10-23): CGEventSourceKeyState(61) stays 0 while
+# Right ⌥ is held; the HID flag bit 0x40 follows the key exactly.
+_SIDE_MODIFIER_FLAG = {"alt_r": 0x40, "cmd_r": 0x10, "ctrl_r": 0x2000, "shift_r": 0x04}
+
+
+def _hid_flags() -> int:
     import Quartz
-    return bool(Quartz.CGEventSourceKeyState(Quartz.kCGEventSourceStateHIDSystemState, keycode))
+    return int(Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateHIDSystemState))
 
 
 def key_is_down(token: str) -> bool | None:
     """Physical state of a side-modifier key from the HID system; None if not checkable."""
-    vk = next((k for k, name in _SIDE_MODIFIER_VK.items() if name == token), None)
-    if vk is None:
+    bit = _SIDE_MODIFIER_FLAG.get(token)
+    if bit is None:
         return None
     try:
-        return _hid_key_state(vk)
+        return bool(_hid_flags() & bit)
     except Exception:
         return None
 
