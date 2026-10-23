@@ -75,19 +75,36 @@ def handle(req: dict, model_fn) -> dict:
         return {"id": rid, "ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def load_model_fn(model_repo: str):
-    from mlx_audio.stt.utils import load
-    model = load(model_repo)
+# Generation budget. Normal speech is ~4-5 tokens per second of audio (real
+# meetings, 2026-10-23); a repetition loop ("那个那个那个…", the hotword list read
+# back on silence) otherwise runs to mlx-audio's default 8192 tokens and times out.
+TOKENS_PER_AUDIO_S = 25
+MIN_TOKENS = 128
+MAX_TOKENS = 8192
 
+
+def token_cap(audio_s: float) -> int:
+    return int(min(MAX_TOKENS, max(MIN_TOKENS, audio_s * TOKENS_PER_AUDIO_S)))
+
+
+def make_run(model):
+    """model_fn for a loaded mlx-audio model, with a token budget per request."""
     def run(audio: np.ndarray, language: str, hotwords=None) -> str:
+        cap = token_cap(len(audio) / SAMPLE_RATE)
         if hotwords and not getattr(run, "no_hotwords", False):
             try:
-                return model.generate(audio, language=language, hotwords=hotwords).text
+                return model.generate(audio, language=language, hotwords=hotwords,
+                                      max_tokens=cap).text
             except TypeError as e:   # older mlx-audio: no hotwords argument
                 run.no_hotwords = True
                 print(f"hotwords unsupported ({e}); continuing without", file=sys.stderr, flush=True)
-        return model.generate(audio, language=language).text
+        return model.generate(audio, language=language, max_tokens=cap).text
+    return run
 
+
+def load_model_fn(model_repo: str):
+    from mlx_audio.stt.utils import load
+    run = make_run(load(model_repo))
     run(np.zeros(SAMPLE_RATE, dtype=np.float32), DEFAULT_LANGUAGE)  # warm Metal kernels
     return run
 

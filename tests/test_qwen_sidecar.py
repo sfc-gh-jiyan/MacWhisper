@@ -83,3 +83,31 @@ def test_bad_hotwords_ignored():
     qs.handle({"id": 10, "cmd": "transcribe", "pcm16_b64": _pcm_b64([0]), "hotwords": "CSE"},
               lambda audio, language: calls.append(1) or "ok")
     assert calls
+
+
+# ── Runaway generation guard (2026-10-23: 3 meeting timeouts from repetition loops) ──
+
+class _Model:
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, audio, **kw):
+        self.calls.append(kw)
+        return type("R", (), {"text": "ok"})()
+
+
+def test_token_cap_scales_with_audio_and_has_floor_and_ceiling():
+    assert qs.token_cap(1.0) == qs.MIN_TOKENS
+    assert qs.token_cap(15.0) == 15 * qs.TOKENS_PER_AUDIO_S
+    assert qs.token_cap(10_000.0) == qs.MAX_TOKENS
+    # real speech: 120 chars ≈ 30 tokens in ~8 s; cap must leave a wide margin
+    assert qs.token_cap(8.0) >= 5 * 30
+
+
+def test_run_passes_max_tokens_to_generate():
+    m = _Model()
+    run = qs.make_run(m)
+    run(np.zeros(qs.SAMPLE_RATE * 15, dtype=np.float32), "Chinese")
+    run(np.zeros(qs.SAMPLE_RATE * 15, dtype=np.float32), "Chinese", ["CSE"])
+    assert [c["max_tokens"] for c in m.calls] == [qs.token_cap(15.0)] * 2
+    assert m.calls[1]["hotwords"] == ["CSE"]

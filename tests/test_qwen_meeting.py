@@ -188,3 +188,38 @@ def test_pending_only_after_speech_was_heard():
     p.segment_close()
     _feed(p, 1.0)                               # silence after the close
     assert not p.has_pending_speech()
+
+
+def test_silent_segment_closes_without_decoding():
+    """15 s of meeting silence (2026-10-23): decoding it made Qwen read the
+    vocabulary back ('会话。') and run until the 21 s timeout."""
+    p, clock = _proc(["会话。"])
+    p.uses_vad = True
+    _feed(p, 15.0)
+    assert p.segment_close() == ""
+    assert p.backend.calls == []
+    assert p.segment_seconds() == 0.0
+
+
+def test_segment_with_speech_still_decodes_on_close():
+    p, clock = _proc(["hello there"])
+    p.uses_vad = True
+    _feed(p, 3.0)
+    p.mark_speech()
+    assert p.segment_close() != ""
+    assert len(p.backend.calls) == 1
+
+
+def test_process_iter_skips_silent_segment():
+    p, clock = _proc(["会话。"])
+    p.uses_vad = True
+    _feed(p, 3.0)
+    clock.t += 1.1
+    assert p.process_iter() is None
+    assert p.backend.calls == []
+
+
+def test_without_vad_segments_still_decode():
+    p, clock = _proc(["hello"])           # uses_vad defaults to False
+    _feed(p, 3.0)
+    assert p.segment_close() != ""

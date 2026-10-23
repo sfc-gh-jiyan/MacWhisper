@@ -68,15 +68,27 @@ class MeetingSession:
         processor_factory=None,
         fallback_factory=None,
         on_engine_failed=None,
+        engine_restart=None,
+        engine_retry_s: float = 10.0,
+        on_engine_recovered=None,
     ):
         """processor_factory() builds the live processor (default: Whisper
         OnlineASRProcessor). If it raises QwenUnavailable, fallback_factory()
         replaces it for the rest of the meeting and on_engine_failed(exc) is
-        called once (v0.7.3: Qwen3 live subtitles with Whisper fallback)."""
+        called once (v0.7.3: Qwen3 live subtitles with Whisper fallback).
+
+        engine_restart() -> bool (optional) restarts the failed engine; it is
+        tried in the background every engine_retry_s while Whisper covers, and
+        on success the meeting switches back to processor_factory() and calls
+        on_engine_recovered()."""
         self.backend = backend
         self._processor_factory = processor_factory
         self._fallback_factory = fallback_factory
         self._on_engine_failed = on_engine_failed
+        self._engine_restart = engine_restart
+        self._engine_retry_s = engine_retry_s
+        self._on_engine_recovered = on_engine_recovered
+        self._engine_back = threading.Event()   # set by the restart thread
         # Raw audio is only written to disk when explicitly enabled —
         # recording other participants requires their consent.
         self.save_audio = save_audio
@@ -240,11 +252,52 @@ class MeetingSession:
             self._processor.insert_audio_chunk(pending)
         logger.warning("Live meeting engine failed (%s) — continuing with Whisper", exc)
         self._fallback_used = True
+        if self._engine_restart is not None:
+            self._engine_back.clear()
+            threading.Thread(target=self._restart_engine_loop, daemon=True,
+                             name="meeting-engine-restart").start()
         if self._on_engine_failed:
             try:
                 self._on_engine_failed(exc)
             except Exception:
                 logger.exception("on_engine_failed callback failed")
+
+    def _restart_engine_loop(self) -> None:
+        """Background: restart the failed engine until it works or the meeting ends."""
+        while self.is_recording:
+            try:
+                ok = bool(self._engine_restart())
+            except Exception:
+                logger.exception("Restarting the live meeting engine failed")
+                ok = False
+            if ok:
+                logger.warning("Live meeting engine restarted — switching back at once")
+                self._engine_back.set()
+                return
+            deadline = time.time() + self._engine_retry_s
+            while self.is_recording and time.time() < deadline:
+                time.sleep(min(0.05, self._engine_retry_s))
+
+    def _switch_back_to_engine(self) -> None:
+        """Engine is back: close the Whisper segment (its text is kept), then
+        continue on processor_factory() with the leftover audio."""
+        self._engine_back.clear()
+        if self._segment_has_text():
+            self._close_and_trim_segment()
+        pending = getattr(self._processor, "audio_buffer", None)
+        self._processor = self._processor_factory()
+        if pending is not None and len(pending):
+            self._processor.insert_audio_chunk(pending)
+        if self.vad:
+            self.vad.reset()
+        self._segment_start_time = time.time()
+        self._fallback_used = False
+        logger.warning("Live meeting subtitles back on the main engine")
+        if self._on_engine_recovered:
+            try:
+                self._on_engine_recovered()
+            except Exception:
+                logger.exception("on_engine_recovered callback failed")
 
     def _guarded(self, fn):
         """Run a processor call; on QwenUnavailable switch to Whisper once."""
@@ -471,6 +524,8 @@ class MeetingSession:
 
     def _process_new_audio(self, mic_new, sys_new) -> None:
         """One loop iteration on new audio (caller holds _proc_lock)."""
+        if self._engine_back.is_set() and getattr(self, "_fallback_used", False):
+            self._switch_back_to_engine()
         # Build chunks from each source
         mic_chunk = np.concatenate(mic_new, axis=0).squeeze() if mic_new else None
         sys_chunk = np.concatenate(sys_new, axis=0).squeeze() if sys_new else None
@@ -503,6 +558,8 @@ class MeetingSession:
             # half of real speech as silence.
             vad_state = self.vad.process_chunk(chosen)
             chunk_is_speech = vad_state["is_speech"]
+            if hasattr(self._processor, "uses_vad"):
+                self._processor.uses_vad = True
             mark = getattr(self._processor, "mark_speech", None)
             if mark is not None and chunk_is_speech:
                 mark()            # Qwen3: this segment has had real speech

@@ -936,7 +936,8 @@ class TestSegmentCloseWithoutConfirmedWords:
 class TestQwenLiveInMeeting:
     """v0.7.3: Meeting Mode live subtitles on Qwen3, with Whisper fallback."""
 
-    def _session(self, qwen_texts, fail_on=None, speech_chunks=10_000, **kw):
+    def _session(self, qwen_texts, fail_on=None, speech_chunks=10_000, fail_once=False,
+                 engine_restart=None, recovered=None, **kw):
         from types import SimpleNamespace
         import qwen_meeting
         from online_processor import OnlineASRProcessor
@@ -948,7 +949,7 @@ class TestQwenLiveInMeeting:
 
             def transcribe(self, audio):
                 self.calls += 1
-                if fail_on is not None and self.calls >= fail_on:
+                if fail_on is not None and (self.calls == fail_on if fail_once else self.calls >= fail_on):
                     raise QwenUnavailable("sidecar died")
                 return SimpleNamespace(text=qwen_texts[min(self.calls - 1, len(qwen_texts) - 1)])
 
@@ -977,6 +978,8 @@ class TestQwenLiveInMeeting:
                                                         min_chunk_size=0.3),
             on_engine_failed=failures.append,
             extended_silence_ms=800,
+            **({"engine_restart": engine_restart, "engine_retry_s": 0.05,
+                "on_engine_recovered": recovered} if engine_restart else {}),
         )
         return session, qwen, failures
 
@@ -1014,6 +1017,41 @@ class TestQwenLiveInMeeting:
             session._processor, OnlineASRProcessor))
         assert len(failures) == 1                       # reported once
         assert qwen.calls == 2                          # Qwen3 not retried
+
+
+    def test_qwen_comes_back_after_background_restart(self):
+        """2026-10-23: one timeout put the rest of a meeting on Whisper (6 min)."""
+        import qwen_meeting
+        restarts, back = [], []
+        session, qwen, failures = self._session(
+            ["好的", "我们继续"], fail_on=2, fail_once=True, speech_chunks=10_000,
+            max_segment_s=1.0, engine_restart=lambda: restarts.append(1) or True,
+            recovered=lambda: back.append(1))
+        seen = []
+        self._run(session, until=lambda: seen.append(type(session._processor)) or (
+            back and seen[-1] is qwen_meeting.QwenSegmentProcessor and qwen.calls >= 4))
+        assert len(failures) == 1 and restarts and back
+        assert seen[-1] is qwen_meeting.QwenSegmentProcessor
+        assert qwen.calls >= 4                          # decoding with Qwen3 again
+
+    def test_restart_failure_keeps_whisper_and_retries(self):
+        from online_processor import OnlineASRProcessor
+        attempts = []
+        session, qwen, failures = self._session(
+            ["ok"], fail_on=2, engine_restart=lambda: attempts.append(1) or False)
+        seen = []
+        self._run(session, until=lambda: seen.append(type(session._processor)) or len(attempts) >= 3)
+        assert len(attempts) >= 3 and len(failures) == 1
+        assert seen[-1] is OnlineASRProcessor
+
+    def test_restart_thread_stops_with_the_meeting(self):
+        attempts = []
+        session, qwen, failures = self._session(
+            ["ok"], fail_on=2, engine_restart=lambda: attempts.append(1) or False)
+        self._run(session, until=lambda: attempts)
+        n = len(attempts)
+        time.sleep(0.3)
+        assert len(attempts) <= n + 1                   # no retries after stop
 
 
 class TestShortFragmentWaits:
