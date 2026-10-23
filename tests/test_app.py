@@ -2345,3 +2345,25 @@ def test_qwen_live_preview_hides_vocabulary_echo(monkeypatch, tmp_path):
     threading.Timer(2.5, lambda: setattr(inst, "recording", False)).start()
     inst._qwen_live_loop()
     assert not any("Snowflake" in s for s in shown), shown
+
+
+class _OneTermBackend(_LiveBackend):
+    def transcribe(self, *a, **k):
+        from asr_backend import TranscriptionResult
+        return TranscriptionResult(text="会话。")
+
+
+def test_qwen_live_preview_hides_lone_vocabulary_word(monkeypatch, tmp_path):
+    """Holding PTT in silence (2026-10-23): '会话。' turned white in the window."""
+    import app
+    import correction_flow
+    from vocabulary import Entry, Vocabulary
+    shown = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn())
+    monkeypatch.setattr(app, "update_overlay", lambda panel, tv, c, u: shown.append(c + u))
+    inst = _qwen_live_app(_OneTermBackend())
+    v = Vocabulary(path=str(tmp_path / "v.json"), entries=[Entry("会话"), Entry("CSE")])
+    inst.correction = correction_flow.CorrectionFlow(v, on_change=lambda: None)
+    threading.Timer(2.5, lambda: setattr(inst, "recording", False)).start()
+    inst._qwen_live_loop()
+    assert not any("会话" in s for s in shown), shown

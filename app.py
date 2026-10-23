@@ -1657,7 +1657,8 @@ class TranscriberApp(rumps.App):
         flow = getattr(self, "correction", None)
 
         def update(confirmed, tail):
-            if flow is not None and flow.is_hotword_echo(confirmed + " " + tail):
+            shown = confirmed + " " + tail
+            if flow is not None and (flow.is_hotword_echo(shown) or flow.only_terms(shown)):
                 confirmed, tail = "", ""   # silence read back as the vocabulary list
             key = (confirmed, tail)
             if key == self._last_overlay_key or not self._overlay_panel:
