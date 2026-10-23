@@ -157,3 +157,16 @@ def test_ptt_mode():
     assert sc.ptt_mode({"alt", "ctrl"}, "alt_r") is None
     assert sc.ptt_mode({"shift", "ctrl"}, "alt_r") is None
     assert sc.ptt_mode({"shift"}, "shift_r") == "dictate"
+
+
+def test_key_is_down_reads_the_right_side_flag_bit(monkeypatch):
+    monkeypatch.setattr(sc, "_hid_flags", lambda: 0x80000 | 0x40)      # ⌥ + right-⌥ bit
+    assert sc.key_is_down("alt_r") is True
+    monkeypatch.setattr(sc, "_hid_flags", lambda: 0x80000 | 0x20)      # only LEFT ⌥ held
+    assert sc.key_is_down("alt_r") is False
+    monkeypatch.setattr(sc, "_hid_flags", lambda: 0)
+    assert sc.key_is_down("alt_r") is False
+
+
+def test_key_is_down_unknown_key_returns_none():
+    assert sc.key_is_down("f13") is None

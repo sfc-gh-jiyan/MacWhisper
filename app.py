@@ -1406,7 +1406,9 @@ class TranscriberApp(rumps.App):
                     self._ptt_cancelled = False
                     self._ptt_mode = mode
                     started = True
+                    gen = self._rec_gen + 1    # _start_recording takes this generation
                     threading.Thread(target=self._start_recording, daemon=True).start()
+                    threading.Thread(target=self._ptt_watchdog, args=(gen,), daemon=True).start()
             if mod:
                 self._held_mods.add(mod)
                 return
@@ -1471,10 +1473,42 @@ class TranscriberApp(rumps.App):
         if shortcuts.key_token(key) == self._ptt_spec():
             if self._ptt_cancelled:
                 self._ptt_cancelled = False
-            elif self.recording:
-                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+            else:
+                # Even if _start_recording has not flipped `recording` yet, the
+                # watchdog sees the key is up and stops it (race: quick tap).
+                self._request_stop(self._rec_gen, "key release")
         if mod:
             self._held_mods.discard(mod)
+
+    def _request_stop(self, gen: int, why: str) -> None:
+        """Stop + transcribe recording `gen` exactly once (release event or watchdog)."""
+        lock = getattr(self, "_stop_lock", None)
+        if lock is None:
+            lock = self._stop_lock = threading.Lock()
+        with lock:
+            if not self.recording or self._rec_gen != gen:
+                return
+            self.recording = False     # claim the stop; later callers return above
+        if why != "key release":
+            logger.warning("Push to Talk key is up but no release arrived (%s) — stopping", why)
+        threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+
+    def _ptt_watchdog(self, gen: int, sleep=time.sleep, interval: float = 0.25) -> None:
+        """Safety net for lost/raced key releases: poll the real key state while recording."""
+        tok = self._ptt_spec()
+        if shortcuts.key_is_down(tok) is None:
+            return                      # not a side modifier: rely on release events
+        for _ in range(int(2.0 / 0.05)):   # wait for _start_recording to begin
+            if self.recording and self._rec_gen == gen:
+                break
+            sleep(0.05)
+        up = 0
+        while self.recording and self._rec_gen == gen:
+            up = up + 1 if shortcuts.key_is_down(tok) is False else 0
+            if up >= 2:                 # two readings ~0.25 s apart: really released
+                self._request_stop(gen, "watchdog")
+                return
+            sleep(interval)
 
     def _cancel_recording(self):
         """Stop a Push to Talk recording and discard it (no transcription, no paste)."""
