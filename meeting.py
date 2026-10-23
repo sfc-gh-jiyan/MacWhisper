@@ -70,6 +70,7 @@ class MeetingSession:
         on_engine_failed=None,
         engine_restart=None,
         engine_retry_s: float = 10.0,
+        engine_max_attempts: int = 5,
         on_engine_recovered=None,
     ):
         """processor_factory() builds the live processor (default: Whisper
@@ -87,6 +88,7 @@ class MeetingSession:
         self._on_engine_failed = on_engine_failed
         self._engine_restart = engine_restart
         self._engine_retry_s = engine_retry_s
+        self._engine_max_attempts = engine_max_attempts
         self._on_engine_recovered = on_engine_recovered
         self._engine_back = threading.Event()   # set by the restart thread
         # Raw audio is only written to disk when explicitly enabled —
@@ -263,8 +265,14 @@ class MeetingSession:
                 logger.exception("on_engine_failed callback failed")
 
     def _restart_engine_loop(self) -> None:
-        """Background: restart the failed engine until it works or the meeting ends."""
-        while self.is_recording:
+        """Background: restart the failed engine until it works, the meeting ends,
+        or engine_max_attempts fail (then Whisper keeps the rest of the meeting).
+        Waits double after each failure (10 s, 20 s, 40 s… up to 2 min): a model
+        load is heavy and a broken engine must not be reloaded every few seconds."""
+        wait = self._engine_retry_s
+        for attempt in range(1, self._engine_max_attempts + 1):
+            if not self.is_recording:
+                return
             try:
                 ok = bool(self._engine_restart())
             except Exception:
@@ -274,9 +282,13 @@ class MeetingSession:
                 logger.warning("Live meeting engine restarted — switching back at once")
                 self._engine_back.set()
                 return
-            deadline = time.time() + self._engine_retry_s
+            logger.warning("Live meeting engine restart %d/%d failed — retry in %.0fs",
+                           attempt, self._engine_max_attempts, wait)
+            deadline = time.time() + wait
             while self.is_recording and time.time() < deadline:
-                time.sleep(min(0.05, self._engine_retry_s))
+                time.sleep(min(0.05, wait))
+            wait = min(wait * 2, 120.0)
+        logger.error("Live meeting engine did not come back — Whisper for the rest of the meeting")
 
     def _switch_back_to_engine(self) -> None:
         """Engine is back: close the Whisper segment (its text is kept), then
@@ -288,6 +300,9 @@ class MeetingSession:
         self._processor = self._processor_factory()
         if pending is not None and len(pending):
             self._processor.insert_audio_chunk(pending)
+            mark = getattr(self._processor, "mark_speech", None)
+            if mark is not None:
+                mark()        # may hold speech: never let the silent-segment skip drop it
         if self.vad:
             self.vad.reset()
         self._segment_start_time = time.time()

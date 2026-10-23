@@ -96,10 +96,12 @@ class _Model:
         return type("R", (), {"text": "ok"})()
 
 
-def test_token_cap_scales_with_audio_and_has_floor_and_ceiling():
+def test_token_cap_scales_with_audio_and_has_floor():
     assert qs.token_cap(1.0) == qs.MIN_TOKENS
     assert qs.token_cap(15.0) == 15 * qs.TOKENS_PER_AUDIO_S
-    assert qs.token_cap(10_000.0) == qs.MAX_TOKENS
+    # 1321 s meeting (10/23): the budget is a total over all chunks, so it
+    # must cover ~5 tokens/s of dense speech for the whole meeting
+    assert qs.token_cap(1321.0) >= 5 * 1321
     # real speech: 120 chars ≈ 30 tokens in ~8 s; cap must leave a wide margin
     assert qs.token_cap(8.0) >= 5 * 30
 

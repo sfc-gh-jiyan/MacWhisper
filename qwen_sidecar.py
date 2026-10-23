@@ -78,13 +78,14 @@ def handle(req: dict, model_fn) -> dict:
 # Generation budget. Normal speech is ~4-5 tokens per second of audio (real
 # meetings, 2026-10-23); a repetition loop ("那个那个那个…", the hotword list read
 # back on silence) otherwise runs to mlx-audio's default 8192 tokens and times out.
+# No upper ceiling: mlx-audio's max_tokens is a TOTAL over all 20-min chunks, so
+# the old default 8192 also cut off the final pass of meetings over ~30 min.
 TOKENS_PER_AUDIO_S = 25
 MIN_TOKENS = 128
-MAX_TOKENS = 8192
 
 
 def token_cap(audio_s: float) -> int:
-    return int(min(MAX_TOKENS, max(MIN_TOKENS, audio_s * TOKENS_PER_AUDIO_S)))
+    return int(max(MIN_TOKENS, audio_s * TOKENS_PER_AUDIO_S))
 
 
 def make_run(model):

@@ -1044,6 +1044,27 @@ class TestQwenLiveInMeeting:
         assert len(attempts) >= 3 and len(failures) == 1
         assert seen[-1] is OnlineASRProcessor
 
+    def test_restart_gives_up_after_max_attempts(self):
+        attempts = []
+        session, qwen, failures = self._session(
+            ["ok"], fail_on=2, engine_restart=lambda: attempts.append(1) or False)
+        session._engine_max_attempts = 3
+        self._run(session, until=lambda: False, timeout=1.5)
+        assert len(attempts) == 3
+
+    def test_switch_back_keeps_leftover_audio_as_speech(self):
+        import qwen_meeting
+        session, qwen, failures = self._session(["好的"], engine_restart=lambda: True)
+        session._processor = OnlineProc = __import__("online_processor").OnlineASRProcessor(
+            backend=MockBackend(responses=[""]), vad=None, min_chunk_size=0.3)
+        OnlineProc.insert_audio_chunk(np.zeros(16000 * 2, dtype=np.float32))
+        session._fallback_used = True
+        session._switch_back_to_engine()
+        p = session._processor
+        assert isinstance(p, qwen_meeting.QwenSegmentProcessor)
+        p.uses_vad = True
+        assert p.has_pending_speech() and not p._silent()
+
     def test_restart_thread_stops_with_the_meeting(self):
         attempts = []
         session, qwen, failures = self._session(
