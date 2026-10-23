@@ -650,7 +650,10 @@ class TranscriberApp(rumps.App):
         r = w.run()
         if not r.clicked or not r.text.strip():
             return
-        pairs = learn.parse_manual(r.text)
+        pairs = [p for p in learn.parse_manual(r.text)
+                 if not vocab_miner.typed_risks(self.correction.vocab, *p)
+                 or self._confirm_review_line(p, None, vocab_miner.typed_risks(self.correction.vocab, *p))
+                 == "typed"]
         added = self.correction.add_manual(pairs) if pairs else []
         if added:
             msg = "Added: " + ", ".join(f"{a} → {b}" for a, b in added)
@@ -770,21 +773,40 @@ class TranscriberApp(rumps.App):
         try:
             w = rumps.Window(
                 message=(f"{len(lines)} words MacWhisper may be mishearing.\n"
-                         "Delete the lines that are WRONG, keep the right ones, then Approve.\n"
-                         "Deleted lines are never suggested again. You can add your own: heard = correct"),
+                         "Each line is:  what MacWhisper HEARD  =  what it SHOULD BE   (e.g. 哈什 = hash)\n"
+                         "Delete the lines that are wrong, keep the right ones, then Approve.\n"
+                         "Deleted lines are never suggested again. To fix a wrong right side, edit the RIGHT side."),
                 title="Vocabulary suggestions", default_text="\n".join(lines),
                 ok="Approve", cancel="Later", dimensions=(420, min(40 + 18 * len(lines), 320)))
             r = w.run()
             if not r.clicked:
                 self._review_snooze_until = time.monotonic() + MINER_INTERVAL_S   # "Later" = tomorrow
                 return
-            approved, rejected = vocab_miner.apply_review(self.correction.vocab, MINER_STATE_PATH, r.text)
+            approved, rejected = vocab_miner.apply_review(
+                self.correction.vocab, MINER_STATE_PATH, r.text, confirm=self._confirm_review_line)
             self._sync_hotwords()
             msg = f"Approved {len(approved)}, rejected {len(rejected)}"
             self._set_status(msg)
             rumps.notification("MacWhisper", "Vocabulary", msg)
         finally:
             self._reviewing = False
+
+    @staticmethod
+    def _confirm_review_line(typed, alternative, reasons) -> str:
+        """Ask before applying a review line that looks reversed or harmful."""
+        heard, correct = typed
+        msg = (f"“{heard} = {correct}” would change “{heard}” into “{correct}” every time.\n\n"
+               + "\n".join(f"• {r}" for r in reasons))
+        if alternative:
+            msg += f"\n\nDid you mean: when you say “{alternative[1]}” and it is heard as " \
+                   f"“{alternative[0]}”, fix it to “{alternative[1]}”?"
+            r = rumps.alert(title="Check this correction", message=msg,
+                            ok=f"Use {alternative[0]} → {alternative[1]}", cancel="Skip",
+                            other=f"Keep {heard} → {correct}")
+            return {1: "alternative", -1: "typed"}.get(r, "skip")
+        r = rumps.alert(title="Check this correction", message=msg,
+                        ok="Skip", cancel=None, other=f"Keep {heard} → {correct}")
+        return "typed" if r == -1 else "skip"
 
     def _open_corrections(self, _):
         """Write corrections.md (vocabulary + what was corrected/learned) and open it."""

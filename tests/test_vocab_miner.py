@@ -246,3 +246,79 @@ def test_learned_twice_on_active_term_promotes(tmp_path):
     assert v.find("Jira").pending_aliases == ("Gira",)
     v.add_correction("Gira", "Jira", source="learned")
     assert "Gira" in v.find("Jira").aliases and v.find("Jira").pending_aliases == ()
+
+
+# ── Review window: protect against reversed / harmful edits (Tmux, 2026-10-23) ──
+
+def _tmux_case(tmp_path):
+    v = _vocab(tmp_path, [Entry("TL;DR", aliases=("Tulang Dong",))])
+    v.add_correction("Tumex", "Teamwork", source="suggested")
+    return v
+
+
+def test_misheard_form_is_never_a_suggested_correct_side(tmp_path):
+    v = _vocab(tmp_path, [Entry("TL;DR", aliases=("Tulang Dong",))])
+    out = vm.validate([{"heard": "Tumex", "correct": "Tulang Dong", "confidence": "high"}],
+                      "Tumex Tumex", _vocab_entries=v.entries)
+    assert out == []
+
+
+def test_edited_left_side_asks_and_can_flip(tmp_path):
+    v = _tmux_case(tmp_path)
+    asked = []
+
+    def confirm(typed, alternative, reasons):
+        asked.append((typed, alternative, reasons))
+        return "alternative"
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Tmux = Teamwork", confirm=confirm)
+    (typed, alt, reasons), = asked
+    assert typed == ("Tmux", "Teamwork") and alt == ("Tumex", "Tmux")
+    assert v.find("tmux").aliases == ("Tumex",)
+    assert v.find("Teamwork") is None                      # the wrong suggestion is gone
+    assert ("tumex", "teamwork") in vm.rejected_pairs(str(tmp_path / "s.json"))
+
+
+def test_stealing_a_known_misheard_form_is_flagged(tmp_path):
+    v = _vocab(tmp_path, [Entry("TL;DR", aliases=("Tulang Dong",))])
+    asked = []
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Tmux = Tulang Dong",
+                    confirm=lambda t, a, r: asked.append(r) or "skip")
+    assert asked and any("TL;DR" in x for x in asked[0])
+    assert v.find("TL;DR").aliases == ("Tulang Dong",)     # untouched
+    assert v.find("Tulang Dong") is None
+
+
+def test_risky_typed_line_skipped_without_confirm(tmp_path):
+    v = _vocab(tmp_path, [Entry("TL;DR", aliases=("Tulang Dong",))])
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Tmux = Tulang Dong")
+    assert v.find("TL;DR").aliases == ("Tulang Dong",) and v.find("Tulang Dong") is None
+
+
+def test_keep_as_typed_still_possible(tmp_path):
+    v = _tmux_case(tmp_path)
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Tmux = Teamwork",
+                    confirm=lambda t, a, r: "typed")
+    assert v.find("Teamwork").aliases == ("Tmux",)
+
+
+def test_safe_typed_line_added_without_asking(tmp_path):
+    v = _vocab(tmp_path)
+    asked = []
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="哈什 = hash",
+                    confirm=lambda *a: asked.append(a) or "skip")
+    assert not asked and v.find("hash").aliases == ("哈什",)
+
+
+def test_unchanged_suggestions_never_ask(tmp_path):
+    v = _tmux_case(tmp_path)
+    asked = []
+    vm.apply_review(v, str(tmp_path / "s.json"), kept_text="Tumex = Teamwork",
+                    confirm=lambda *a: asked.append(a) or "skip")
+    assert not asked and v.find("Teamwork").status == "active"
+
+
+def testtyped_risks_for_add_correction(tmp_path):
+    v = _vocab(tmp_path, [Entry("TL;DR", aliases=("Tulang Dong",)), Entry("Jira")])
+    assert vm.typed_risks(v, "Tmux", "Tulang Dong")          # steals a misheard form
+    assert vm.typed_risks(v, "Jira", "Gira")                 # rewrites a real term
+    assert vm.typed_risks(v, "哈什", "hash") == []

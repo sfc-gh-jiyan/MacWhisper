@@ -157,6 +157,8 @@ def validate(cands: list[dict], corpus: str, _vocab_entries, rejected=frozenset(
             continue
         if (heard.lower(), correct.lower()) in rejected:
             continue
+        if correct.lower() in known:                  # a misheard form is never the right answer
+            continue
         if heard.lower() in terms:                    # would reverse an existing correction
             continue
         if _NUMERIC.match(heard) or _NUMERIC.match(correct):
@@ -338,8 +340,29 @@ def pending_lines(vocab: Vocabulary) -> list[str]:
     return out
 
 
-def apply_review(vocab: Vocabulary, state_path: str, kept_text: str):
-    """Lines left in the review window are approved; deleted ones are rejected for good."""
+def typed_risks(vocab: Vocabulary, heard: str, correct: str) -> list[str]:
+    """Why a line the user typed in the review window may do harm (empty = safe)."""
+    reasons = []
+    owner = next((e for e in vocab.entries
+                  if any(a.lower() == correct.lower() for a in e.aliases)), None)
+    if owner is not None:
+        reasons.append(f"“{correct}” is how “{owner.term}” gets misheard — this would undo "
+                       f"“{correct} → {owner.term}”.")
+    known = vocab.find(heard)
+    if known is not None and known.status == "active":
+        reasons.append(f"“{heard}” is a word in your vocabulary — every time you say it, "
+                       f"it would become “{correct}”.")
+    return reasons
+
+
+def apply_review(vocab: Vocabulary, state_path: str, kept_text: str, confirm=None):
+    """Lines left in the review window are approved; deleted ones are rejected for good.
+
+    Lines the user typed or edited are added too, unless they look harmful
+    (reversed, or breaking an existing rule): then `confirm(typed, alternative,
+    reasons)` decides — "alternative", "typed" or "skip". Without `confirm`
+    a risky line is skipped.
+    """
     from learn import parse_manual
 
     kept = {(a.lower(), b.lower()) for a, b in parse_manual(kept_text)}
@@ -359,9 +382,22 @@ def apply_review(vocab: Vocabulary, state_path: str, kept_text: str):
     # Lines the user typed themselves (not from the list) are taught as manual corrections
     listed = {(a.lower(), b.lower()) for a, b in approved + rejected}
     for a, b in parse_manual(kept_text):
-        if (a.lower(), b.lower()) not in listed:
-            vocab.add_correction(a, b, source="manual")
-            approved.append((a, b))
+        if (a.lower(), b.lower()) in listed:
+            continue
+        reasons = typed_risks(vocab, a, b)
+        # Left side edited on a suggestion: the user most likely typed the right word on the left
+        orig = next(((h, c) for h, c in rejected if c.lower() == b.lower() and h.lower() != a.lower()), None)
+        alternative = (orig[0], a) if orig else None
+        if orig:
+            reasons.insert(0, f"You changed the left side of “{orig[0]} = {orig[1]}”. Left is what "
+                              f"MacWhisper heard, right is what it should become.")
+        choice = "typed" if not reasons else (confirm((a, b), alternative, reasons) if confirm else "skip")
+        pair = alternative if choice == "alternative" and alternative else (a, b) if choice == "typed" else None
+        if pair is None:
+            logger.warning("Vocabulary review: skipped risky line %r: %s", (a, b), reasons)
+            continue
+        vocab.add_correction(pair[0], pair[1], source="manual")
+        approved.append(pair)
     vocab.save()
     _update_state(state_path, rejected=lambda s: sorted(
         {tuple(p) for p in s.get("rejected", [])} | set(rejected)))
