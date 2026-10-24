@@ -43,8 +43,16 @@ class LLMSidecarBackend(QwenSidecarBackend):
         )
 
     def complete(self, prompt: str, system: str = "", max_tokens: int = 512,
-                 timeout: float = 120.0) -> str:
-        """Generate a reply. Raises LLMUnavailable on any failure."""
+                 timeout: float = 120.0, lock_timeout: float | None = None) -> str:
+        """Generate a reply. Raises LLMUnavailable on any failure.
+
+        lock_timeout: give up (LLMUnavailable "busy") if another request — e.g.
+        vocabulary learning — holds the sidecar longer than this.
+        """
+        if lock_timeout is not None:
+            if not self._lock.acquire(timeout=lock_timeout):
+                raise LLMUnavailable("LLM busy with another request")
+            self._lock.release()   # reacquired below; a request may sneak in, then we just wait
         try:
             with self._lock:
                 self._ensure_running_locked()

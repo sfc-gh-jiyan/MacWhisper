@@ -771,6 +771,14 @@ class MeetingSession:
         lines.append("")
         lines.append("---")
         lines.append("")
+        ai = getattr(self, "ai_transcript", None)
+        if ai:
+            lines.append(f"## AI version ({getattr(self, 'ai_style', None) or 'AI'})")
+            lines.append("")
+            lines.append(ai)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
         final = getattr(self, "final_transcript", None)
         if final is not None:
             lines.append(f"## Final transcript ({self.final_engine})")
@@ -859,16 +867,20 @@ class MeetingSession:
             self._mic_frames = []
             self._sys_frames = []
 
-    def write_final_transcript(self, text: str, engine: str) -> str | None:
+    def write_final_transcript(self, text: str, engine: str, ai_text: str | None = None,
+                               ai_style: str | None = None) -> str | None:
         """Rewrite the saved .md/.json with the final transcript first.
 
-        The live (real-time) transcript stays below it for comparison.
+        The live (real-time) transcript stays below it for comparison. An AI
+        tidied version (optional) goes on top; nothing below it is removed.
         Returns the .md path, or None if the meeting was never saved.
         """
         if not self.transcript_path:
             return None
         self.final_transcript = text
         self.final_engine = engine
+        self.ai_transcript = ai_text
+        self.ai_style = ai_style
         md = self._format_markdown()
         with open(self.transcript_path, "w", encoding="utf-8") as f:
             f.write(md)
@@ -879,6 +891,8 @@ class MeetingSession:
         except (OSError, ValueError):
             data = {"session_id": self._session_id}
         data = {**data, "final_transcript": text, "final_engine": engine}
+        if ai_text is not None:
+            data = {**data, "ai_transcript": ai_text, "ai_style": ai_style}
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         logger.info("Meeting final transcript written (%s, %d chars)", engine, len(text))

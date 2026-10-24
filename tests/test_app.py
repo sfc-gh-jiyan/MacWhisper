@@ -2480,7 +2480,7 @@ class _FakeMeetingSession:
     def mixed_audio(self):
         return self._audio
 
-    def write_final_transcript(self, text, engine):
+    def write_final_transcript(self, text, engine, ai_text=None, ai_style=None):
         self.written = (text, engine)
         return "/tmp/m.md"
 
@@ -2683,3 +2683,144 @@ def test_collapse_repeats_is_a_saved_preference():
     import settings_window
     assert "collapse_repeats" in app.TranscriberApp._PREFS
     assert any(t.key == "collapse_repeats" for t in settings_window.TOGGLES)
+
+
+# ── AI beautifier ──
+
+class _FakeLLM:
+    def __init__(self, reply="AI 整理后的文字", fail=False):
+        self.reply, self.fail, self.calls = reply, fail, []
+
+    def complete(self, prompt, system="", max_tokens=512, timeout=120.0, lock_timeout=None):
+        self.calls.append({"prompt": prompt, "timeout": timeout, "lock_timeout": lock_timeout})
+        if self.fail:
+            from llm_backend import LLMUnavailable
+            raise LLMUnavailable("timed out")
+        return self.reply
+
+
+def _beautify_app(tmp_path, asr_text, style="medium", llm=None):
+    app, inst = _correction_app(tmp_path, asr_text)
+    inst.paste_style = style
+    inst.custom_style = ""
+    inst._beautify_llm = llm if llm is not None else _FakeLLM()
+    inst._set_status = MagicMock()
+    return app, inst
+
+
+def _dictate(tmp_path, inst):
+    log = tmp_path / "transcripts.jsonl"
+    with patch("app.TRANSCRIPT_LOG", str(log)), patch("app.MEETINGS_DIR", str(tmp_path)), \
+         patch("app.AUDIO_DIR", str(tmp_path / "audio")), patch("app._DATA_DIR", str(tmp_path)), \
+         patch.object(inst, "_auto_paste") as paste:
+        inst._do_transcribe(_make_frames(5, 1024))
+    return paste, json.loads(log.read_text().splitlines()[-1])
+
+
+def test_ai_style_pastes_the_ai_version_and_logs_the_original(tmp_path):
+    app, inst = _beautify_app(tmp_path, "我我我们先看一下C I C")
+    paste, entry = _dictate(tmp_path, inst)
+    paste.assert_called_once_with("AI 整理后的文字 ")
+    assert entry["text"] == "AI 整理后的文字"
+    assert entry["plain_text"] == "我们先看一下CSE"          # after vocabulary + stutters
+    assert entry["style"] == "medium"
+    call = inst._beautify_llm.calls[0]
+    assert "我们先看一下CSE" in call["prompt"] and call["timeout"] <= 5.0 and call["lock_timeout"]
+
+
+def test_ai_failure_pastes_the_original(tmp_path):
+    app, inst = _beautify_app(tmp_path, "我们开会", llm=_FakeLLM(fail=True))
+    paste, entry = _dictate(tmp_path, inst)
+    paste.assert_called_once_with("我们开会 ")
+    assert entry["text"] == "我们开会" and entry.get("style_failed") == "medium"
+
+
+def test_original_style_never_calls_the_llm(tmp_path):
+    llm = _FakeLLM()
+    app, inst = _beautify_app(tmp_path, "我们开会", style="original", llm=llm)
+    paste, entry = _dictate(tmp_path, inst)
+    paste.assert_called_once_with("我们开会 ")
+    assert llm.calls == [] and "plain_text" not in entry
+
+
+def test_ai_style_without_llm_pastes_the_original(tmp_path):
+    app, inst = _beautify_app(tmp_path, "我们开会")
+    inst._beautify_llm = None
+    paste, entry = _dictate(tmp_path, inst)
+    paste.assert_called_once_with("我们开会 ")
+
+
+def test_meeting_final_pass_adds_ai_version(tmp_path):
+    q = _FakeQwen(text="会议原文")
+    inst, session = _final_pass_app(q)
+    inst.paste_style = "heavy"
+    inst.custom_style = ""
+    inst._beautify_llm = _FakeLLM(reply="会议整理版")
+    inst._meeting_final_pass(session)
+    args, kw = session.write_final_transcript.call_args
+    assert args[0] == "会议原文"
+    assert kw["ai_text"] == "会议整理版" and kw["ai_style"]
+
+
+def test_meeting_final_pass_without_style_has_no_ai_version():
+    q = _FakeQwen(text="会议原文")
+    inst, session = _final_pass_app(q)
+    inst.paste_style = "original"
+    inst._meeting_final_pass(session)
+    args, kw = session.write_final_transcript.call_args
+    assert kw.get("ai_text") is None
+
+
+def test_paste_style_is_saved_and_validated():
+    import app
+    inst = _engine_app()
+    inst._save_config = MagicMock()
+    inst._start_beautifier = MagicMock()
+    inst._stop_beautifier = MagicMock()
+    inst._set_paste_style("light")
+    assert inst.paste_style == "light"
+    inst._start_beautifier.assert_called_once()
+    inst._set_paste_style("original")
+    inst._stop_beautifier.assert_called_once()
+    with pytest.raises(ValueError):
+        inst._set_paste_style("rewrite everything")
+    inst._set_custom_style("  改成 Slack 消息 ")
+    assert inst.custom_style == "改成 Slack 消息"
+
+
+def test_quit_cleanup_kills_the_beautifier_llm():
+    inst = _quit_app(in_meeting=False)
+    proc = MagicMock()
+    proc.poll.return_value = None
+    inst._beautify_llm = MagicMock(_proc=proc)
+    inst._quit_cleanup(MagicMock())
+    proc.kill.assert_called_once()
+
+
+def test_vocabulary_learning_reuses_the_beautifier_llm(monkeypatch):
+    """One 4B model in memory, not two; and learning must not close it."""
+    import app
+    inst = _engine_app()
+    shared = MagicMock(is_ready=True)
+    inst._beautify_llm = shared
+    inst._miner_lock = threading.Lock()
+    inst._set_status = MagicMock()
+    inst._set_title = MagicMock()
+    inst._idle_icon = "🎙"
+    inst._busy_for_mining = lambda: False
+    inst._sync_hotwords = MagicMock()
+    inst._asr_model_for_mining = lambda: "m"
+    inst.correction = MagicMock()
+    inst.correction.vocab.pending.return_value = []
+    monkeypatch.setattr(app.llm_backend, "llm_available", lambda: True)
+    monkeypatch.setattr(app.vocab_miner, "mark_run", lambda *a: None)
+    used = []
+    monkeypatch.setattr(app.vocab_miner, "run", lambda complete, *a, **k: (
+        used.append(complete), MagicMock(active=[], pending=[], examined=0, stopped=False))[1])
+    made = MagicMock()
+    monkeypatch.setattr(app.llm_backend, "LLMSidecarBackend", made)
+    inst._run_vocab_miner(manual=False)
+    assert used == [shared.complete]
+    made.assert_not_called()
+    shared.close.assert_not_called()
+    assert inst._beautify_llm is shared
