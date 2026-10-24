@@ -137,8 +137,80 @@ def _is_rewrite(heard: str, correct: str) -> bool:
     return False
 
 
+# Everyday words make dangerous "mishearings": an active 既然 → Jira rewrote
+# every 既然 the user said (4 dictations, found 2026-10-24). They may still be
+# real mishearings (绘画 → 会话 is), so they are never activated without review
+# and the review window warns about them.
+_COMMON_ZH = frozenset("""
+既然 但是 因为 所以 如果 虽然 然后 而且 或者 还是 就是 不过 可是 只是 于是 因此 并且 而是 不是 只要
+只有 除非 无论 不管 即使 哪怕 尽管 假如 要是 比如 例如 其实 当然 确实 真的 已经 正在 马上 立刻 一直
+总是 经常 有时 刚才 现在 以前 以后 之前 之后 今天 明天 昨天 时候 时间 问题 事情 东西 地方 情况 方面
+方法 方式 结果 原因 意思 意见 想法 看法 办法 部分 内容 过程 目的 目标 计划 系统 工作 公司 客户 用户
+会议 会话 会谈 话题 讨论 文章 论文 报告 文件 文档 资料 数据 信息 消息 邮件 电话 网络 程序 软件 硬件
+电脑 手机 设置 配置 功能 能力 问题 答案 回答 回复 解释 说明 描述 介绍 总结 分析 研究 测试 检查 确认
+赛事 比赛 赛程 绘画 画画 学习 学生 老师 朋友 大家 我们 你们 他们 她们 它们 自己 别人 人们 这个 那个
+这些 那些 这样 那样 这里 那里 哪里 什么 怎么 为什么 多少 几个 一个 一些 一下 一点 一样 一起 一定 一般
+可能 可以 应该 需要 必须 能够 愿意 希望 觉得 认为 知道 了解 理解 明白 记得 忘记 发现 看到 听到 说到
+提到 想到 开始 结束 继续 停止 完成 准备 打算 决定 选择 改变 变成 成为 出现 发生 存在 包括 包含 使用
+利用 通过 根据 关于 对于 按照 为了 除了 以及 还有 甚至 尤其 特别 非常 比较 更加 最后 首先 其次 另外
+同时 一边 还要 不要 不用 没有 不能 不会 不行 可惜 幸好 好像 似乎 大概 也许 或许 肯定 一共 全部 所有
+每个 任何 其他 别的 主要 重要 简单 复杂 容易 困难 清楚 明确 正确 错误 安全 方便 负责 负担 压力 风险
+""".split())
+_EN_WORDS: frozenset | None = None
+_EN_DICT_PATH = "/usr/share/dict/words"
+
+
+def _english_words() -> frozenset:
+    global _EN_WORDS
+    if _EN_WORDS is None:
+        try:
+            with open(_EN_DICT_PATH, encoding="utf-8", errors="ignore") as f:
+                _EN_WORDS = frozenset(w.strip().lower() for w in f if w.strip())
+        except OSError:
+            _EN_WORDS = frozenset()
+    return _EN_WORDS
+
+
+def _is_english_word(w: str) -> bool:
+    w = w.lower()
+    words = _english_words() | {"the", "a", "an", "and", "or", "of", "to"}
+    return w in words or (w.endswith("s") and w[:-1] in words) or \
+        (w.endswith("es") and w[:-2] in words)
+
+
+def is_everyday_word(heard: str) -> bool:
+    """A common Chinese word, or English made only of dictionary words."""
+    heard = heard.strip()
+    if _CJK.search(heard):
+        return heard in _COMMON_ZH
+    # One English word only: a phrase ("conference page") must match whole, so it
+    # rarely fires by accident; CIC, co-citation, R4P are not dictionary words
+    if not re.fullmatch(r"[A-Za-z]{2,}", heard) or heard.isupper():
+        return False
+    return _is_english_word(heard)
+
+
+def review_warning(vocab: Vocabulary) -> str:
+    """Warning line for the review window: suggestions that are everyday words."""
+    risky = [line for line in pending_lines(vocab)
+             if is_everyday_word(line.split(" = ", 1)[0])]
+    if not risky:
+        return ""
+    return ("⚠ Everyday words — keep only if you are sure, every time you say them they "
+            "will be changed: " + "; ".join(risky))
+
+
+def reject_pairs(state_path: str, pairs) -> None:
+    """Never suggest these (heard, correct) pairs again."""
+    pairs = {(a, b) for a, b in pairs}
+    _update_state(state_path, rejected=lambda s: sorted(
+        {tuple(p) for p in s.get("rejected", [])} | pairs))
+
+
 def auto_activate(c: "Candidate") -> bool:
     """Apply without asking only for clear, repeated, single-term fixes."""
+    if is_everyday_word(c.heard):
+        return False
     single = len(_words(c.heard)) <= 1 and len(_CJK.findall(c.heard)) <= 4
     english_target = bool(re.search(r"[A-Za-z]{2,}", c.correct)) and not _CJK.search(c.correct)
     return c.confidence == "high" and single and english_target and c.count >= 2

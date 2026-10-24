@@ -776,7 +776,8 @@ class TranscriberApp(rumps.App):
                 message=(f"{len(lines)} words MacWhisper may be mishearing.\n"
                          "Each line is:  what MacWhisper HEARD  =  what it SHOULD BE   (e.g. 哈什 = hash)\n"
                          "Delete the lines that are wrong, keep the right ones, then Approve.\n"
-                         "Deleted lines are never suggested again. To fix a wrong right side, edit the RIGHT side."),
+                         "Deleted lines are never suggested again. To fix a wrong right side, edit the RIGHT side."
+                         + (f"\n\n{warn}" if (warn := vocab_miner.review_warning(self.correction.vocab)) else "")),
                 title="Vocabulary suggestions", default_text="\n".join(lines),
                 ok="Approve", cancel="Later", dimensions=(420, min(40 + 18 * len(lines), 320)))
             r = w.run()

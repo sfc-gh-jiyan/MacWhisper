@@ -322,3 +322,46 @@ def testtyped_risks_for_add_correction(tmp_path):
     assert vm.typed_risks(v, "Tmux", "Tulang Dong")          # steals a misheard form
     assert vm.typed_risks(v, "Jira", "Gira")                 # rewrites a real term
     assert vm.typed_risks(v, "哈什", "hash") == []
+
+
+# ── Everyday words as "mishearings" (2026-10-24: 既然 → Jira rewrote 4 dictations) ──
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("word", ["既然", "但是", "因为", "论文", "赛事", "pronouns", "pronoun",
+                                  "hawk", "the"])
+def test_everyday_words_are_flagged(word):
+    assert vm.is_everyday_word(word)
+
+
+@pytest.mark.parametrize("word", ["Gira", "Benguli", "哈什", "漫威", "纳通嘛", "CIC", "Tomaki",
+                                  "co-citation", "conference配置"])
+def test_mishearings_are_not_everyday_words(word):
+    assert not vm.is_everyday_word(word)
+
+
+def test_everyday_word_is_never_activated_automatically():
+    c = vm.Candidate("既然", "Jira", "high", count=9)
+    assert vm.auto_activate(c) is False
+    assert vm.auto_activate(vm.Candidate("pronouns", "pron and cron", "high", count=5)) is False
+    assert vm.auto_activate(vm.Candidate("哈什", "hash", "high", count=2)) is True
+
+
+def test_review_warns_about_everyday_words(tmp_path):
+    v = _vocab(tmp_path)
+    v.add_correction("既然", "Jira", source="suggested")
+    v.add_correction("Gira", "Jira", source="suggested")
+    warn = vm.review_warning(v)
+    assert "既然 = Jira" in warn and "Gira" not in warn
+    assert vm.review_warning(_vocab(tmp_path / "empty")) == ""
+
+
+def test_removed_aliases_can_be_rejected_for_good(tmp_path):
+    state = str(tmp_path / "s.json")
+    vm.reject_pairs(state, [("既然", "Jira"), ("SFDC", "Snowflake")])
+    vm.reject_pairs(state, [("既然", "Jira")])                    # idempotent
+    assert vm.rejected_pairs(state) == {("既然", "jira"), ("sfdc", "snowflake")}
+    out = vm.validate([{"heard": "既然", "correct": "Jira", "confidence": "high"}], "既然",
+                      _vocab_entries=[], rejected=vm.rejected_pairs(state))
+    assert out == []
