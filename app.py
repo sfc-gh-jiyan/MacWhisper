@@ -926,11 +926,30 @@ class TranscriberApp(rumps.App):
             return
         backend = llm_backend.LLMSidecarBackend(max_restarts=3)
         self._beautify_llm = backend
+        self._load_beautifier(backend, backend.start)
+
+    def _load_beautifier(self, backend, start) -> None:
+        """Load / reload the LLM in the background — never inside a dictation."""
+        if getattr(self, "_beautify_loading", False):
+            return
+        self._beautify_loading = True
 
         def run():
-            ok = backend.start()
-            logger.warning("AI beautifier LLM %s", "ready" if ok else f"failed: {backend.last_error}")
-        threading.Thread(target=run, daemon=True, name="beautifier-start").start()
+            try:
+                ok = start()
+                logger.warning("AI beautifier LLM %s",
+                               "ready" if ok else f"failed: {backend.last_error}")
+            except Exception:
+                logger.exception("AI beautifier LLM failed to load")
+            finally:
+                self._beautify_loading = False
+        threading.Thread(target=run, daemon=True, name="beautifier-load").start()
+
+    def _restart_beautifier_async(self) -> None:
+        backend = getattr(self, "_beautify_llm", None)
+        if backend is not None:
+            logger.warning("AI beautifier LLM not ready — reloading it in the background")
+            self._load_beautifier(backend, backend.restart)
 
     def _stop_beautifier(self) -> None:
         backend, self._beautify_llm = getattr(self, "_beautify_llm", None), None
@@ -959,11 +978,21 @@ class TranscriberApp(rumps.App):
         if style == "original" or llm is None or not text:
             return None
 
+        not_ready = []
+
         def call(prompt, **kw):
-            return llm.complete(prompt, lock_timeout=self.BEAUTIFY_LOCK_S, **kw)
+            try:
+                return llm.complete(prompt, lock_timeout=self.BEAUTIFY_LOCK_S,
+                                    require_ready=True, **kw)
+            except llm_backend.LLMUnavailable as e:
+                if "not ready" in str(e):
+                    not_ready.append(1)
+                raise
         t0 = time.time()
         out = beautifier.beautify(text, style, llm=call, custom=getattr(self, "custom_style", ""),
                                   timeout=self.BEAUTIFY_TIMEOUT_S)
+        if not_ready and not getattr(self, "_beautify_loading", False):
+            self._restart_beautifier_async()       # crashed / timed out earlier: reload
         logger.info("AI beautify (%s): %s in %.1fs", style, "ok" if out else "failed",
                     time.time() - t0)
         return out
@@ -1320,11 +1349,15 @@ class TranscriberApp(rumps.App):
             text = qwen.transcribe_final(audio, retry=True, hotwords=False)
             if getattr(self, "collapse_repeats", True):
                 text = qwen_text.collapse_repeats(text)
-            ai_text, ai_label = self._beautify_meeting(text)
             label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
                           if v == self._qwen.model_repo), "Qwen3")
-            path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass",
-                                                  ai_text=ai_text, ai_style=ai_label)
+            engine = f"{label.split(' (')[0]}, full pass"
+            path = session.write_final_transcript(text, engine)
+            # AI version afterwards: it can take minutes and must not delay the file
+            ai_text, ai_label = self._beautify_meeting(text)
+            if ai_text and path:
+                path = session.write_final_transcript(text, engine, ai_text=ai_text,
+                                                      ai_style=ai_label) or path
             logger.warning("MEETING FINAL TRANSCRIPT — %s (%.0fs audio in %.1fs)",
                            path, duration, time.time() - t0)
             self._set_status("Meeting saved (final transcript ready)")

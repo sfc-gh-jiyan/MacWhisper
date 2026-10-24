@@ -239,6 +239,7 @@ def _get_controller_cls():
             self._mw_owner.on_custom(sender)
 
         def windowWillClose_(self, _notification):
+            self._mw_owner.commit_pending_edits()
             self._mw_owner.stop_recording()
             self._mw_owner.restore_focus()
 
@@ -494,6 +495,11 @@ class SettingsWindow:
     def on_custom(self, sender) -> None:
         text = sender.stringValue()
         self._safe(lambda: self.model.set_custom_rules(text), "custom rules")
+
+    def commit_pending_edits(self) -> None:
+        """Rules typed without pressing Return are saved when the window closes."""
+        if self._custom_field is not None:
+            self.on_custom(self._custom_field)
 
     def on_login(self, sender) -> None:
         err = self.model.set_login(sender.state() == 1)

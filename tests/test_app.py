@@ -2691,8 +2691,10 @@ class _FakeLLM:
     def __init__(self, reply="AI 整理后的文字", fail=False):
         self.reply, self.fail, self.calls = reply, fail, []
 
-    def complete(self, prompt, system="", max_tokens=512, timeout=120.0, lock_timeout=None):
-        self.calls.append({"prompt": prompt, "timeout": timeout, "lock_timeout": lock_timeout})
+    def complete(self, prompt, system="", max_tokens=512, timeout=120.0, lock_timeout=None,
+                 require_ready=False):
+        self.calls.append({"prompt": prompt, "timeout": timeout, "lock_timeout": lock_timeout,
+                           "require_ready": require_ready})
         if self.fail:
             from llm_backend import LLMUnavailable
             raise LLMUnavailable("timed out")
@@ -2750,16 +2752,32 @@ def test_ai_style_without_llm_pastes_the_original(tmp_path):
     paste.assert_called_once_with("我们开会 ")
 
 
-def test_meeting_final_pass_adds_ai_version(tmp_path):
+def test_meeting_final_pass_adds_ai_version_after_writing_the_transcript(tmp_path):
+    """Review: the AI pass (minutes for a long meeting) must not delay the file."""
     q = _FakeQwen(text="会议原文")
     inst, session = _final_pass_app(q)
     inst.paste_style = "heavy"
     inst.custom_style = ""
     inst._beautify_llm = _FakeLLM(reply="会议整理版")
     inst._meeting_final_pass(session)
-    args, kw = session.write_final_transcript.call_args
-    assert args[0] == "会议原文"
-    assert kw["ai_text"] == "会议整理版" and kw["ai_style"]
+    first, second = session.write_final_transcript.call_args_list
+    assert first.args[0] == "会议原文" and first.kwargs.get("ai_text") is None
+    assert second.args[0] == "会议原文" and second.kwargs["ai_text"] == "会议整理版"
+
+
+def test_beautify_restarts_a_dead_llm_in_the_background(tmp_path):
+    from llm_backend import LLMUnavailable
+
+    class NotReady(_FakeLLM):
+        def complete(self, prompt, **kw):
+            self.calls.append(kw)
+            raise LLMUnavailable("LLM not ready")
+    app, inst = _beautify_app(tmp_path, "我们开会", llm=NotReady())
+    inst._restart_beautifier_async = MagicMock()
+    paste, entry = _dictate(tmp_path, inst)
+    paste.assert_called_once_with("我们开会 ")
+    assert inst._beautify_llm.calls[0]["require_ready"] is True
+    inst._restart_beautifier_async.assert_called_once()
 
 
 def test_meeting_final_pass_without_style_has_no_ai_version():

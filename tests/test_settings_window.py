@@ -486,3 +486,11 @@ def test_real_window_has_style_popup_and_custom_rules(real_window):
     win._custom_field.setStringValue_("Write it as an email")
     win.on_custom(win._custom_field)
     assert app.custom_style == "Write it as an email"
+
+
+def test_custom_rules_saved_when_window_closes_without_return(real_window):
+    """Review: text typed without pressing Return was lost on close."""
+    app, win = real_window
+    win._custom_field.setStringValue_("Write it as a short Slack message")
+    win.commit_pending_edits()
+    assert app.custom_style == "Write it as a short Slack message"
