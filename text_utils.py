@@ -11,16 +11,6 @@ import opencc
 
 # ── Constants ─────────────────────────────────────────────
 
-BILINGUAL_PROMPT = "以下是中英双语对话的转录。This is a bilingual transcript mixing Chinese and English."
-
-
-def bilingual_prompt(terms=None, limit: int = 20) -> str:
-    """Whisper initial prompt; vocabulary terms make Whisper prefer their spelling."""
-    terms = [t for t in (terms or []) if t][:limit]
-    if not terms:
-        return BILINGUAL_PROMPT
-    return f"{BILINGUAL_PROMPT} 术语 Terms: {', '.join(terms)}."
-
 _PUNCT_NORMALIZE = str.maketrans('，。！？、', ',.!?,')
 OVERLAP_STRIP_CHARS = set(' \t\n，。！？、,.!?-\u3000')
 

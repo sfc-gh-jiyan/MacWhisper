@@ -1,7 +1,7 @@
 """Qwen3 live subtitles for Meeting Mode — one segment at a time.
 
 The meeting loop (meeting.py) owns audio capture, VAD and segment commits.
-This processor gives it the same small interface as OnlineASRProcessor:
+This processor is the live meeting processor; its small interface:
 
   insert_audio_chunk(audio)   add float32 audio to the current segment
   process_iter()              about once per `step` s, re-decode the WHOLE
@@ -17,7 +17,7 @@ Qwen3 returns no word timestamps, so `committed` stays empty and the loop's
 timestamp-based buffer trim is skipped; segment_close() clears the audio
 itself. Re-decoding the whole segment keeps text consistent (Qwen3 has no
 streaming mode); max_segment_s bounds the decode cost. A backend failure
-raises QwenUnavailable so the meeting can fall back to Whisper.
+raises QwenUnavailable so the meeting buffers audio until Qwen3 is back.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ class QwenSegmentProcessor:
         return self.segment_seconds() >= self.max_segment_s
 
     # A pause inside a sentence must not cut off a 1-2 character fragment
-    # (eval 2026-10-20). Short segments wait for the Whisper-length silence.
+    # (eval 2026-10-20). Short segments wait for a 2 s silence.
     MIN_CHARS_FOR_SHORT_SILENCE = 4
     LONG_SILENCE_MS = 2000
 
@@ -163,7 +163,7 @@ class QwenSegmentProcessor:
                             self.segment_seconds())
             self.reset()
             return ""
-        raw = self._decode()      # on failure the audio stays for the fallback
+        raw = self._decode()      # on failure the audio stays buffered
         seconds = self.segment_seconds()
         self.reset()
         text = qwen_text.postprocess(raw, strip_filler_words=self.strip_fillers,

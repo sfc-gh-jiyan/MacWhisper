@@ -1,8 +1,8 @@
 """Qwen3-ASR engine for MacWhisper: lifecycle, live subtitles, final pass.
 
-Keeps all Qwen3-specific logic out of app.py. The app keeps Whisper loaded
-at all times; anything here that fails raises QwenUnavailable (or reports
-through on_error) so the app can fall back to Whisper for the same audio.
+Keeps all Qwen3-specific logic out of app.py (Qwen3 is the only engine).
+Anything here that fails raises QwenUnavailable (or reports through
+on_error) so the app can keep the audio and alert instead of losing it.
 """
 
 from __future__ import annotations
