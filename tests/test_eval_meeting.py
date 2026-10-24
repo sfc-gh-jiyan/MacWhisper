@@ -80,7 +80,7 @@ def test_realtime_strategy_reads_saved_transcript(dirs):
     assert eval_meeting.STRATEGIES["realtime"](s, backend=None) == "app output"
 
 
-def test_fullpass_strategy_uses_backend_once(dirs):
+def test_sidecar_strategy_uses_backend_once_without_hotwords(dirs):
     meetings, refs = dirs
     _write_wav(meetings / "meeting_A_mic.wav", [0] * 32000)
     (refs / "A.ref.txt").write_text("x")
@@ -97,8 +97,9 @@ def test_fullpass_strategy_uses_backend_once(dirs):
             return FakeResult()
 
     b = FakeBackend()
-    assert eval_meeting.STRATEGIES["fullpass"](s, backend=b) == "full text"
+    assert eval_meeting.STRATEGIES["sidecar"](s, backend=b) == "full text"
     assert len(b.calls) == 1 and b.calls[0][0] == 32000
+    assert b.calls[0][1] == {"hotwords": False}
 
 
 def test_score_perfect_and_partial():
@@ -138,6 +139,6 @@ def test_qwen3_strategy_pins_chinese_to_keep_code_switching(dirs):
 
 
 def test_backend_kind_per_strategy():
-    assert eval_meeting.BACKEND_KIND["fullpass"] == "whisper"
+    assert eval_meeting.BACKEND_KIND["sidecar"] == "sidecar"
     assert eval_meeting.BACKEND_KIND["qwen3"] == "qwen3"
     assert "realtime" not in eval_meeting.BACKEND_KIND

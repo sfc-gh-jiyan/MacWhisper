@@ -1,14 +1,14 @@
 """End-to-end verification of the Qwen3 engine inside a real TranscriberApp.
 
-Loads REAL models (Whisper + Qwen3 sidecar). Not part of pytest; run by hand:
+Loads the REAL Qwen3 sidecar model. Not part of pytest; run by hand:
 
     venv/bin/python tests/verify_app_qwen.py [--model mlx-community/Qwen3-ASR-0.6B-bf16]
 
 Checks, with a time limit and progress output per stage:
-  1. app constructs (menu, config) and both engines become ready
-  2. Push to Talk final pass on 3 recordings (short/medium/long): Qwen3 vs Whisper
+  1. app constructs (menu, config) and Qwen3 becomes ready
+  2. Push to Talk final pass on 3 recordings (short/medium/long)
   3. live subtitles loop against the real sidecar (first text latency)
-  4. sidecar killed -> final pass falls back to Whisper on the same audio,
+  4. sidecar killed -> final pass keeps the audio (nothing pasted),
      exactly one alert
   5. meeting final pass rewrites the .md (final first, live second)
 
@@ -91,17 +91,15 @@ def main():
         inst._reporter = MagicMock()
         inst._auto_paste = MagicMock()
         inst._notify = MagicMock()
-        inst.translate_mode = False
         if inst.engine != "qwen" or inst.qwen_model != args.model:
             inst.engine = "qwen"
             inst.qwen_model = args.model
             inst._start_qwen()
-        wait_until(inst._backend_ready.is_set, 240, "Whisper")
         wait_until(lambda: inst._qwen is not None and inst._qwen.is_ready, 240, "Qwen3")
         labels = [i.title for i in inst.model_items.values()]
         results["construct"] = done(t0, True, f"engine={inst.engine} menu={labels}")
 
-        t0 = stage("2. Push to Talk final pass: 3 recordings, Qwen3 vs Whisper")
+        t0 = stage("2. Push to Talk final pass: 3 recordings, Qwen3")
         ok = True
         for p in pick_three():
             pcm = load_wav(p)
@@ -109,12 +107,8 @@ def main():
             ts = time.time()
             qtext, qmodel = inst._final_text(f, pcm)
             q_s = time.time() - ts
-            ts = time.time()
-            wtext, _ = inst._whisper_final(f, len(f) / 16000)
-            w_s = time.time() - ts
             print(f"  [{len(f) / 16000:4.1f}s] {os.path.basename(p)}")
             print(f"     Qwen3   ({q_s:4.2f}s, {qmodel.split('/')[-1]}): {qtext[:140]}")
-            print(f"     Whisper ({w_s:4.2f}s): {wtext[:140]}")
             ok &= "Qwen3" in qmodel
         results["final_pass"] = done(t0, ok)
 
@@ -141,7 +135,7 @@ def main():
         print(f"  last shown: {last[:140]}")
         results["live"] = done(t0, bool(shown) and first is not None and first < 4.0)
 
-        t0 = stage("4. kill sidecar -> Whisper fallback on the same audio, one alert")
+        t0 = stage("4. kill sidecar -> audio kept, nothing pasted, one alert")
         inst._qwen.backend.max_restarts = 0          # make the failure stick
         inst._qwen.backend._proc.kill()
         time.sleep(0.5)
@@ -153,8 +147,7 @@ def main():
         menu = [i.title for i in inst.model_items.values() if "✅" in i.title]
         print(f"  1st: model={m1} text={t1[:80]}")
         print(f"  2nd: model={m2}  alerts={alerts}  menu={menu}")
-        results["fallback"] = done(t0, m1 == inst.current_model and m2 == inst.current_model
-                                   and alerts == 1 and bool(t1))
+        results["fallback"] = done(t0, t1 == "" and t2 == "" and alerts == 1)
 
         t0 = stage("4b. sidecar crash with restart budget -> Qwen3 recovers by itself")
         assert inst._qwen.start(args.model), inst._qwen.last_error   # fresh, default budget

@@ -104,7 +104,7 @@ def main(argv=None) -> int:
         return model.generate(a, language="Chinese").text
 
     clips = load_clips()
-    # Only clips where the app also logged its live (Whisper) subtitles
+    # Only clips where the app also logged its live subtitles
     clips = [c for c in clips if c.get("realtime")] or clips
     sample = stratified_sample(clips, args.clips)
     rows = []
@@ -114,14 +114,14 @@ def main(argv=None) -> int:
         r["wav"] = os.path.basename(c["wav"])
         r["mixed"] = is_code_switched(c["pasted"])
         r["qwen_live_vs_final"] = compute_wer(r["live_at_release"], r["final"]) if r["final"] else None
-        r["whisper_live"] = c.get("realtime", "")
-        r["whisper_final"] = c["pasted"]
-        r["whisper_live_vs_final"] = (compute_wer(c["realtime"], c["pasted"])
+        r["app_live"] = c.get("realtime", "")
+        r["app_final"] = c["pasted"]
+        r["app_live_vs_final"] = (compute_wer(c["realtime"], c["pasted"])
                                       if c.get("realtime") else None)
         rows.append(r)
         print(f"{i:2d}/{len(sample)} {r['wav']} {r['duration_s']:5.1f}s first={r['first_text_s']} "
               f"mean={r['mean_decode_s']}s max={r['max_decode_s']}s wait={r['wait_after_release_s']}s "
-              f"contra={r['contradictions']} rewrite={r['rewrites']} qwenΔ={r['qwen_live_vs_final']} whisperΔ={r['whisper_live_vs_final']}",
+              f"contra={r['contradictions']} rewrite={r['rewrites']} qwenΔ={r['qwen_live_vs_final']} appΔ={r['app_live_vs_final']}",
               flush=True)
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")

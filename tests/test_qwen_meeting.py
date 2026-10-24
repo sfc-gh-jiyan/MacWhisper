@@ -149,9 +149,9 @@ def test_reset_clears_everything():
     assert len(p.audio_buffer) == 0 and p.transcript_buffer.peek_unconfirmed() == []
 
 
-def test_failed_segment_close_keeps_audio_for_the_whisper_fallback():
-    """The meeting hands the unfinished segment's audio to Whisper on failure;
-    segment_close must not clear it before raising."""
+def test_failed_segment_close_keeps_audio_for_the_restart_buffer():
+    """On failure the meeting keeps buffering the unfinished segment's audio
+    until Qwen3 is back; segment_close must not clear it before raising."""
     p, clock = _proc(["ok"], fail_on=1)
     _feed(p, 2.0)
     with pytest.raises(QwenUnavailable):

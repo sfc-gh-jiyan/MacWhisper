@@ -41,7 +41,7 @@ def test_start_and_transcribe(tmp_path):
     assert not b.is_ready
 
 
-def test_translate_is_rejected_so_caller_uses_whisper(tmp_path):
+def test_translate_is_rejected(tmp_path):
     b = _backend(tmp_path)
     with pytest.raises(qb.QwenUnavailable):
         b.transcribe(_audio(1.0), task="translate")

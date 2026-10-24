@@ -11,8 +11,8 @@ Data stays OUT of the repo (recordings contain real voices):
 Usage:
   venv/bin/python tests/eval_meeting.py                     # all sessions
   venv/bin/python tests/eval_meeting.py --session 20261018_194440
-  venv/bin/python tests/eval_meeting.py --model mlx-community/whisper-large-v3-turbo
-  venv/bin/python tests/eval_meeting.py --strategies realtime fullpass --show-text
+  venv/bin/python tests/eval_meeting.py --strategies realtime sidecar --show-text
+  venv/bin/python tests/eval_meeting.py --sidecar-model mlx-community/Qwen3-ASR-0.6B-bf16
   .venv-eval/bin/python tests/eval_meeting.py --strategies qwen3   # needs mlx-audio
 
 Metric: MER — mixed error rate (CJK per character, Latin per word), via
@@ -40,8 +40,8 @@ from eval_metrics import compute_recall, compute_wer  # noqa: E402
 DATA_DIR = os.path.expanduser("~/.macwhisper")
 MEETINGS_DIR = os.path.join(DATA_DIR, "meetings")
 REF_DIR = os.path.join(DATA_DIR, "eval")
-DEFAULT_MODEL = "mlx-community/whisper-large-v3-mlx"
 DEFAULT_QWEN_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
+DEFAULT_SIDECAR_MODEL = DEFAULT_QWEN_MODEL
 SAMPLE_RATE = 16000
 
 
@@ -115,11 +115,12 @@ def _realtime(session: Session, backend) -> str:
     return session.realtime_text()
 
 
-def _fullpass(session: Session, backend) -> str:
-    """One Whisper call over the whole meeting (same settings as Push to Talk)."""
-    from text_utils import BILINGUAL_PROMPT
-    result = backend.transcribe(session.load_audio(), initial_prompt=BILINGUAL_PROMPT)
-    return result.text.strip()
+def _sidecar(session: Session, backend) -> str:
+    """Qwen3-ASR over the whole meeting via the app's sidecar (the engine the
+    meeting final pass uses; runs from the app venv). No vocabulary: it hurt
+    meetings (see QwenSidecarBackend.transcribe)."""
+    result = backend.transcribe(session.load_audio(), hotwords=False)
+    return (result.text or "").strip()
 
 
 def _qwen3(session: Session, backend) -> str:
@@ -135,18 +136,20 @@ def _qwen3(session: Session, backend) -> str:
 
 STRATEGIES = {
     "realtime": _realtime,
-    "fullpass": _fullpass,
+    "sidecar": _sidecar,
     "qwen3": _qwen3,
 }
 # Which model family each strategy needs (absent = no model)
-BACKEND_KIND = {"fullpass": "whisper", "qwen3": "qwen3"}
+BACKEND_KIND = {"sidecar": "sidecar", "qwen3": "qwen3"}
 
 
 def _load_backend(kind: str, model: str):
-    if kind == "whisper":
-        from asr_backend import MLXWhisperBackend
-        backend = MLXWhisperBackend(model_repo=model)
-        backend.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm-up, not timed
+    if kind == "sidecar":
+        from qwen_backend import QwenSidecarBackend
+        backend = QwenSidecarBackend(model_repo=model)
+        if not backend.start():
+            raise RuntimeError("Qwen3 sidecar did not start (run: make qwen-setup)")
+        backend.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), hotwords=False)  # warm-up
         return backend
     if kind == "qwen3":
         # Needs mlx-audio — run with the isolated eval env (.venv-eval), not
@@ -177,9 +180,10 @@ def format_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def run(sessions: list[Session], strategies: list[str], model: str,
+def run(sessions: list[Session], strategies: list[str],
+        sidecar_model: str = DEFAULT_SIDECAR_MODEL,
         qwen_model: str = DEFAULT_QWEN_MODEL) -> list[dict]:
-    model_for = {"whisper": model, "qwen3": qwen_model}
+    model_for = {"sidecar": sidecar_model, "qwen3": qwen_model}
     backends = {kind: _load_backend(kind, model_for[kind])
                 for kind in {BACKEND_KIND[s] for s in strategies if s in BACKEND_KIND}}
     rows = []
@@ -196,14 +200,19 @@ def run(sessions: list[Session], strategies: list[str], model: str,
                 "seconds": elapsed, "audio_s": audio_s, "text": text,
                 **score(text, sess.reference),
             })
+    for backend in backends.values():
+        close = getattr(backend, "close", None)
+        if close is not None:
+            close()                 # stop the sidecar process
     return rows
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--session", action="append", help="Session id (repeatable); default all")
-    p.add_argument("--strategies", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
-    p.add_argument("--model", default=DEFAULT_MODEL, help="Whisper model (fullpass)")
+    p.add_argument("--strategies", nargs="+", default=["realtime", "sidecar"], choices=list(STRATEGIES),
+                   help="qwen3 needs mlx-audio (.venv-eval)")
+    p.add_argument("--sidecar-model", default=DEFAULT_SIDECAR_MODEL, help="Qwen3-ASR model (sidecar)")
     p.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL, help="Qwen3-ASR model (qwen3)")
     p.add_argument("--show-text", action="store_true", help="Print each hypothesis")
     p.add_argument("--json", help="Also write rows to this JSON file")
@@ -217,7 +226,7 @@ def main(argv=None) -> int:
               f"{MEETINGS_DIR}/meeting_<id>_mic.wav")
         return 1
 
-    rows = run(sessions, args.strategies, args.model, args.qwen_model)
+    rows = run(sessions, args.strategies, args.sidecar_model, args.qwen_model)
     print(format_table(rows))
     if args.show_text:
         for r in rows:

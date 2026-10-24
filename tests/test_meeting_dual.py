@@ -4,7 +4,7 @@ Tests the full mic + system-audio pipeline using WavFileSource to inject
 real WAV recordings into MeetingSession. Three layers:
 
 - Layer 1 (integration): MockBackend, fast, CI-friendly
-- Layer 2 (e2e quality): Real MLXWhisperBackend, @pytest.mark.slow
+- Layer 2 (e2e quality): Real Qwen3-ASR sidecar, @pytest.mark.slow
 - Layer 3 (hardware):    Real SystemAudioHelper, @pytest.mark.hardware
 
 Run Layer 1 only (CI):
@@ -112,7 +112,7 @@ class MockBackend:
         self._responses = responses or []
         self._call_count = 0
 
-    def transcribe(self, audio, *, language=None, initial_prompt=None, task="transcribe"):
+    def transcribe(self, audio, *, language=None, initial_prompt=None, task="transcribe", **kw):
         from asr_backend import TranscriptionResult, Segment, WordTimestamp
 
         if self._call_count < len(self._responses):
@@ -486,7 +486,7 @@ class TestDualChannelPipelineV2:
         assert sys_count > 5, f"Sys only delivered {sys_count} frames"
 
 
-# ── Layer 2: E2E Quality tests (real Whisper) ────────────────
+# ── Layer 2: E2E Quality tests (real Qwen3-ASR) ──────────────
 
 def _wav_duration(filename):
     """Get WAV duration in seconds."""
@@ -552,9 +552,24 @@ def _save_result(result):
         f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
+def _qwen_sidecar():
+    """Start the Qwen3-ASR sidecar for the slow tests; skip if it is not set up."""
+    from qwen_backend import QwenSidecarBackend, default_python_path
+    if not os.path.isfile(default_python_path()):
+        pytest.skip("Qwen3 sidecar env missing (run: make qwen-setup)")
+    backend = QwenSidecarBackend(model_repo="mlx-community/Qwen3-ASR-0.6B-bf16")
+    if not backend.start():
+        pytest.skip("Qwen3 sidecar did not start")
+    backend.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), hotwords=False)  # warm-up
+    try:
+        yield backend
+    finally:
+        backend.close()
+
+
 @pytest.mark.slow
 class TestDualChannelQuality:
-    """End-to-end quality evaluation with real MLXWhisperBackend.
+    """End-to-end quality evaluation with the real Qwen3-ASR sidecar.
 
     Parametrized over all E2E scenarios in dual_channel_scenarios.json.
     Each scenario runs two WAV files through MeetingSession at real-time
@@ -577,13 +592,8 @@ class TestDualChannelQuality:
 
     @pytest.fixture(scope="class")
     def backend(self):
-        """Shared MLXWhisperBackend with warmup (once per class)."""
-        from asr_backend import MLXWhisperBackend
-
-        backend = MLXWhisperBackend()
-        warmup = np.zeros(int(SAMPLE_RATE * 1.0), dtype=np.float32)
-        backend.transcribe(warmup, language=None, task="transcribe")
-        return backend
+        """Shared Qwen3-ASR sidecar (once per class)."""
+        yield from _qwen_sidecar()
 
     def _get_combined_ground_truth(self, scenario):
         """Combine ground truth from both WAV files."""
@@ -673,7 +683,7 @@ class TestDualChannelQuality:
             if scores["char_overlap"] < 0.05:
                 pytest.xfail(
                     f"{s['name']}: extreme overlap produced {scores['char_overlap']:.1%} "
-                    f"overlap — known Whisper limitation with fully concurrent speech"
+                    f"overlap — known ASR limitation with fully concurrent speech"
                 )
             assert scores["char_overlap"] >= 0.15, \
                 f"{s['name']}: char overlap {scores['char_overlap']:.1%} < 15%"
@@ -729,13 +739,8 @@ class TestGeneratedScenarios:
 
     @pytest.fixture(scope="class")
     def backend(self):
-        """Shared MLXWhisperBackend with warmup."""
-        from asr_backend import MLXWhisperBackend
-
-        backend = MLXWhisperBackend()
-        warmup = np.zeros(int(SAMPLE_RATE * 1.0), dtype=np.float32)
-        backend.transcribe(warmup, language=None, task="transcribe")
-        return backend
+        """Shared Qwen3-ASR sidecar (once per class)."""
+        yield from _qwen_sidecar()
 
     def test_generated_quality(self, gen_scenario, backend):
         """Run a generated dual-channel scenario via dual-channel path."""
@@ -811,7 +816,7 @@ class TestGeneratedScenarios:
             if scores["char_overlap"] < 0.05:
                 pytest.xfail(
                     f"{s['name']}: extreme overlap produced {scores['char_overlap']:.1%} "
-                    f"overlap — known Whisper limitation with fully concurrent speech"
+                    f"overlap — known ASR limitation with fully concurrent speech"
                 )
             assert scores["char_overlap"] >= 0.15, \
                 f"{s['name']}: char overlap {scores['char_overlap']:.1%} < 15%"
@@ -834,13 +839,8 @@ class TestOverlapABComparison:
 
     @pytest.fixture(scope="class")
     def backend(self):
-        """Shared MLXWhisperBackend with warmup."""
-        from asr_backend import MLXWhisperBackend
-
-        backend = MLXWhisperBackend()
-        warmup = np.zeros(int(SAMPLE_RATE * 1.0), dtype=np.float32)
-        backend.transcribe(warmup, language=None, task="transcribe")
-        return backend
+        """Shared Qwen3-ASR sidecar (once per class)."""
+        yield from _qwen_sidecar()
 
     @pytest.fixture(params=[
         s for s in _e2e_scenarios() if s.get("mode") == "overlapping"
