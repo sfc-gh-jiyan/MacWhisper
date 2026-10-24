@@ -38,6 +38,7 @@ TOGGLES = (
     Toggle("meeting_final_pass", "Final transcript after the meeting (Qwen3, in memory)", "Meeting"),
     Toggle("qwen_strip_fillers", "Remove fillers (嗯 / 呃 / um)", "Qwen3 text"),
     Toggle("qwen_tight_spacing", "No space between Chinese and English", "Qwen3 text"),
+    Toggle("collapse_repeats", "Remove stutters (我我我们 → 我们, the the → the)", "Qwen3 text"),
 )
 _TOGGLE_BY_KEY = {t.key: t for t in TOGGLES}
 SLOTS = 2   # shortcuts per action (Push to Talk uses 1)
