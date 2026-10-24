@@ -1267,6 +1267,21 @@ def test_meeting_stop_falls_back_to_text_if_save_failed():
     inst._reporter.report.assert_called_once()  # user is told the file is missing
 
 
+def test_meeting_stop_after_outage_without_file_saves_the_audio(tmp_path, monkeypatch):
+    """Review MEDIUM: outage + .md not written -> no final pass; keep the audio."""
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    inst = _stopping_app(None)
+    session = inst._meeting_session
+    session.had_engine_outage = True
+    session._session_id = "20261024_090000"
+    session.mixed_audio.return_value = np.full(16000 * 3, 0.1, dtype=np.float32)
+    with patch.object(app.pyperclip, "copy"):
+        inst._stop_meeting()
+    assert (tmp_path / "meeting_20261024_090000.wav").exists()
+    session.release_audio.assert_called_once()
+
+
 def test_meeting_stop_empty_meeting_copies_nothing():
     import app
     inst = _stopping_app(None, transcript="")
@@ -2429,6 +2444,29 @@ def test_retry_that_fails_again_keeps_the_single_copy(tmp_path, monkeypatch):
     inst._notify = MagicMock()
     inst._retry_failed_recording()
     assert sorted(x.name for x in tmp_path.iterdir()) == ["20261024_010101.wav"]
+
+
+def test_retry_of_a_meeting_recording_leaves_out_the_vocabulary(tmp_path, monkeypatch):
+    """Review HIGH: the only recovery path for a failed meeting got the word list."""
+    import app
+    import wave as _wave
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path / "failed"))
+    monkeypatch.setattr(app, "MEETINGS_DIR", str(tmp_path / "meetings"))
+    _sync_threads(monkeypatch)
+    monkeypatch.setattr(app.pyperclip, "copy", lambda t: None)
+    os.makedirs(app.FAILED_DIR)
+    for name in ("meeting_20261024_090000.wav", "20261024_010101.wav"):
+        with _wave.open(os.path.join(app.FAILED_DIR, name), "wb") as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+            wf.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+    q = _FakeQwen(text="会议")
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    os.utime(os.path.join(app.FAILED_DIR, "meeting_20261024_090000.wav"), (2e9, 2e9))  # newest
+    inst._retry_failed_recording()
+    assert q.hotwords is False
+    inst._retry_failed_recording()                 # now the dictation one
+    assert q.hotwords is True
 
 
 class _FakeMeetingSession:

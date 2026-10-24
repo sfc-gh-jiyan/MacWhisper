@@ -1270,6 +1270,17 @@ class TestCatchUpChunks:
         assert [(g.start_time, g.end_time) for g in s._segments] == [(50.0, 65.0), (65.0, 80.0), (80.0, 90.0)]
         assert not s._engine_down
 
+    def test_caught_up_audio_counts_as_speech(self, monkeypatch):
+        """Review MEDIUM: recovered audio must not be skipped as silence."""
+        import qwen_meeting
+        marked = []
+        orig = qwen_meeting.QwenSegmentProcessor.mark_speech
+        monkeypatch.setattr(qwen_meeting.QwenSegmentProcessor, "mark_speech",
+                            lambda self: (marked.append(1), orig(self))[1])
+        s, calls = self._session(["一", "二", "三"])
+        s._catch_up_buffered()
+        assert len(marked) == 3 and len(calls) == 3
+
     def test_failure_mid_catch_up_keeps_the_rest_buffered(self):
         s, calls = self._session(["一"], fail_on=2)
         s._catch_up_buffered()

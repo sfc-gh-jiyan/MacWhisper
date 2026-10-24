@@ -372,7 +372,7 @@ class TranscriberApp(rumps.App):
             "save_meeting_audio": self.save_meeting_audio,
             "save_audio": self.save_audio,
             "log_level": self.log_level,
-            "engine": getattr(self, "engine", "whisper"),
+            "engine": getattr(self, "engine", "qwen"),
             "qwen_model": getattr(self, "qwen_model", DEFAULT_QWEN_MODEL),
             "qwen_strip_fillers": getattr(self, "qwen_strip_fillers", True),
             "qwen_tight_spacing": getattr(self, "qwen_tight_spacing", True),
@@ -914,7 +914,7 @@ class TranscriberApp(rumps.App):
     def _use_qwen(self) -> bool:
         """Qwen3 has started at least once (live subtitles need it ready)."""
         qwen = getattr(self, "_qwen", None)
-        return (getattr(self, "engine", "whisper") == "qwen" and qwen is not None
+        return (getattr(self, "engine", "qwen") == "qwen" and qwen is not None
                 and getattr(qwen, "started_ok", False))
 
     def _qwen_live_ok(self) -> bool:
@@ -1181,7 +1181,23 @@ class TranscriberApp(rumps.App):
             threading.Thread(target=self._meeting_final_pass, args=(session,),
                              daemon=True, name="meeting-final-pass").start()
         elif session is not None:
+            if outage:
+                # No final pass will run, and the live transcript has a gap:
+                # keep the audio for "Retry Last Failed Recording" (never lose it)
+                self._keep_meeting_audio(session)
             session.release_audio()
+
+    def _keep_meeting_audio(self, session, audio=None) -> str | None:
+        try:
+            audio = session.mixed_audio() if audio is None else audio
+        except Exception:
+            logger.exception("Reading the meeting audio failed")
+            return None
+        if audio is None or len(audio) < SAMPLE_RATE:
+            return None
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+        sid = getattr(session, "_session_id", None) or time.strftime("%Y%m%d_%H%M%S")
+        return self._save_failed_audio(pcm, name=f"meeting_{sid}")
 
     def _meeting_final_pass(self, session):
         """Re-transcribe the whole meeting with Qwen3 from in-memory audio.
@@ -1216,11 +1232,7 @@ class TranscriberApp(rumps.App):
         except Exception as e:
             # Never lose the meeting: the live transcript may have a gap (engine
             # outage), so keep the audio for "Retry Last Failed Recording".
-            saved = None
-            if audio is not None and len(audio) >= SAMPLE_RATE:
-                pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-                saved = self._save_failed_audio(
-                    pcm, name=f"meeting_{getattr(session, '_session_id', time.strftime('%Y%m%d_%H%M%S'))}")
+            saved = self._keep_meeting_audio(session, audio) if audio is not None else None
             where = (f" Meeting audio saved: {saved} — menu → Retry Last Failed Recording."
                      if saved else "")
             if isinstance(e, QwenUnavailable):
@@ -1732,13 +1744,14 @@ class TranscriberApp(rumps.App):
                 self._set_title(self._idle_icon)
                 self._set_status("Ready")
 
-    def _final_text(self, audio_float, audio_int16, keep_on_fail=True):
+    def _final_text(self, audio_float, audio_int16, keep_on_fail=True, hotwords=True):
         """Final text for one utterance -> (text, model_used). Qwen3 only.
 
         Qwen3 still loading (right after launch): wait for it. A failed
         request: the engine restarts the sidecar and retries the same audio
         once. Still failing: the recording is saved to FAILED_DIR (menu:
         Retry Last Failed Recording), the user is alerted, nothing is pasted.
+        hotwords=False: no vocabulary prompt (meeting recordings).
         """
         duration = len(audio_float) / SAMPLE_RATE
         qwen = getattr(self, "_qwen", None)
@@ -1756,7 +1769,8 @@ class TranscriberApp(rumps.App):
                         self._qwen_start_failed_at = time.monotonic()
                         raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
             t0 = time.time()
-            text = qwen.transcribe_final(audio_float, retry=True)
+            text = (qwen.transcribe_final(audio_float, retry=True) if hotwords else
+                    qwen.transcribe_final(audio_float, retry=True, hotwords=False))
             self._qwen_recovered()
             print(f"[INFO] Final transcription (Qwen3): {time.time() - t0:.1f}s "
                   f"for {duration:.1f}s audio")
@@ -1811,10 +1825,11 @@ class TranscriberApp(rumps.App):
                     self._notify("MacWhisper", "No failed recordings", "Nothing to retry")
                     return
                 path = files[-1]
+                is_meeting = os.path.basename(path).startswith("meeting_")
                 with wave.open(path, "rb") as wf:
                     pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
                 text, _model = self._final_text(pcm.astype(np.float32) / 32768.0, pcm,
-                                                keep_on_fail=False)
+                                                keep_on_fail=False, hotwords=not is_meeting)
                 if not text:
                     return                       # _final_text alerted; the WAV stays
                 name = os.path.basename(path)[:-4]
