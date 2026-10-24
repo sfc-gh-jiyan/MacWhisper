@@ -146,6 +146,18 @@ def test_hotwords_sent_to_sidecar(tmp_path):
         b.close()
 
 
+def test_hotwords_can_be_left_out_per_request(tmp_path):
+    """Meetings transcribe without the word list; dictation keeps it."""
+    b = _backend(tmp_path)
+    try:
+        b.hotwords = ["CSE", "Snowflake", "memory"]
+        assert b.transcribe(_audio(1.0), hotwords=False).text == "fake 1.0s Chinese"
+        assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese hw=3"
+        assert b.hotwords == ["CSE", "Snowflake", "memory"]
+    finally:
+        b.close()
+
+
 # ── Recovery over a long-running app (2026-10-23) ──
 
 def test_restart_budget_refills_after_a_healthy_period(tmp_path):

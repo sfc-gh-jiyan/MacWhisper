@@ -125,19 +125,21 @@ class QwenEngine:
                 self.backend.close()
             self._ok = False
 
-    def transcribe_final(self, audio: np.ndarray, retry: bool = False) -> str:
+    def transcribe_final(self, audio: np.ndarray, retry: bool = False,
+                         hotwords: bool = True) -> str:
         """Final text for a whole utterance. Raises QwenUnavailable on failure.
 
         After a sidecar crash (started_ok but not ready) the backend restarts
         it transparently, within its restart budget. With retry=True a failed
         request (e.g. a timeout) restarts the sidecar and tries the same audio
         once more — there is no other engine to fall back to.
+        hotwords=False: transcribe without the vocabulary (meetings).
         """
         if not self.started_ok or self.backend is None:
             raise QwenUnavailable(self.last_error or "Qwen3 engine not started")
         audio = np.asarray(audio, dtype=np.float32)
         try:
-            result = self.backend.transcribe(audio)
+            result = self._transcribe(audio, hotwords)
         except QwenUnavailable as e:
             restart = getattr(self.backend, "restart", None)
             if not retry or restart is None:
@@ -145,9 +147,16 @@ class QwenEngine:
             logger.warning("Qwen3 final pass failed (%s) — restarting and retrying once", e)
             if not restart():
                 raise
-            result = self.backend.transcribe(audio)
+            result = self._transcribe(audio, hotwords)
         return qwen_text.postprocess(result.text, strip_filler_words=self.strip_fillers,
                                      tight=self.tight)
+
+    def _transcribe(self, audio: np.ndarray, hotwords: bool):
+        # Only pass the switch when it is off: older/fake backends take audio alone
+        if hotwords:
+            return self.backend.transcribe(audio)
+        return self.backend.transcribe(audio, hotwords=False)
+
 
 
 def _frames_to_float(frames) -> np.ndarray:

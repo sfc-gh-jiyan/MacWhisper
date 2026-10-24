@@ -948,7 +948,7 @@ class TestQwenLiveInMeeting:
             def __init__(self):
                 self.calls = 0
 
-            def transcribe(self, audio):
+            def transcribe(self, audio, **kw):
                 self.calls += 1
                 if fail_on is not None and (self.calls == fail_on if fail_once else self.calls >= fail_on):
                     raise QwenUnavailable("sidecar died")
@@ -1169,7 +1169,7 @@ class TestStopVsLoopRace:
         state = {"inside": 0, "overlap": 0, "calls": 0}
 
         class SlowQwen:
-            def transcribe(self, audio):
+            def transcribe(self, audio, **kw):
                 state["calls"] += 1
                 state["inside"] += 1
                 if state["inside"] > 1:
@@ -1261,7 +1261,7 @@ class TestCatchUpChunks:
         calls = []
 
         class Q:
-            def transcribe(self, audio):
+            def transcribe(self, audio, **kw):
                 calls.append(len(audio) / 16000)
                 if fail_on is not None and len(calls) == fail_on:
                     raise QwenUnavailable("again")

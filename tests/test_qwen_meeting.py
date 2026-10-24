@@ -19,8 +19,9 @@ class FakeQwen:
         self.calls = []
         self.fail_on = fail_on
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, **kw):
         self.calls.append(len(audio) / SR)
+        self.kw = kw
         if self.fail_on is not None and len(self.calls) == self.fail_on:
             raise QwenUnavailable("sidecar died")
         text = self.texts[min(len(self.calls) - 1, len(self.texts) - 1)]
@@ -223,3 +224,11 @@ def test_without_vad_segments_still_decode():
     p, clock = _proc(["hello"])           # uses_vad defaults to False
     _feed(p, 3.0)
     assert p.segment_close() != ""
+
+
+def test_meeting_segments_are_decoded_without_the_vocabulary():
+    p, clock = _proc(["今天开会"])
+    _feed(p, 2.0)
+    clock.t = 2.0
+    p.process_iter()
+    assert p.backend.kw.get("hotwords") is False

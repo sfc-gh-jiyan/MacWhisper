@@ -1369,9 +1369,10 @@ class _FakeQwen:
         self.model_repo = "mlx-community/Qwen3-ASR-0.6B-bf16"
         self.last_error = ""
 
-    def transcribe_final(self, audio, retry=False):
+    def transcribe_final(self, audio, retry=False, hotwords=True):
         self.calls += 1
         self.retry = retry
+        self.hotwords = hotwords
         if self.fail:
             from qwen_backend import QwenUnavailable
             raise QwenUnavailable("sidecar died")
@@ -1524,6 +1525,13 @@ def test_qwen_live_loop_stops_when_next_recording_starts(monkeypatch):
     assert not t.is_alive()
 
 
+@pytest.fixture(autouse=True)
+def _tmp_failed_dir(tmp_path, monkeypatch):
+    """Failed recordings from tests must never land in the real ~/.macwhisper/failed."""
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path / "failed"))
+
+
 def _final_pass_app(qwen):
     inst = _engine_app(qwen=qwen)
     inst._notify = MagicMock()
@@ -1541,6 +1549,22 @@ def test_meeting_final_pass_rewrites_file_and_frees_audio():
     assert text == "会议最终文稿" and "Qwen3" in engine
     session.release_audio.assert_called_once()
     inst._notify.assert_called_once()
+
+
+def test_meeting_final_pass_does_not_send_the_vocabulary():
+    """Word-list prompting raised meeting MER 0.185 -> 0.549 and read the list
+    out on silence (model comparison, 2026-10-24)."""
+    q = _FakeQwen(text="会议最终文稿")
+    inst, session = _final_pass_app(q)
+    inst._meeting_final_pass(session)
+    assert q.hotwords is False
+
+
+def test_meeting_final_pass_failure_saves_audio_in_failed_dir():
+    import app
+    inst, session = _final_pass_app(_FakeQwen(fail=True))
+    inst._meeting_final_pass(session)
+    assert os.listdir(app.FAILED_DIR)                       # tmp dir, not the real one
 
 
 def test_meeting_final_pass_failure_keeps_live_transcript_and_alerts():

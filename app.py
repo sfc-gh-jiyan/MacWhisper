@@ -1243,7 +1243,7 @@ class TranscriberApp(rumps.App):
                     and not qwen.start(self.qwen_model):
                 raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
             t0 = time.time()
-            text = qwen.transcribe_final(audio, retry=True)
+            text = qwen.transcribe_final(audio, retry=True, hotwords=False)
             label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
                           if v == self._qwen.model_repo), "Qwen3")
             path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass")

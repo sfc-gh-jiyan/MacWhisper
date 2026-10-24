@@ -196,11 +196,14 @@ class QwenSidecarBackend(ASRBackend):
         language: str | None = None,
         initial_prompt: str | None = None,
         task: str = "transcribe",
+        hotwords: bool = True,
     ) -> TranscriptionResult:
         """Transcribe via the sidecar. Raises QwenUnavailable on any failure.
 
         `language`/`initial_prompt` are Whisper-style and ignored: the sidecar
         pins Chinese, which keeps code-switched English verbatim.
+        hotwords=False sends this request without the vocabulary (meetings:
+        the word list raised MER 0.185 -> 0.549 and was read out on silence).
         """
         if task != "transcribe":
             raise QwenUnavailable("Qwen3-ASR does not translate; use Whisper")
@@ -212,7 +215,7 @@ class QwenSidecarBackend(ASRBackend):
             rid = self._next_id
             req = {"id": rid, "cmd": "transcribe",
                    "pcm16_b64": base64.b64encode(pcm16.tobytes()).decode("ascii")}
-            if self.hotwords:
+            if hotwords and self.hotwords:
                 req["hotwords"] = list(self.hotwords)
             duration = len(pcm16) / SAMPLE_RATE
             timeout = self.base_timeout_s + self.per_audio_s * duration

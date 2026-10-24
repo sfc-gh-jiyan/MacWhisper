@@ -122,7 +122,9 @@ class QwenSegmentProcessor:
     # ── decoding ──
     def _decode(self) -> str:
         t0 = self._now()
-        text = convert_t2s(self.backend.transcribe(self.audio_buffer).text or "")
+        # No vocabulary in meetings: it raised MER 0.185 -> 0.549 and the list
+        # was read out on silence (model comparison, 2026-10-24)
+        text = convert_t2s(self.backend.transcribe(self.audio_buffer, hotwords=False).text or "")
         took = self._now() - t0
         self.last_debug = {"engine": "qwen3", "audio_s": round(self.segment_seconds(), 2),
                            "decode_s": round(took, 2)}
