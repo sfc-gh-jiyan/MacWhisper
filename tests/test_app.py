@@ -2643,3 +2643,43 @@ def test_menu_has_copy_last_transcript():
     inst = _menu_app()
     titles = [getattr(m, "title", None) for m in inst._build_menu() if m is not None]
     assert "Copy Last Transcript" in titles
+# ── Stutter repeats (roadmap D) ──
+
+def test_dictation_collapses_stutters_and_logs_the_original(tmp_path):
+    app, inst = _correction_app(tmp_path, "我我我们先看一下C I C")
+    log = tmp_path / "transcripts.jsonl"
+    with patch("app.TRANSCRIPT_LOG", str(log)), patch("app.MEETINGS_DIR", str(tmp_path)), \
+         patch("app.AUDIO_DIR", str(tmp_path / "audio")), patch("app._DATA_DIR", str(tmp_path)), \
+         patch.object(inst, "_auto_paste") as paste:
+        inst._do_transcribe(_make_frames(5, 1024))
+    paste.assert_called_once_with("我们先看一下CSE ")
+    entry = json.loads(log.read_text().splitlines()[-1])
+    assert entry["text"] == "我们先看一下CSE"
+    assert entry["raw_text"] == "我我我们先看一下C I C"
+    assert entry["collapsed"] is True
+
+
+def test_dictation_keeps_stutters_when_turned_off(tmp_path):
+    app, inst = _correction_app(tmp_path, "我我我们走吧")
+    inst.collapse_repeats = False
+    log = tmp_path / "transcripts.jsonl"
+    with patch("app.TRANSCRIPT_LOG", str(log)), patch("app.MEETINGS_DIR", str(tmp_path)), \
+         patch("app.AUDIO_DIR", str(tmp_path / "audio")), patch("app._DATA_DIR", str(tmp_path)), \
+         patch.object(inst, "_auto_paste") as paste:
+        inst._do_transcribe(_make_frames(5, 1024))
+    paste.assert_called_once_with("我我我们走吧 ")
+    assert "raw_text" not in json.loads(log.read_text().splitlines()[-1])
+
+
+def test_meeting_final_transcript_collapses_stutters():
+    q = _FakeQwen(text="我我我们今天开会，the the agenda")
+    inst, session = _final_pass_app(q)
+    inst._meeting_final_pass(session)
+    assert session.write_final_transcript.call_args[0][0] == "我们今天开会，the agenda"
+
+
+def test_collapse_repeats_is_a_saved_preference():
+    import app
+    import settings_window
+    assert "collapse_repeats" in app.TranscriberApp._PREFS
+    assert any(t.key == "collapse_repeats" for t in settings_window.TOGGLES)

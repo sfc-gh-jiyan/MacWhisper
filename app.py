@@ -106,6 +106,7 @@ import crash_guard
 import error_alert
 import qwen_backend
 import qwen_engine
+import qwen_text
 import settings_window
 import shortcuts
 import correction_flow
@@ -375,6 +376,7 @@ class TranscriberApp(rumps.App):
             "engine": getattr(self, "engine", "qwen"),
             "qwen_model": getattr(self, "qwen_model", DEFAULT_QWEN_MODEL),
             "qwen_strip_fillers": getattr(self, "qwen_strip_fillers", True),
+            "collapse_repeats": getattr(self, "collapse_repeats", True),
             "qwen_tight_spacing": getattr(self, "qwen_tight_spacing", True),
             "meeting_final_pass": getattr(self, "meeting_final_pass", True),
             "shortcuts": getattr(self, "shortcuts", None) or shortcuts.merged({}),
@@ -403,6 +405,7 @@ class TranscriberApp(rumps.App):
         self.engine = initial_engine(cfg, os.path.isfile(qwen_backend.default_python_path()))
         self.qwen_model = migrated_qwen_model(cfg)
         self.qwen_strip_fillers = cfg.get("qwen_strip_fillers", True)
+        self.collapse_repeats = cfg.get("collapse_repeats", True)
         self.qwen_tight_spacing = cfg.get("qwen_tight_spacing", True)
         # Re-transcribe meetings with Qwen3 from in-memory audio (never written to disk)
         self.meeting_final_pass = cfg.get("meeting_final_pass", True)
@@ -815,7 +818,7 @@ class TranscriberApp(rumps.App):
     # ── Settings window ───────────────────────────────────────
 
     # Preferences without a dedicated toggle handler (set from Settings)
-    _PREFS = ("meeting_final_pass", "qwen_strip_fillers", "qwen_tight_spacing")
+    _PREFS = ("meeting_final_pass", "qwen_strip_fillers", "qwen_tight_spacing", "collapse_repeats")
 
     def _open_settings(self, _):
         if getattr(self, "login_item", None) is None:
@@ -1223,6 +1226,8 @@ class TranscriberApp(rumps.App):
                 raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
             t0 = time.time()
             text = qwen.transcribe_final(audio, retry=True, hotwords=False)
+            if getattr(self, "collapse_repeats", True):
+                text = qwen_text.collapse_repeats(text)
             label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
                           if v == self._qwen.model_repo), "Qwen3")
             path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass")
@@ -1938,6 +1943,10 @@ class TranscriberApp(rumps.App):
         processed = (flow.process(raw_text, heard_speech=heard) if flow is not None
                      else correction_flow.Processed(raw_text=raw_text, text=raw_text))
         text = processed.text
+        collapsed = False
+        if getattr(self, "collapse_repeats", True):   # "我我我们" -> "我们" (roadmap D)
+            tidy = qwen_text.collapse_repeats(text)
+            collapsed, text = tidy != text, tidy
 
         # Save enhanced history (Qwen3 returns no word timestamps)
         save_enhanced_history(
@@ -1958,10 +1967,13 @@ class TranscriberApp(rumps.App):
             "duration_s": round(duration, 1),
             "text": text,
         }
-        if processed.corrections or processed.learned:
+        if processed.corrections or processed.learned or collapsed:
             log_entry["raw_text"] = raw_text
+        if processed.corrections or processed.learned:
             log_entry["corrections"] = processed.corrections
             log_entry["learned"] = processed.learned
+        if collapsed:
+            log_entry["collapsed"] = True
         if realtime_text:
             log_entry["realtime_text"] = realtime_text
         with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as f:
