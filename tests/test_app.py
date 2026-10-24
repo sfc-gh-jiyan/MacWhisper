@@ -62,12 +62,11 @@ def test_config_load_missing_file(tmp_config):
 
 
 def test_config_load_valid(tmp_config):
-    cfg = {"translate_mode": True, "current_model": "mlx-community/whisper-large-v3-mlx", "live_mode": True}
+    cfg = {"current_model": "mlx-community/whisper-large-v3-mlx", "live_mode": True}
     tmp_config.write_text(json.dumps(cfg))
     import app
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
     result = inst._load_config()
-    assert result["translate_mode"] is True
     assert result["live_mode"] is True
 
 
@@ -82,7 +81,7 @@ def test_config_load_corrupt(tmp_config):
 def test_config_save(tmp_config):
     import app
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
-    inst.translate_mode = True
+    inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-medium-mlx"
     inst.live_mode = True
     inst.save_audio = False
@@ -91,7 +90,7 @@ def test_config_save(tmp_config):
     inst.save_meeting_audio = False
     inst._save_config()
     saved = json.loads(tmp_config.read_text())
-    assert saved["translate_mode"] is True
+    assert "translate_mode" not in saved          # Translate to English removed (Qwen3 only)
     assert saved["live_mode"] is True
 
 
@@ -152,7 +151,7 @@ def test_icon_states():
     assert '🔴' in source   # Meeting Mode recording icon
     assert '💬' in source
     assert '🎙' in source
-    assert '🌐' in source
+    assert '🌐' not in source   # translate mode (and its icon) removed: Qwen3 only
 
 
 # ── Test: prompt stripping ────────────────────────────────────
@@ -171,22 +170,6 @@ def test_prompt_not_present():
     if text.startswith(prompt):
         text = text[len(prompt):].strip()
     assert text == "Hello this is a test"
-
-
-# ── Test: task selection ──────────────────────────────────────
-
-def test_translate_mode_task():
-    translate_mode = True
-    task, prompt = ("translate", None) if translate_mode else ("transcribe", "以下是普通话与英语的混合对话。")
-    assert task == "translate"
-    assert prompt is None
-
-
-def test_transcribe_mode_task():
-    translate_mode = False
-    task, prompt = ("translate", None) if translate_mode else ("transcribe", "以下是普通话与英语的混合对话。")
-    assert task == "transcribe"
-    assert prompt is not None
 
 
 # ── Test: live_mode is a toggle preference ────────────────────
@@ -461,6 +444,9 @@ def test_audio_history_saves_wav(tmp_path):
     mock_backend = MagicMock()
     mock_backend.transcribe.return_value = mock_result
     inst._backend = mock_backend
+    inst.qwen_model = 'mlx-community/Qwen3-ASR-1.7B-bf16'
+    inst._qwen = _FakeQwen(text=mock_backend.transcribe.return_value.text)
+    inst._qwen_alerted = False
 
     with patch("app.AUDIO_DIR", audio_dir), \
          patch("app.TRANSCRIPT_LOG", transcript_log), \
@@ -508,6 +494,9 @@ def test_transcript_log_appends_jsonl(tmp_path):
     mock_backend = MagicMock()
     mock_backend.transcribe.return_value = mock_result
     inst._backend = mock_backend
+    inst.qwen_model = 'mlx-community/Qwen3-ASR-1.7B-bf16'
+    inst._qwen = _FakeQwen(text=mock_backend.transcribe.return_value.text)
+    inst._qwen_alerted = False
     with patch("app.AUDIO_DIR", audio_dir), \
          patch("app.TRANSCRIPT_LOG", transcript_log), \
          patch("app._DATA_DIR", data_dir), \
@@ -525,8 +514,7 @@ def test_transcript_log_appends_jsonl(tmp_path):
     # The legacy entry (second line) has the expected format
     entry = json.loads(lines[1])
     assert entry["text"] == "你好世界 hello"
-    assert entry["model"] == "mlx-community/whisper-small-mlx"
-    assert entry["translate"] is False
+    assert entry["model"] == "mlx-community/Qwen3-ASR-0.6B-bf16"     # Qwen3 only
     assert "timestamp" in entry
     assert "audio_file" in entry
     assert entry["audio_file"].endswith(".wav")
@@ -1381,12 +1369,19 @@ class _FakeQwen:
         self.model_repo = "mlx-community/Qwen3-ASR-0.6B-bf16"
         self.last_error = ""
 
-    def transcribe_final(self, audio):
+    def transcribe_final(self, audio, retry=False):
         self.calls += 1
+        self.retry = retry
         if self.fail:
             from qwen_backend import QwenUnavailable
             raise QwenUnavailable("sidecar died")
         return self.text
+
+    def wait_ready(self, timeout):
+        self.waited = timeout
+        if getattr(self, "becomes_ready", False):
+            self.is_ready = self.started_ok = True
+        return self.is_ready
 
 
 def _engine_app(engine="qwen", qwen=None, translate=False):
@@ -1414,23 +1409,19 @@ def test_final_text_uses_qwen_when_available():
     inst._whisper_final.assert_not_called()
 
 
-def test_final_text_falls_back_to_whisper_on_same_audio_and_alerts():
+def test_final_text_qwen_failure_keeps_audio_and_alerts_without_whisper(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path / "failed"))
     inst = _engine_app(qwen=_FakeQwen(fail=True))
     audio = np.ones(16000, dtype=np.float32) * 0.1
     inst._whisper_final = MagicMock(return_value=("whisper text", None))
     text, engine = inst._final_text(audio, (audio * 32768).astype(np.int16))
-    assert text == "whisper text" and engine == inst.current_model
-    assert inst._whisper_final.call_args[0][0] is audio      # same audio, nothing lost
+    assert text == ""                                       # nothing pasted
+    inst._whisper_final.assert_not_called()                 # no Whisper behind Qwen3
+    assert inst._qwen.retry is True                         # restart + retry first
+    saved = list((tmp_path / "failed").glob("*.wav"))
+    assert len(saved) == 1                                  # recording kept for a retry
     inst._reporter.report.assert_called_once()
-    assert "Whisper" in inst._reporter.report.call_args[0][0]
-
-
-def test_final_text_whisper_engine_never_touches_qwen():
-    q = _FakeQwen()
-    inst = _engine_app(engine="whisper", qwen=q)
-    inst._whisper_final = MagicMock(return_value=("w", None))
-    inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
-    assert q.calls == 0
 
 
 def test_engine_and_qwen_settings_saved(tmp_config):
@@ -1445,20 +1436,32 @@ def test_engine_and_qwen_settings_saved(tmp_config):
     assert cfg["meeting_final_pass"] is True
 
 
-def test_initial_engine_defaults():
+def test_initial_engine_is_always_qwen():
     import app
-    assert app.initial_engine({}, qwen_env_exists=True) == "qwen"        # first upgrade
-    assert app.initial_engine({}, qwen_env_exists=False) == "whisper"
-    assert app.initial_engine({"engine": "whisper"}, qwen_env_exists=True) == "whisper"
-    assert app.initial_engine({"engine": "qwen"}, qwen_env_exists=False) == "qwen"  # keeps choice
+    assert app.initial_engine({}, qwen_env_exists=True) == "qwen"
+    assert app.initial_engine({"engine": "whisper"}, qwen_env_exists=True) == "qwen"   # migrated
 
 
-def test_model_menu_lists_whisper_and_qwen():
+def test_whisper_config_migrates_to_closest_qwen_model():
+    import app
+    q06 = "mlx-community/Qwen3-ASR-0.6B-bf16"
+    q17 = "mlx-community/Qwen3-ASR-1.7B-bf16"
+    assert app.migrated_qwen_model({"qwen_model": q17, "engine": "qwen"}) == q17      # keeps choice
+    assert app.migrated_qwen_model({"engine": "whisper",
+                                    "current_model": "mlx-community/whisper-large-v3-mlx"}) == q17
+    assert app.migrated_qwen_model({"engine": "whisper",
+                                    "current_model": "mlx-community/whisper-small-mlx"}) == q06
+    assert app.migrated_qwen_model({"qwen_model": "mlx-community/whisper-small-mlx"}) == q06
+    # this user's real config (engine qwen, stale whisper-small current_model)
+    assert app.migrated_qwen_model({"engine": "qwen", "current_model": "mlx-community/whisper-small-mlx",
+                                    "qwen_model": q17}) == q17
+
+
+def test_model_menu_lists_only_qwen():
     import app
     labels = list(app.ALL_MODEL_OPTIONS)
-    assert labels[:3] == list(app.MODEL_OPTIONS)
-    assert any("Qwen3" in l and "0.6B" in l for l in labels)
-    assert any("Qwen3" in l and "1.7B" in l for l in labels)
+    assert len(labels) == 2 and all("Qwen3" in l for l in labels)
+    assert not any("whisper" in r for r in app.ALL_MODEL_OPTIONS.values())
 
 
 class _LiveBackend:
@@ -1576,27 +1579,47 @@ class _CrashedQwen(_FakeQwen):
         self.last_error = "Qwen3 sidecar exited unexpectedly"
 
 
-def test_crashed_sidecar_is_retried_then_alerts_instead_of_silent_whisper():
-    """Regression (real-model verify): after a crash the app silently used Whisper."""
+def test_crashed_sidecar_is_retried_then_alerts(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
     inst = _engine_app(qwen=_CrashedQwen())
     inst._whisper_final = MagicMock(return_value=("whisper text", None))
     text, model = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
-    assert text == "whisper text"
-    assert inst._qwen.calls == 1                       # Qwen3 was actually tried
+    assert text == "" and inst._qwen.calls == 1
+    inst._whisper_final.assert_not_called()
     inst._reporter.report.assert_called_once()         # and the user was told
 
 
-def test_qwen_still_loading_uses_whisper_without_alert():
+def test_qwen_still_loading_waits_then_transcribes():
     q = _FakeQwen(ready=False)
-    q.started_ok = False                                # never became ready yet
+    q.started_ok = False
+    q.becomes_ready = True                              # finishes loading while we wait
     inst = _engine_app(qwen=q)
     inst._whisper_final = MagicMock(return_value=("w", None))
-    inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
-    assert q.calls == 0
+    text, _ = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert text == "千问 result" and q.waited > 0
+    inst._whisper_final.assert_not_called()
     inst._reporter.report.assert_not_called()
 
 
-def test_alert_rearms_after_qwen_recovers():
+def test_qwen_never_ready_keeps_audio_and_alerts(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    q = _FakeQwen(ready=False)
+    q.started_ok = False
+    q.start = lambda repo: False                        # one more start attempt fails too
+    inst = _engine_app(qwen=q)
+    inst._whisper_final = MagicMock(return_value=("w", None))
+    text, _ = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    assert text == "" and q.calls == 0
+    inst._whisper_final.assert_not_called()
+    assert list(tmp_path.glob("*.wav"))
+    inst._reporter.report.assert_called_once()
+
+
+def test_alert_rearms_after_qwen_recovers(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
     q = _FakeQwen(fail=True)
     inst = _engine_app(qwen=q)
     inst._on_main = lambda fn, *a: fn(*a)
@@ -1819,11 +1842,11 @@ def test_shortcut_action_refreshes_open_settings(monkeypatch):
     inst = _hotkey_app()
     inst._shortcuts_paused = False
     inst._settings = MagicMock()
-    inst._toggle_translate = MagicMock()
+    inst._toggle_live_mode = MagicMock()
     inst._on_main = lambda fn, *a: fn(*a)
     inst._guarded = lambda fn, where: fn
-    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(17, char="T"))
-    inst._toggle_translate.assert_called_once()
+    _press(inst, Key.ctrl, Key.shift, KeyCode.from_vk(1, char="S"))
+    inst._toggle_live_mode.assert_called_once()
     inst._settings.refresh.assert_called_once()
 
 
@@ -2241,6 +2264,7 @@ def _start_meeting_capturing(monkeypatch, qwen_ok):
     inst._vad = MagicMock()
     inst._vad_available = True
     inst._qwen = MagicMock()
+    inst._qwen.is_ready = qwen_ok
     inst.qwen_strip_fillers = True
     inst.qwen_tight_spacing = True
     inst._set_title = MagicMock()
@@ -2271,13 +2295,16 @@ def test_meeting_uses_qwen_live_when_ready(monkeypatch):
     assert kw["extended_silence_ms"] == 800
     kw["on_engine_failed"](RuntimeError("sidecar died"))
     inst._qwen_failed.assert_called_once()
-    assert "fallback_factory" in kw            # None = MeetingSession's own Whisper processor
+    assert kw["whisper_fallback"] is False     # Qwen3 only: buffer + catch up, no Whisper
+    assert "fallback_factory" not in kw
 
 
-def test_meeting_stays_on_whisper_when_qwen_not_ready(monkeypatch):
+def test_meeting_uses_qwen_even_while_it_is_loading(monkeypatch):
+    """Qwen3 only: a meeting right after launch buffers until Qwen3 is ready."""
+    import qwen_meeting
     inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=False)
-    assert kw.get("processor_factory") is None
-    assert kw.get("extended_silence_ms", 2000) == 2000
+    assert isinstance(kw["processor_factory"](), qwen_meeting.QwenSegmentProcessor)
+    assert kw["engine_ready"]() is False and kw["whisper_fallback"] is False
 
 
 def _correction_app(tmp_path, asr_text):
@@ -2294,6 +2321,9 @@ def _correction_app(tmp_path, asr_text):
     inst._live_loop_done.set()
     inst._backend = MagicMock()
     inst._backend.transcribe.return_value = TranscriptionResult(text=asr_text, segments=[])
+    inst.qwen_model = "mlx-community/Qwen3-ASR-1.7B-bf16"
+    inst._qwen = _FakeQwen(text=asr_text)
+    inst._qwen_alerted = False
     vocab = vocabulary.Vocabulary(path=str(tmp_path / "vocabulary.json"),
                                   entries=[vocabulary.Entry("CSE", aliases=("CIC",))])
     inst.correction = correction_flow.CorrectionFlow(vocab)
@@ -2367,3 +2397,42 @@ def test_qwen_live_preview_hides_lone_vocabulary_word(monkeypatch, tmp_path):
     threading.Timer(2.5, lambda: setattr(inst, "recording", False)).start()
     inst._qwen_live_loop()
     assert not any("会话" in s for s in shown), shown
+
+
+def _sync_threads(monkeypatch):
+    import app
+    monkeypatch.setattr(app.threading, "Thread",
+                        lambda target, daemon=None, **k: type("T", (), {"start": lambda s: target()})())
+
+
+def test_retry_failed_recording_copies_text_and_marks_done(tmp_path, monkeypatch):
+    import app
+    import wave as _wave
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    _sync_threads(monkeypatch)
+    copied = []
+    monkeypatch.setattr(app.pyperclip, "copy", copied.append)
+    p = tmp_path / "20261024_010101.wav"
+    with _wave.open(str(p), "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+        wf.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+    inst = _engine_app()
+    inst._notify = MagicMock()
+    inst._retry_failed_recording()
+    assert copied == ["千问 result"]
+    assert not p.exists() and (tmp_path / "20261024_010101.wav.done").exists()
+
+
+def test_retry_that_fails_again_keeps_the_single_copy(tmp_path, monkeypatch):
+    import app
+    import wave as _wave
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    _sync_threads(monkeypatch)
+    p = tmp_path / "20261024_010101.wav"
+    with _wave.open(str(p), "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+        wf.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+    inst = _engine_app(qwen=_FakeQwen(fail=True))
+    inst._notify = MagicMock()
+    inst._retry_failed_recording()
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["20261024_010101.wav"]

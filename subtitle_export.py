@@ -129,6 +129,32 @@ def export_vtt(
     return path
 
 
+def export_cues(cues: list[tuple[float, float, str]], path: str, fmt: str = "srt") -> str:
+    """Write ready-made cues (start_s, end_s, text) as SRT or WebVTT.
+
+    Used for paragraph-level subtitles when there are no word timestamps
+    (Qwen3 meeting segments). Returns the path written.
+    """
+    cues = [(s, e, t.strip()) for s, e, t in cues if t and t.strip()]
+    if fmt == "vtt":
+        parts = ["WEBVTT\n"] + [f"{_format_vtt_time(s)} --> {_format_vtt_time(e)}\n{t}\n"
+                                for s, e, t in cues]
+    else:
+        parts = [f"{i}\n{_format_srt_time(s)} --> {_format_srt_time(e)}\n{t}\n"
+                 for i, (s, e, t) in enumerate(cues, 1)]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+    return path
+
+
+def word_cues(words: list[WordTimestamp], max_words_per_line: int = 12,
+              max_line_width: int = 42) -> list[tuple[float, float, str]]:
+    """Group word timestamps into cues (same grouping as export_srt)."""
+    return [(line[0].start, line[-1].end, "".join(w.word for w in line).strip())
+            for line in _group_words_into_lines(words, max_words_per_line, max_line_width)]
+
+
 # ── Enhanced history ─────────────────────────────────────
 
 def save_enhanced_history(

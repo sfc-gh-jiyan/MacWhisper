@@ -66,16 +66,18 @@ def test_match_requires_exact_modifiers():
 
 
 def test_merged_fills_missing_and_drops_invalid():
-    cfg = sc.merged({"meeting": ["ctrl+cmd+vk46"], "translate": ["bogus+"], "nope": ["x"]})
+    cfg = sc.merged({"meeting": ["ctrl+cmd+vk46"], "live_subtitles": ["bogus+"], "nope": ["x"],
+                     "translate": ["ctrl+shift+vk17"]})          # removed action: ignored
     assert cfg["meeting"] == ["ctrl+cmd+vk46"]
-    assert cfg["translate"] == sc.DEFAULTS["translate"]               # invalid -> default
+    assert cfg["live_subtitles"] == sc.DEFAULTS["live_subtitles"]     # invalid -> default
+    assert "translate" not in cfg
     assert "nope" not in cfg
     assert cfg["push_to_talk"] == ["alt_r"]
 
 
 def test_conflicts():
-    cfg = sc.merged({"translate": ["ctrl+alt+vk46"]})               # same as meeting
-    assert ("meeting", "translate", "ctrl+alt+vk46") in sc.conflicts(cfg)
+    cfg = sc.merged({"live_subtitles": ["ctrl+alt+vk46"]})          # same as meeting
+    assert ("meeting", "live_subtitles", "ctrl+alt+vk46") in sc.conflicts(cfg)
     assert sc.conflicts(sc.merged({})) == []
 
 

@@ -38,14 +38,28 @@ class QwenEngine:
         self.last_error = ""
         self.hotwords: list[str] = []
         self._lock = threading.Lock()
+        self._settled = threading.Event()   # set when a start() attempt finished
+        self._settled.set()
 
     @property
     def is_ready(self) -> bool:
         b = self.backend
         return bool(self._ok and b is not None and getattr(b, "is_ready", False))
 
+    def wait_ready(self, timeout: float) -> bool:
+        """Wait for a running start() to finish; True when the engine is ready."""
+        self._settled.wait(timeout)
+        return self._settled.is_set() and self.is_ready
+
     def start(self, model_repo: str) -> bool:
         """(Re)start the sidecar for model_repo. Blocking; returns readiness."""
+        self._settled.clear()
+        try:
+            return self._start(model_repo)
+        finally:
+            self._settled.set()
+
+    def _start(self, model_repo: str) -> bool:
         with self._lock:
             if self.backend is not None:
                 try:
@@ -71,6 +85,8 @@ class QwenEngine:
         logger.debug("Qwen hotwords: %d terms", len(self.hotwords))
 
     def start_async(self, model_repo: str, on_done=None) -> None:
+        self._settled.clear()             # wait_ready() waits from now, not from the thread start
+
         def run():
             ok = self.start(model_repo)
             if on_done:
@@ -83,15 +99,27 @@ class QwenEngine:
                 self.backend.close()
             self._ok = False
 
-    def transcribe_final(self, audio: np.ndarray) -> str:
+    def transcribe_final(self, audio: np.ndarray, retry: bool = False) -> str:
         """Final text for a whole utterance. Raises QwenUnavailable on failure.
 
         After a sidecar crash (started_ok but not ready) the backend restarts
-        it transparently, within its restart budget.
+        it transparently, within its restart budget. With retry=True a failed
+        request (e.g. a timeout) restarts the sidecar and tries the same audio
+        once more — there is no other engine to fall back to.
         """
         if not self.started_ok or self.backend is None:
             raise QwenUnavailable(self.last_error or "Qwen3 engine not started")
-        result = self.backend.transcribe(np.asarray(audio, dtype=np.float32))
+        audio = np.asarray(audio, dtype=np.float32)
+        try:
+            result = self.backend.transcribe(audio)
+        except QwenUnavailable as e:
+            restart = getattr(self.backend, "restart", None)
+            if not retry or restart is None:
+                raise
+            logger.warning("Qwen3 final pass failed (%s) — restarting and retrying once", e)
+            if not restart():
+                raise
+            result = self.backend.transcribe(audio)
         return qwen_text.postprocess(result.text, strip_filler_words=self.strip_fillers,
                                      tight=self.tight)
 

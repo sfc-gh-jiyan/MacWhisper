@@ -12,7 +12,6 @@ class FakeApp:
     """Minimal stand-in exposing the same attributes/handlers as TranscriberApp."""
 
     def __init__(self):
-        self.translate_mode = False
         self.live_mode = True
         self.save_audio = False
         self.meeting_subtitles = True
@@ -29,9 +28,6 @@ class FakeApp:
     def _flip(self, attr):
         setattr(self, attr, not getattr(self, attr))
         self.calls.append(attr)
-
-    def _toggle_translate(self, _):
-        self._flip("translate_mode")
 
     def _toggle_live_mode(self, _):
         self._flip("live_mode")
@@ -63,16 +59,17 @@ class FakeApp:
 
 def test_items_cover_every_setting():
     keys = [i.key for i in sw.TOGGLES]
-    for k in ("translate_mode", "live_mode", "save_audio", "meeting_subtitles",
+    for k in ("live_mode", "save_audio", "meeting_subtitles",
               "save_meeting_audio", "meeting_final_pass", "qwen_strip_fillers",
               "qwen_tight_spacing"):
         assert k in keys
+    assert "translate_mode" not in keys          # Whisper-only, removed (Qwen3 only)
 
 
 def test_toggle_values_read_from_app():
     m = sw.SettingsModel(FakeApp())
     assert m.value("live_mode") is True
-    assert m.value("translate_mode") is False
+    assert m.value("save_audio") is False
 
 
 def test_set_same_value_does_not_flip():
@@ -85,8 +82,8 @@ def test_set_same_value_does_not_flip():
 def test_set_toggle_uses_existing_handler_once():
     app = FakeApp()
     m = sw.SettingsModel(app)
-    m.set_toggle("translate_mode", True)
-    assert app.translate_mode is True and app.calls == ["translate_mode"]
+    m.set_toggle("save_audio", True)
+    assert app.save_audio is True and app.calls == ["save_audio"]
 
 
 def test_prefs_without_handler_use_set_pref():
@@ -126,7 +123,7 @@ def test_record_shortcut_rejects_invalid_and_keeps_old():
 def test_record_shortcut_rejects_conflict_with_other_action():
     app = FakeApp()
     m = sw.SettingsModel(app)
-    err = m.record_shortcut("translate", 0, "ctrl+alt+vk46")    # = meeting
+    err = m.record_shortcut("live_subtitles", 0, "ctrl+alt+vk46")    # = meeting
     assert err and "Start / stop meeting" in err
     assert app.calls == []
 
@@ -208,9 +205,9 @@ def test_modifier_presses_alone_do_not_finish_a_combo():
 
 
 def test_conflict_keeps_recording_and_shows_error():
-    app, win = _recorder("translate", 0)
+    app, win = _recorder("live_subtitles", 0)
     win.handle_key(KEYDOWN, 46, CTRL | ALT)                      # = meeting
-    assert win._recording == ("translate", 0)
+    assert win._recording == ("live_subtitles", 0)
     assert "already used" in win.last_msg
     assert app._shortcuts_paused is True
 
@@ -290,7 +287,7 @@ def test_real_window_has_all_controls(real_window):
     assert len(win._checkboxes) == len(sw.TOGGLES)
     assert win._popup.numberOfItems() == 5
     assert win._popup.titleOfSelectedItem() == "Qwen3 0.6B (Fast, zh+en)"
-    assert len(win._record_buttons) == 1 + 4 * sw.SLOTS
+    assert len(win._record_buttons) == 1 + 3 * sw.SLOTS     # PTT + meeting, model, subtitles
     assert win._record_buttons[("meeting", 0)].title() == "⌃⌥M"
     assert win._record_buttons[("meeting", 1)].title() == "⌃⇧F8"
     assert win._record_buttons[("cycle_model", 1)].title() == "Add…"
@@ -298,10 +295,10 @@ def test_real_window_has_all_controls(real_window):
 
 def test_real_checkbox_click_reaches_app(real_window):
     app, win = real_window
-    box = win._checkboxes["translate_mode"]
+    box = win._checkboxes["save_audio"]
     assert box.state() == 0
     box.performClick_(None)
-    assert app.translate_mode is True and app.calls == ["translate_mode"]
+    assert app.save_audio is True and app.calls == ["save_audio"]
     assert box.state() == 1
 
 
@@ -334,8 +331,8 @@ def test_real_reset_button(real_window):
 
 def test_real_record_button_starts_and_close_stops(real_window):
     app, win = real_window
-    win._record_buttons[("translate", 0)].performClick_(None)
-    assert win._recording == ("translate", 0) and app._shortcuts_paused is True
+    win._record_buttons[("live_subtitles", 0)].performClick_(None)
+    assert win._recording == ("live_subtitles", 0) and app._shortcuts_paused is True
     assert win._monitor is not None
     win.window.performClose_(None)          # windowWillClose_ -> stop_recording
     assert win._recording is None and app._shortcuts_paused is False and win._monitor is None
@@ -343,11 +340,11 @@ def test_real_record_button_starts_and_close_stops(real_window):
 
 def test_real_record_button_twice_cancels(real_window):
     app, win = real_window
-    b = win._record_buttons[("translate", 0)]
+    b = win._record_buttons[("live_subtitles", 0)]
     b.performClick_(None)
     b.performClick_(None)
     assert win._recording is None and app._shortcuts_paused is False
-    assert b.title() == "⌃⇧T"
+    assert b.title() == "⌃⇧S"
 
 
 def test_window_reopens_after_close(real_window):
@@ -360,7 +357,7 @@ def test_window_reopens_after_close(real_window):
 def test_recording_stops_when_window_loses_focus(real_window):
     """Switching apps mid-recording must not leave global hotkeys paused."""
     app, win = real_window
-    win._record_buttons[("translate", 0)].performClick_(None)
+    win._record_buttons[("live_subtitles", 0)].performClick_(None)
     assert app._shortcuts_paused is True
     win._controller.windowDidResignKey_(None)
     assert app._shortcuts_paused is False and win._recording is None
