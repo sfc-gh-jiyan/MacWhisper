@@ -26,7 +26,7 @@ class MockBackend:
         self._responses = responses or []
         self._call_count = 0
 
-    def transcribe(self, audio, *, language=None, initial_prompt=None, task="transcribe"):
+    def transcribe(self, audio, *, language=None, initial_prompt=None, task="transcribe", **kw):
         from asr_backend import TranscriptionResult, Segment, WordTimestamp
 
         if self._call_count < len(self._responses):
@@ -570,6 +570,12 @@ class TestDualChannelPauseResume:
         assert isinstance(transcript, str)
 
 
+def _fast_qwen(backend):
+    """Qwen3 live processor that decodes the short mock audio (tests only)."""
+    import qwen_meeting
+    return qwen_meeting.QwenSegmentProcessor(backend, step=0.05, min_audio_s=0.1)
+
+
 class TestRMSPrioritySelection:
     """Unit tests for overlap priority selection logic in dual-channel mode.
 
@@ -585,6 +591,7 @@ class TestRMSPrioritySelection:
 
         session = MeetingSession(
             backend=backend, audio_source=mic_src, min_chunk_size=0.1,
+            processor_factory=lambda: _fast_qwen(backend),
         )
         session._dual_channel = True
         session._mic_source = mic_src
@@ -713,6 +720,7 @@ class TestRMSPrioritySelection:
 
         session = MeetingSession(
             backend=backend, audio_source=mic_src, min_chunk_size=0.1,
+            processor_factory=lambda: _fast_qwen(backend),
         )
         session._dual_channel = True
         session._mic_source = mic_src
@@ -748,6 +756,7 @@ class TestRMSPrioritySelection:
 
         session = MeetingSession(
             backend=backend, audio_source=mic_src, min_chunk_size=0.1,
+            processor_factory=lambda: _fast_qwen(backend),
         )
         session._dual_channel = True
         session._mic_source = mic_src
@@ -782,6 +791,7 @@ class TestRMSPrioritySelection:
 
         session = MeetingSession(
             backend=backend, audio_source=mic_src, min_chunk_size=0.1,
+            processor_factory=lambda: _fast_qwen(backend),
         )
         session._dual_channel = True
         session._mic_source = mic_src
@@ -934,21 +944,20 @@ class TestSegmentCloseWithoutConfirmedWords:
 
 
 class TestQwenLiveInMeeting:
-    """v0.7.3: Meeting Mode live subtitles on Qwen3, with Whisper fallback."""
+    """Meeting Mode live subtitles on Qwen3 (the only engine): on failure the
+    audio is buffered and decoded once Qwen3 is back."""
 
     def _session(self, qwen_texts, fail_on=None, speech_chunks=10_000, fail_once=False,
-                 engine_restart=None, recovered=None, whisper_fallback=True,
-                 engine_ready=None, **kw):
+                 engine_restart=None, recovered=None, engine_ready=None, **kw):
         from types import SimpleNamespace
         import qwen_meeting
-        from online_processor import OnlineASRProcessor
         from qwen_backend import QwenUnavailable
 
         class FakeQwen:
             def __init__(self):
                 self.calls = 0
 
-            def transcribe(self, audio):
+            def transcribe(self, audio, **kw):
                 self.calls += 1
                 if fail_on is not None and (self.calls == fail_on if fail_once else self.calls >= fail_on):
                     raise QwenUnavailable("sidecar died")
@@ -970,21 +979,18 @@ class TestQwenLiveInMeeting:
 
         qwen = FakeQwen()
         failures = []
-        whisper = MockBackend(responses=["whisper takes over"] * 500)
+        unused = MockBackend(responses=["never used"] * 500)
         session = MeetingSession(
-            backend=whisper, vad=Vad(), audio_source=MockAudioSource(),
+            backend=unused, vad=Vad(), audio_source=MockAudioSource(),
             processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(qwen, step=0.2,
                                                                         min_audio_s=0.3, **kw),
-            fallback_factory=lambda: OnlineASRProcessor(backend=whisper, vad=None,
-                                                        min_chunk_size=0.3),
             on_engine_failed=failures.append,
             extended_silence_ms=800,
             **({"engine_restart": engine_restart, "engine_retry_s": 0.05,
                 "on_engine_recovered": recovered} if engine_restart else {}),
-            whisper_fallback=whisper_fallback,
             **({"engine_ready": engine_ready} if engine_ready else {}),
         )
-        self._whisper = whisper
+        self._unused = unused   # only processor_factory's backend may decode
         return session, qwen, failures
 
     def _run(self, session, until, timeout=6):
@@ -994,12 +1000,14 @@ class TestQwenLiveInMeeting:
             time.sleep(0.05)
         session.stop()
 
-    def test_default_is_still_whisper(self):
-        from online_processor import OnlineASRProcessor
-        session = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource())
+    def test_default_processor_is_qwen(self):
+        import qwen_meeting
+        backend = MockBackend()
+        session = MeetingSession(backend=backend, vad=None, audio_source=MockAudioSource())
         session.start()
         try:
-            assert isinstance(session._processor, OnlineASRProcessor)
+            assert isinstance(session._processor, qwen_meeting.QwenSegmentProcessor)
+            assert session._processor.backend is backend
         finally:
             session.stop()
 
@@ -1014,17 +1022,8 @@ class TestQwenLiveInMeeting:
         self._run(session, until=lambda: len(session.segments) >= 2)
         assert len(session.segments) >= 2               # no unbounded segment
 
-    def test_qwen_failure_switches_the_rest_of_the_meeting_to_whisper(self):
-        from online_processor import OnlineASRProcessor
-        session, qwen, failures = self._session(["ok"], fail_on=2)
-        self._run(session, until=lambda: failures and isinstance(
-            session._processor, OnlineASRProcessor))
-        assert len(failures) == 1                       # reported once
-        assert qwen.calls == 2                          # Qwen3 not retried
-
-
     def test_qwen_comes_back_after_background_restart(self):
-        """2026-10-23: one timeout put the rest of a meeting on Whisper (6 min)."""
+        """2026-10-23: one timeout must not end live subtitles for the meeting."""
         import qwen_meeting
         restarts, back = [], []
         session, qwen, failures = self._session(
@@ -1038,15 +1037,16 @@ class TestQwenLiveInMeeting:
         assert seen[-1] is qwen_meeting.QwenSegmentProcessor
         assert qwen.calls >= 4                          # decoding with Qwen3 again
 
-    def test_restart_failure_keeps_whisper_and_retries(self):
-        from online_processor import OnlineASRProcessor
+    def test_restart_failure_keeps_buffering_and_retries(self):
+        import qwen_meeting
         attempts = []
         session, qwen, failures = self._session(
             ["ok"], fail_on=2, engine_restart=lambda: attempts.append(1) or False)
         seen = []
         self._run(session, until=lambda: seen.append(type(session._processor)) or len(attempts) >= 3)
         assert len(attempts) >= 3 and len(failures) == 1
-        assert seen[-1] is OnlineASRProcessor
+        assert seen[-1] is qwen_meeting.QwenSegmentProcessor
+        assert session.had_engine_outage
 
     def test_restart_gives_up_after_max_attempts(self):
         attempts = []
@@ -1055,19 +1055,6 @@ class TestQwenLiveInMeeting:
         session._engine_max_attempts = 3
         self._run(session, until=lambda: False, timeout=1.5)
         assert len(attempts) == 3
-
-    def test_switch_back_keeps_leftover_audio_as_speech(self):
-        import qwen_meeting
-        session, qwen, failures = self._session(["好的"], engine_restart=lambda: True)
-        session._processor = OnlineProc = __import__("online_processor").OnlineASRProcessor(
-            backend=MockBackend(responses=[""]), vad=None, min_chunk_size=0.3)
-        OnlineProc.insert_audio_chunk(np.zeros(16000 * 2, dtype=np.float32))
-        session._fallback_used = True
-        session._switch_back_to_engine()
-        p = session._processor
-        assert isinstance(p, qwen_meeting.QwenSegmentProcessor)
-        p.uses_vad = True
-        assert p.has_pending_speech() and not p._silent()
 
     def test_restart_thread_stops_with_the_meeting(self):
         attempts = []
@@ -1079,37 +1066,36 @@ class TestQwenLiveInMeeting:
         assert len(attempts) <= n + 1                   # no retries after stop
 
 
-    # ── Qwen3 only (B): no Whisper, buffer while Qwen3 restarts ──
+    # ── Buffer while Qwen3 restarts ──
 
-    def test_qwen_only_buffers_then_catches_up_without_whisper(self):
+    def test_buffers_then_catches_up(self):
         import qwen_meeting
         back, seen = [], []
         session, qwen, failures = self._session(
             ["好的", "我们继续讨论"], fail_on=2, fail_once=True, max_segment_s=1.0,
-            engine_restart=lambda: True, recovered=lambda: back.append(1),
-            whisper_fallback=False)
+            engine_restart=lambda: True, recovered=lambda: back.append(1))
         self._run(session, until=lambda: seen.append(type(session._processor)) or (
             back and len(session.segments) >= 2))
         assert len(failures) == 1 and back
         assert all(t in (qwen_meeting.QwenSegmentProcessor, type(None)) for t in seen)
-        assert self._whisper._call_count == 0                # Whisper never transcribed
+        assert self._unused._call_count == 0
         assert any("我们继续讨论" in seg.text for seg in session.segments)
 
-    def test_qwen_only_never_builds_whisper_even_when_restart_fails(self):
+    def test_processor_stays_qwen_when_restart_fails(self):
         import qwen_meeting
         seen = []
         session, qwen, failures = self._session(
-            ["ok"], fail_on=2, engine_restart=lambda: False, whisper_fallback=False)
+            ["ok"], fail_on=2, engine_restart=lambda: False)
         session._engine_max_attempts = 2
         self._run(session, until=lambda: seen.append(type(session._processor)) or False, timeout=1.5)
         assert len(failures) == 1
         assert all(t in (qwen_meeting.QwenSegmentProcessor, type(None)) for t in seen)
-        assert self._whisper._call_count == 0
+        assert self._unused._call_count == 0
 
-    def test_qwen_only_decodes_nothing_while_down(self):
+    def test_decodes_nothing_while_down(self):
         restarted = threading.Event()
         session, qwen, failures = self._session(
-            ["ok"], fail_on=2, fail_once=True, whisper_fallback=False,
+            ["ok"], fail_on=2, fail_once=True,
             engine_restart=lambda: restarted.wait(0.6) and False)
         self._run(session, until=lambda: failures, timeout=3)
         calls_at_failure = qwen.calls
@@ -1117,19 +1103,19 @@ class TestQwenLiveInMeeting:
 
 
     def test_meeting_started_while_qwen_loading_buffers_then_catches_up(self):
-        """Meeting right after launch: Qwen3 not loaded yet. No alert, no Whisper."""
+        """Meeting right after launch: Qwen3 not loaded yet. No alert."""
         loaded = threading.Event()
         threading.Timer(0.5, loaded.set).start()
         back = []
         session, qwen, failures = self._session(
-            ["大家好今天开会"], max_segment_s=1.0, whisper_fallback=False,
+            ["大家好今天开会"], max_segment_s=1.0,
             engine_ready=lambda: loaded.is_set(),
             engine_restart=lambda: loaded.wait(3), recovered=lambda: back.append(1))
         self._run(session, until=lambda: back and session.segments)
         assert failures == []                            # loading is not an error
         assert back and session.segments
         assert "大家好今天开会" in session.segments[0].text
-        assert self._whisper._call_count == 0
+        assert self._unused._call_count == 0
 
 
 class TestShortFragmentWaits:
@@ -1169,7 +1155,7 @@ class TestStopVsLoopRace:
         state = {"inside": 0, "overlap": 0, "calls": 0}
 
         class SlowQwen:
-            def transcribe(self, audio):
+            def transcribe(self, audio, **kw):
                 state["calls"] += 1
                 state["inside"] += 1
                 if state["inside"] > 1:
@@ -1189,10 +1175,9 @@ class TestStopVsLoopRace:
 
             def is_extended_silence(self, *a, **k):
                 return False
-        whisper = MockBackend(responses=["whisper text here"] * 200)
         failures = []
         session = MeetingSession(
-            backend=whisper, vad=Vad(), audio_source=MockAudioSource(),
+            backend=MockBackend(), vad=Vad(), audio_source=MockAudioSource(),
             processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(
                 SlowQwen(), step=0.1, min_audio_s=0.3),
             on_engine_failed=failures.append)
@@ -1218,7 +1203,7 @@ class TestStopVsLoopRace:
         session.stop()
         assert session.segments and "大家好" in session.segments[0].text
 
-    def test_qwen_failure_in_final_close_falls_back_to_whisper(self):
+    def test_qwen_failure_in_final_close_is_left_to_the_final_pass(self):
         session, state, failures = self._slow_session(decode_s=0.01, fail=True)
         session.start()
         deadline = time.time() + 3
@@ -1226,7 +1211,7 @@ class TestStopVsLoopRace:
             time.sleep(0.01)                  # first decode done; next one fails
         session.stop()
         assert failures                        # reported
-        assert session.segments, "last segment lost after fallback"
+        assert session.had_engine_outage      # the app forces the meeting final pass
 
 
 class TestSegmentLevelSubtitles:
@@ -1261,14 +1246,14 @@ class TestCatchUpChunks:
         calls = []
 
         class Q:
-            def transcribe(self, audio):
+            def transcribe(self, audio, **kw):
                 calls.append(len(audio) / 16000)
                 if fail_on is not None and len(calls) == fail_on:
                     raise QwenUnavailable("again")
                 return SimpleNamespace(text=texts[min(len(calls) - 1, len(texts) - 1)])
         s = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource(),
                            processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(Q()),
-                           whisper_fallback=False, engine_restart=lambda: False)
+                           engine_restart=lambda: False)
         s._meeting_start = time.time() - 100
         s._state = "recording"
         s._segments = []
@@ -1284,6 +1269,17 @@ class TestCatchUpChunks:
         assert calls == [15.0, 15.0, 10.0]
         assert [(g.start_time, g.end_time) for g in s._segments] == [(50.0, 65.0), (65.0, 80.0), (80.0, 90.0)]
         assert not s._engine_down
+
+    def test_caught_up_audio_counts_as_speech(self, monkeypatch):
+        """Review MEDIUM: recovered audio must not be skipped as silence."""
+        import qwen_meeting
+        marked = []
+        orig = qwen_meeting.QwenSegmentProcessor.mark_speech
+        monkeypatch.setattr(qwen_meeting.QwenSegmentProcessor, "mark_speech",
+                            lambda self: (marked.append(1), orig(self))[1])
+        s, calls = self._session(["一", "二", "三"])
+        s._catch_up_buffered()
+        assert len(marked) == 3 and len(calls) == 3
 
     def test_failure_mid_catch_up_keeps_the_rest_buffered(self):
         s, calls = self._session(["一"], fail_on=2)

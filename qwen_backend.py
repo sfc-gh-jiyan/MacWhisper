@@ -1,13 +1,13 @@
 """Qwen3-ASR backend for MacWhisper — client for the qwen_sidecar process.
 
-The model runs in a separate process (isolated .venv-qwen), so the app's own
-mlx / mlx-whisper are never touched. This client:
+The model runs in a separate process (isolated .venv-qwen, its own mlx), so
+the app venv needs no ML stack. This client:
   - starts the sidecar and waits for its "ready" line,
   - serializes requests (one in flight; the sidecar is single-threaded),
   - applies a timeout that scales with audio length,
   - restarts a crashed/hung sidecar a limited number of times,
-  - raises QwenUnavailable on ANY failure so the caller can fall back to
-    Whisper for that same audio — a request is never silently dropped.
+  - raises QwenUnavailable on ANY failure so the caller can keep the audio
+    (retry later) — a request is never silently dropped.
 
 Qwen3-ASR returns no word timestamps, so results carry text only.
 """
@@ -34,7 +34,7 @@ _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 class QwenUnavailable(RuntimeError):
-    """Qwen3-ASR could not serve this request; use the Whisper fallback."""
+    """Qwen3-ASR could not serve this request (the caller keeps the audio)."""
 
 
 def default_python_path(repo_root: str = _REPO_ROOT) -> str:
@@ -196,14 +196,17 @@ class QwenSidecarBackend(ASRBackend):
         language: str | None = None,
         initial_prompt: str | None = None,
         task: str = "transcribe",
+        hotwords: bool = True,
     ) -> TranscriptionResult:
         """Transcribe via the sidecar. Raises QwenUnavailable on any failure.
 
-        `language`/`initial_prompt` are Whisper-style and ignored: the sidecar
+        `language`/`initial_prompt` are kept for the ASRBackend interface and ignored: the sidecar
         pins Chinese, which keeps code-switched English verbatim.
+        hotwords=False sends this request without the vocabulary (meetings:
+        the word list raised MER 0.185 -> 0.549 and was read out on silence).
         """
         if task != "transcribe":
-            raise QwenUnavailable("Qwen3-ASR does not translate; use Whisper")
+            raise QwenUnavailable("Qwen3-ASR does not translate")
         with self._lock:
             self._ensure_running_locked()
             pcm = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
@@ -212,7 +215,7 @@ class QwenSidecarBackend(ASRBackend):
             rid = self._next_id
             req = {"id": rid, "cmd": "transcribe",
                    "pcm16_b64": base64.b64encode(pcm16.tobytes()).decode("ascii")}
-            if self.hotwords:
+            if hotwords and self.hotwords:
                 req["hotwords"] = list(self.hotwords)
             duration = len(pcm16) / SAMPLE_RATE
             timeout = self.base_timeout_s + self.per_audio_s * duration

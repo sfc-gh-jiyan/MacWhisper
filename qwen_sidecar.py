@@ -1,7 +1,7 @@
 """Qwen3-ASR sidecar process for MacWhisper.
 
 Runs inside the isolated .venv-qwen (mlx-audio + newer mlx) so the app's own
-venv and mlx-whisper stay untouched. The app talks to it over stdin/stdout
+venv stays free of the ML stack. The app talks to it over stdin/stdout
 with one JSON object per line:
 
   app -> sidecar   {"id": 1, "cmd": "transcribe", "pcm16_b64": "...", "language": "Chinese"}

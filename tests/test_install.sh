@@ -94,7 +94,6 @@ echo ""
 echo "Phase 4: Import verification..."
 
 check "import rumps" "$SRC/venv/bin/python3" -c "import rumps"
-check "import mlx_whisper" "$SRC/venv/bin/python3" -c "import mlx_whisper"
 check "import sounddevice" "$SRC/venv/bin/python3" -c "import sounddevice"
 check "import pynput" "$SRC/venv/bin/python3" -c "import pynput"
 check "import pyperclip" "$SRC/venv/bin/python3" -c "import pyperclip"

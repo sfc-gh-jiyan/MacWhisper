@@ -71,14 +71,6 @@ def test_empty_text():
     assert r.text == "" and r.changes == []
 
 
-def test_bilingual_prompt_with_terms():
-    from text_utils import BILINGUAL_PROMPT, bilingual_prompt
-    assert bilingual_prompt([]) == BILINGUAL_PROMPT
-    p = bilingual_prompt(["CSE", "Snowflake"])
-    assert p.startswith(BILINGUAL_PROMPT) and "CSE, Snowflake" in p
-    assert bilingual_prompt([str(i) for i in range(50)], limit=3).endswith("0, 1, 2.")
-
-
 def test_stutter_not_joined():
     v = _v()
     assert corrector.correct("Okay, I I saw it", v).text == "Okay, I I saw it"

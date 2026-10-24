@@ -52,7 +52,7 @@ cd MacWhisper
 The install script will:
 1. Create a Python virtual environment and install dependencies
 2. Build a `MacWhisper.app` in `/Applications` with a native launcher that runs this folder's code
-3. Pre-download the default Whisper model (~1.5 GB)
+3. Set up the Qwen3-ASR engine (`.venv-qwen`) and download its model
 4. Verify all dependencies are working
 
 The app always runs the current code in this folder, so after `git pull` just relaunch it. Rebuild it with `make app` only if you move the folder or recreate `venv`. Building needs the Command Line Tools (`xcode-select --install`).
@@ -212,7 +212,7 @@ Settings are stored in `~/.macwhisper/config.json`:
 ## Tech Stack
 
 - [MLX](https://github.com/ml-explore/mlx) — Apple Silicon ML framework
-- [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) — Whisper optimized for Apple GPU
+- [Qwen3-ASR](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16) via [mlx-audio](https://github.com/Blaizzy/mlx-audio) — speech recognition on Apple GPU
 - [rumps](https://github.com/jaredks/rumps) — macOS menu bar apps in Python
 - [pynput](https://github.com/moses-palmer/pynput) — Global keyboard listener
 - [sounddevice](https://python-sounddevice.readthedocs.io/) — Audio input via PortAudio

@@ -2,7 +2,7 @@
 
 Unlike eval_meeting.py (whole-file strategies), this runs the REAL meeting
 loop in real time — dual-channel selection, Silero VAD, segmenting — with
-either live engine, and measures what users see during a meeting:
+the Qwen3 live engine, and measures what users see during a meeting:
 
   - MER of the live transcript vs the reference (when one exists)
   - decode time per Qwen3 call and the segment length it decoded
@@ -13,7 +13,6 @@ Data stays out of the repo (see eval_meeting.py). Meeting files are written
 to a temp dir, never to ~/.macwhisper/meetings.
 
   venv/bin/python tests/eval_meeting_live.py --engine qwen3
-  venv/bin/python tests/eval_meeting_live.py --engine whisper
   venv/bin/python tests/eval_meeting_live.py --engine qwen3 --audio-only 20261019_003606
 
 This loads a model and uses the GPU: ask the user before running it.
@@ -132,12 +131,9 @@ def replay(session_id: str, mic: np.ndarray, sys_a: np.ndarray | None, *, engine
     from meeting import MeetingSession
 
     timing = TimingBackend(backend)
-    kwargs = {}
-    if engine == "qwen3":
-        import qwen_meeting
-        kwargs = {"processor_factory": lambda: qwen_meeting.QwenSegmentProcessor(timing),
-                  "extended_silence_ms": 800}
-    whisper_backend = timing if engine == "whisper" else backend
+    import qwen_meeting
+    kwargs = {"processor_factory": lambda: qwen_meeting.QwenSegmentProcessor(timing),
+              "extended_silence_ms": 800}
 
     done = {"n": 0}
     finished = threading.Event()
@@ -159,7 +155,7 @@ def replay(session_id: str, mic: np.ndarray, sys_a: np.ndarray | None, *, engine
     old_dir = meeting.MEETINGS_DIR
     meeting.MEETINGS_DIR = tmp            # never write into the user's meetings
     try:
-        session = MeetingSession(backend=whisper_backend, vad=vad,
+        session = MeetingSession(backend=backend, vad=vad,
                                  audio_source=RealtimeWavSource(mic, speed, source_done),
                                  min_chunk_size=1.0, max_buffer_s=8.0,
                                  on_update=on_update, **kwargs)
@@ -184,27 +180,21 @@ def replay(session_id: str, mic: np.ndarray, sys_a: np.ndarray | None, *, engine
     return result
 
 
-def _load_backend(engine: str, whisper_model: str, qwen_model: str):
-    if engine == "qwen3":
-        from qwen_backend import QwenSidecarBackend
-        b = QwenSidecarBackend(model_repo=qwen_model)
-        if not b.start():
-            raise SystemExit(f"Qwen3 sidecar did not start: {getattr(b, 'last_error', '')}")
-        return b
-    from asr_backend import MLXWhisperBackend
-    b = MLXWhisperBackend(model_repo=whisper_model)
-    b.warmup() if hasattr(b, "warmup") else None
+def _load_backend(qwen_model: str):
+    from qwen_backend import QwenSidecarBackend
+    b = QwenSidecarBackend(model_repo=qwen_model)
+    if not b.start():
+        raise SystemExit(f"Qwen3 sidecar did not start: {getattr(b, 'last_error', '')}")
     return b
 
 
 def main(argv=None) -> int:
-    from eval_meeting import DEFAULT_MODEL, DEFAULT_QWEN_MODEL
+    from eval_meeting import DEFAULT_QWEN_MODEL
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--engine", choices=["qwen3", "whisper"], required=True)
+    p.add_argument("--engine", choices=["qwen3"], default="qwen3")
     p.add_argument("--session", action="append", help="Session with a reference (repeatable)")
     p.add_argument("--audio-only", action="append", default=[],
                    help="Session without a reference: speed/latency only")
-    p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL)
     p.add_argument("--json", help="Write summaries to this JSON file")
     p.add_argument("--show-text", action="store_true")
@@ -226,7 +216,7 @@ def main(argv=None) -> int:
         return 1
 
     from vad import VoiceActivityDetector
-    backend = _load_backend(args.engine, args.model, args.qwen_model)
+    backend = _load_backend(args.qwen_model)
     rows = []
     try:
         for sid, mic, sys_a, ref in jobs:

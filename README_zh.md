@@ -51,7 +51,7 @@ cd MacWhisper
 安装脚本会自动完成：
 1. 创建 Python 虚拟环境并安装依赖
 2. 在 `/Applications` 中创建 `MacWhisper.app`（原生启动器，运行的是本文件夹里的代码）
-3. 预下载默认 Whisper 模型（约 1.5 GB）
+3. 安装 Qwen3-ASR 引擎（`.venv-qwen`）并下载模型
 4. 验证所有依赖是否正常
 
 App 每次启动都运行本文件夹里当前的代码，所以 `git pull` 之后重新打开 App 即可。只有移动了文件夹或重建了 `venv`，才需要用 `make app` 重新生成。生成 App 需要命令行工具（`xcode-select --install`）。
@@ -167,7 +167,7 @@ MacWhisper 需要 **三项** macOS 权限才能正常运行。**不授权这些�
 ## 技术栈
 
 - [MLX](https://github.com/ml-explore/mlx) — Apple Silicon 机器学习框架
-- [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) — 针对 Apple GPU 优化的 Whisper
+- [Qwen3-ASR](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16)（通过 [mlx-audio](https://github.com/Blaizzy/mlx-audio)）— 在 Apple GPU 上运行的语音识别
 - [rumps](https://github.com/jaredks/rumps) — Python macOS 菜单栏应用框架
 - [pynput](https://github.com/moses-palmer/pynput) — 全局键盘监听
 - [sounddevice](https://python-sounddevice.readthedocs.io/) — 通过 PortAudio 进行音频输入

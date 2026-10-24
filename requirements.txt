@@ -1,6 +1,5 @@
 certifi>=2024.0.0
 jiwer>=3.0.0
-mlx-whisper>=0.4.0
 numpy>=2.0.0
 opencc-python-reimplemented>=0.1.7
 pyobjc-framework-ApplicationServices>=12.0

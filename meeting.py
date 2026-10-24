@@ -1,7 +1,7 @@
 """Meeting Mode session manager for MacWhisper.
 
 Provides continuous recording with automatic segmentation via VAD,
-real-time transcription using OnlineASRProcessor, and transcript
+real-time Qwen3-ASR transcription (qwen_meeting.QwenSegmentProcessor), and transcript
 export (Markdown, SRT, VTT).
 """
 
@@ -20,13 +20,14 @@ import numpy as np
 
 from audio_capture import AudioSource, MicrophoneSource, SystemAudioSource
 from asr_backend import ASRBackend, WordTimestamp
-from online_processor import OnlineASRProcessor, SAMPLE_RATE
 from vad import VoiceActivityDetector
 from subtitle_export import export_cues, export_srt, export_vtt, word_cues  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 # Meeting data directory
+SAMPLE_RATE = 16000
+
 MEETINGS_DIR = os.path.join(os.path.expanduser("~/.macwhisper"), "meetings")
 
 
@@ -66,39 +67,31 @@ class MeetingSession:
         capture_system_audio: bool = False,
         save_audio: bool = False,
         processor_factory=None,
-        fallback_factory=None,
         on_engine_failed=None,
         engine_restart=None,
         engine_retry_s: float = 10.0,
         engine_max_attempts: int = 5,
         on_engine_recovered=None,
-        whisper_fallback: bool = True,
         engine_ready=None,
     ):
-        """processor_factory() builds the live processor (default: Whisper
-        OnlineASRProcessor). If it raises QwenUnavailable, fallback_factory()
-        replaces it for the rest of the meeting and on_engine_failed(exc) is
-        called once (v0.7.3: Qwen3 live subtitles with Whisper fallback).
+        """processor_factory() builds the live processor (default: a Qwen3
+        QwenSegmentProcessor over `backend`).
 
-        engine_restart() -> bool (optional) restarts the failed engine; it is
-        tried in the background every engine_retry_s while Whisper covers, and
-        on success the meeting switches back to processor_factory() and calls
-        on_engine_recovered().
-
-        whisper_fallback=False (Qwen3 only): no Whisper takes over. While the
-        engine restarts, audio keeps collecting in the same processor and is
-        decoded as one segment once it is back; the meeting final pass covers
-        anything still missing."""
+        If it raises QwenUnavailable, on_engine_failed(exc) is called and
+        audio keeps collecting in the same processor while engine_restart()
+        (optional, -> bool) is retried in the background every engine_retry_s.
+        Once it is back the buffered audio is decoded in chunks and
+        on_engine_recovered() is called; the meeting final pass covers
+        anything still missing. engine_ready() -> bool (optional) reports
+        whether the engine has loaded; if not, the meeting starts buffering."""
         self.backend = backend
         self._processor_factory = processor_factory
-        self._fallback_factory = fallback_factory
         self._on_engine_failed = on_engine_failed
         self._engine_restart = engine_restart
         self._engine_retry_s = engine_retry_s
         self._engine_max_attempts = engine_max_attempts
         self._on_engine_recovered = on_engine_recovered
         self._engine_back = threading.Event()   # set by the restart thread
-        self._whisper_fallback = whisper_fallback
         self._engine_down = False               # Qwen3-only: engine restarting, audio buffered
         self.had_engine_outage = False          # app forces the final pass if True
         self._outage_offset = 0.0               # meeting time where the buffered audio starts
@@ -161,7 +154,7 @@ class MeetingSession:
         self._segments: list[MeetingSegment] = []
         self.transcript_path: str | None = None  # set by _auto_save()
         self._meeting_start: float = 0.0
-        self._processor: OnlineASRProcessor | None = None
+        self._processor = None   # live processor (QwenSegmentProcessor)
 
         # Session ID for file naming
         self._session_id: str = ""
@@ -193,13 +186,12 @@ class MeetingSession:
         self._sys_frames = []
         self._segment_start_time = time.time()  # wall-clock start of current segment
 
-        # Create processor (Whisper by default; Qwen3 via processor_factory)
-        self._processor = (self._processor_factory() if self._processor_factory
-                           else self._whisper_processor())
+        # Create the live processor (Qwen3)
+        self._processor = self._new_processor()
         self._engine_down = self._engine_gave_up = False
         self._fallback_used = False
         self.had_engine_outage = False
-        if (not self._whisper_fallback and self._engine_ready is not None
+        if (self._engine_ready is not None
                 and not self._engine_ready()):
             # Started right after launch: Qwen3 still loading. Not an error —
             # buffer audio and catch up once it is ready (no alert).
@@ -259,48 +251,21 @@ class MeetingSession:
         self._start_sources()
         print("[MEETING] Resumed")
 
-    def _whisper_processor(self) -> OnlineASRProcessor:
-        return OnlineASRProcessor(
-            backend=self.backend,
-            vad=None,  # VAD is managed here, not inside processor
-            min_chunk_size=self.min_chunk_size,
-            max_buffer_s=self.max_buffer_s,
-            language=self.language,
-        )
+    def _new_processor(self):
+        if self._processor_factory is not None:
+            return self._processor_factory()
+        from qwen_meeting import QwenSegmentProcessor
+        return QwenSegmentProcessor(self.backend)
 
     def _switch_to_fallback(self, exc: Exception) -> None:
-        """Qwen3 failed mid-meeting: Whisper takes over; saved segments stay.
-
-        The audio of the current (unfinished) segment is handed over, so the
-        last few seconds are transcribed by Whisper instead of being lost.
-        """
-        from qwen_backend import QwenUnavailable  # noqa: F401 (documents the type)
-        if not self._whisper_fallback:
-            # Qwen3 only: keep the processor (and its audio); buffer until it is back
-            logger.warning("Live meeting engine failed (%s) — buffering audio while it restarts", exc)
-            if not self._engine_down:   # buffered audio starts with the current segment
-                self._outage_offset = max(0.0, self._segment_start_time - self._meeting_start)
-            self._engine_down = True
-            self.had_engine_outage = True
-            self._engine_gave_up = False
-            self._fallback_used = True
-            if self._engine_restart is not None:
-                self._engine_back.clear()
-                threading.Thread(target=self._restart_engine_loop, daemon=True,
-                                 name="meeting-engine-restart").start()
-            if self._on_engine_failed:
-                try:
-                    self._on_engine_failed(exc)
-                except Exception:
-                    logger.exception("on_engine_failed callback failed")
-            return
-        old = self._processor
-        pending = getattr(old, "audio_buffer", None)
-        self._processor = (self._fallback_factory() if self._fallback_factory
-                           else self._whisper_processor())
-        if pending is not None and len(pending):
-            self._processor.insert_audio_chunk(pending)
-        logger.warning("Live meeting engine failed (%s) — continuing with Whisper", exc)
+        """Qwen3 failed mid-meeting: keep the processor (and its audio) and
+        buffer until the engine is back; saved segments stay."""
+        logger.warning("Live meeting engine failed (%s) — buffering audio while it restarts", exc)
+        if not self._engine_down:   # buffered audio starts with the current segment
+            self._outage_offset = max(0.0, self._segment_start_time - self._meeting_start)
+        self._engine_down = True
+        self.had_engine_outage = True
+        self._engine_gave_up = False
         self._fallback_used = True
         if self._engine_restart is not None:
             self._engine_back.clear()
@@ -314,8 +279,7 @@ class MeetingSession:
 
     def _restart_engine_loop(self) -> None:
         """Background: restart the failed engine until it works, the meeting ends,
-        or engine_max_attempts fail (then Whisper — or, Qwen3-only, the final pass —
-        covers the rest of the meeting).
+        or engine_max_attempts fail (then the meeting final pass covers the rest).
         Waits double after each failure (10 s, 20 s, 40 s… up to 2 min): a model
         load is heavy and a broken engine must not be reloaded every few seconds."""
         wait = self._engine_retry_s
@@ -338,37 +302,14 @@ class MeetingSession:
                 time.sleep(min(0.05, wait))
             wait = min(wait * 2, 120.0)
         self._engine_gave_up = True
-        logger.error("Live meeting engine did not come back — %s",
-                     "Whisper for the rest of the meeting" if self._whisper_fallback
-                     else "no live subtitles; the meeting final pass will transcribe it")
+        logger.error("Live meeting engine did not come back — no live subtitles; "
+                     "the meeting final pass will transcribe it")
 
     def _switch_back_to_engine(self) -> None:
-        """Engine is back: close the Whisper segment (its text is kept), then
-        continue on processor_factory() with the leftover audio.
-        Qwen3 only: decode the audio buffered while it was down as one segment."""
+        """Engine is back: decode the audio buffered while it was down."""
         self._engine_back.clear()
         if self._engine_down:
             self._catch_up_buffered()
-            return
-        if self._segment_has_text():
-            self._close_and_trim_segment()
-        pending = getattr(self._processor, "audio_buffer", None)
-        self._processor = self._processor_factory()
-        if pending is not None and len(pending):
-            self._processor.insert_audio_chunk(pending)
-            mark = getattr(self._processor, "mark_speech", None)
-            if mark is not None:
-                mark()        # may hold speech: never let the silent-segment skip drop it
-        if self.vad:
-            self.vad.reset()
-        self._segment_start_time = time.time()
-        self._fallback_used = False
-        logger.warning("Live meeting subtitles back on the main engine")
-        if self._on_engine_recovered:
-            try:
-                self._on_engine_recovered()
-            except Exception:
-                logger.exception("on_engine_recovered callback failed")
 
     CATCH_UP_CHUNK_S = 15.0     # = Qwen3 max segment: bounded decode, real timestamps
 
@@ -389,7 +330,7 @@ class MeetingSession:
             t0 = offset + start / SAMPLE_RATE
             if len(chunk) < 0.3 * SAMPLE_RATE:
                 break
-            proc = self._processor_factory()
+            proc = self._new_processor()
             proc.insert_audio_chunk(chunk)
             mark = getattr(proc, "mark_speech", None)
             if mark is not None:
@@ -397,7 +338,7 @@ class MeetingSession:
             try:
                 text = proc.segment_close()
             except QwenUnavailable as e:   # failed again: keep the rest buffered
-                self._processor = self._processor_factory()
+                self._processor = self._new_processor()
                 self._processor.insert_audio_chunk(pending[start:])
                 self._outage_offset = t0
                 self._engine_down = True   # keeps this offset (not the segment start)
@@ -406,7 +347,7 @@ class MeetingSession:
             if text.strip():
                 self._segments.append(MeetingSegment(
                     text=text.strip(), start_time=t0, end_time=t0 + len(chunk) / SAMPLE_RATE))
-        self._processor = self._processor_factory()
+        self._processor = self._new_processor()
         self._segment_start_time = time.time()
         if self.vad:
             self.vad.reset()
@@ -417,7 +358,7 @@ class MeetingSession:
                 logger.exception("on_engine_recovered callback failed")
 
     def _guarded(self, fn):
-        """Run a processor call; on QwenUnavailable switch to Whisper once."""
+        """Run a processor call; on QwenUnavailable start buffering (once)."""
         from qwen_backend import QwenUnavailable
         try:
             return fn()
@@ -429,27 +370,9 @@ class MeetingSession:
 
     def _may_close_on_silence(self, silence_ms: int) -> bool:
         """Let the live processor veto a silence close (Qwen3: a tiny
-        fragment waits for a longer pause). Whisper has no veto."""
+        fragment waits for a longer pause). Processors without a veto always close."""
         ready = getattr(self._processor, "ready_to_close", None)
         return True if ready is None else bool(ready(silence_ms))
-
-    def _whisper_close_remaining(self) -> None:
-        """At stop, after a Qwen3 failure: one Whisper pass over the audio
-        the fallback processor holds, committed as the last segment."""
-        from text_utils import BILINGUAL_PROMPT, convert_t2s
-        audio = getattr(self._processor, "audio_buffer", None)
-        if audio is None or len(audio) < 0.3 * SAMPLE_RATE:
-            return
-        try:
-            result = self.backend.transcribe(audio, language=self.language,
-                                             initial_prompt=BILINGUAL_PROMPT,
-                                             task="transcribe")
-            text = convert_t2s((result.text or "").strip())
-        except Exception:
-            logger.exception("Whisper fallback at stop failed — last segment lost")
-            return
-        if text:
-            self._commit_segment(text)
 
     def _has_pending_segment(self) -> bool:
         """Text OR untranscribed audio in the current segment (at stop:
@@ -501,14 +424,9 @@ class MeetingSession:
                 self._processor = None
             if self._processor:
                 if self._has_pending_segment():
-                    before = self._processor
                     self._close_and_trim_segment()
-                    if self._processor is not before:
-                        # Qwen3 failed during that close: Whisper now holds
-                        # the audio. There is no "later" at stop, so decode
-                        # it in one pass instead of streaming thresholds.
-                        self._whisper_close_remaining()
-                self._processor.reset()
+                if self._processor:
+                    self._processor.reset()
                 self._processor = None
 
         # Build full transcript
@@ -593,8 +511,7 @@ class MeetingSession:
         try:
             self._meeting_loop_impl()
         except Exception as e:
-            # Live transcription stopped (e.g. Qwen3 AND the Whisper fallback
-            # failed). Say so — the meeting can still be stopped and saved.
+            # Live transcription stopped unexpectedly. Say so — the meeting can still be stopped and saved.
             logger.exception("Meeting transcription loop stopped")
             print(f"[MEETING] Loop error: {e}")
             if self._on_engine_failed:
@@ -610,7 +527,7 @@ class MeetingSession:
 
         In dual-channel mode, compares mic and system audio RMS energy
         each iteration.  When both sources have data (overlap), only the
-        louder source is fed to Whisper; the quieter one is discarded.
+        louder source is fed to the ASR engine; the quieter one is discarded.
         Tie-breaks favour the microphone (local speaker priority).
         """
         last_mic_idx = 0
@@ -786,7 +703,7 @@ class MeetingSession:
         time eliminates both problems at the source.
         """
         text = self._guarded(self._processor.segment_close)
-        if text is None:          # Qwen3 failed; Whisper now has the audio
+        if text is None:          # Qwen3 failed; the processor keeps buffering the audio
             if self.vad:
                 self.vad.reset()
             self._segment_start_time = time.time()

@@ -81,7 +81,6 @@ def test_config_load_corrupt(tmp_config):
 def test_config_save(tmp_config):
     import app
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
-    inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-medium-mlx"
     inst.live_mode = True
     inst.save_audio = False
@@ -427,13 +426,12 @@ def test_audio_history_saves_wav(tmp_path):
 
     frames = _make_frames(5, 1024)
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
-    inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-small-mlx"
     inst.save_audio = True
     inst._live_loop_done = threading.Event()
     inst._live_loop_done.set()
 
-    # Mock the ASR backend (app.py uses self._backend directly)
+    # Fake ASR result (served by the fake Qwen3 engine)
     from asr_backend import TranscriptionResult, Segment, WordTimestamp
     mock_result = TranscriptionResult(
         text="Hello world",
@@ -443,7 +441,6 @@ def test_audio_history_saves_wav(tmp_path):
     )
     mock_backend = MagicMock()
     mock_backend.transcribe.return_value = mock_result
-    inst._backend = mock_backend
     inst.qwen_model = 'mlx-community/Qwen3-ASR-1.7B-bf16'
     inst._qwen = _FakeQwen(text=mock_backend.transcribe.return_value.text)
     inst._qwen_alerted = False
@@ -477,13 +474,12 @@ def test_transcript_log_appends_jsonl(tmp_path):
 
     frames = _make_frames(5, 1024)
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
-    inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-small-mlx"
     inst.save_audio = True
     inst._live_loop_done = threading.Event()
     inst._live_loop_done.set()
 
-    # Mock the ASR backend (app.py uses self._backend directly)
+    # Fake ASR result (served by the fake Qwen3 engine)
     from asr_backend import TranscriptionResult, Segment, WordTimestamp
     mock_result = TranscriptionResult(
         text="你好世界 hello",
@@ -493,7 +489,6 @@ def test_transcript_log_appends_jsonl(tmp_path):
     )
     mock_backend = MagicMock()
     mock_backend.transcribe.return_value = mock_result
-    inst._backend = mock_backend
     inst.qwen_model = 'mlx-community/Qwen3-ASR-1.7B-bf16'
     inst._qwen = _FakeQwen(text=mock_backend.transcribe.return_value.text)
     inst._qwen_alerted = False
@@ -744,15 +739,15 @@ def test_migrate_cleans_empty_dirs(tmp_path):
     assert not old_logs.exists()
 
 
-# ── Test: v0.5 architecture — OnlineASRProcessor integration ──
+# ── Test: Qwen3-only architecture ──
 
-def test_processor_created_on_recording():
-    """Verify OnlineASRProcessor is referenced in recording flow."""
+def test_no_whisper_code_left_in_app():
+    """Whisper was removed: Qwen3-ASR is the only engine."""
     import app
     source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
-    assert "OnlineASRProcessor" in source
-    assert "self._processor" in source
-    assert "MLXWhisperBackend" in source
+    for gone in ("OnlineASRProcessor", "MLXWhisperBackend", "mlx_whisper",
+                 "_whisper_final", "_warmup_model", "whisper_fallback", "_live_loop_impl"):
+        assert gone not in source, gone
 
 
 def test_overlay_uses_dual_color():
@@ -765,10 +760,10 @@ def test_overlay_uses_dual_color():
 
 
 def test_live_loop_exists():
-    """Verify unified _live_loop replaces old _live_chunk_loop + _live_transcription_worker."""
+    """Live subtitles run in _qwen_live_loop (old chunk/worker loops are gone)."""
     import app
     source = open(os.path.join(os.path.dirname(app.__file__), "app.py")).read()
-    assert "_live_loop" in source
+    assert "_qwen_live_loop" in source
     assert "_live_chunk_loop" not in source
     assert "_live_transcription_worker" not in source
 
@@ -856,7 +851,6 @@ def test_crash_handler_writes_log(tmp_path, monkeypatch):
 def _meeting_app(meeting_subtitles=True, in_meeting=False, panel=None):
     import app
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
-    inst.translate_mode = False
     inst.current_model = "m"
     inst.live_mode = False
     inst.save_audio = False
@@ -1273,6 +1267,21 @@ def test_meeting_stop_falls_back_to_text_if_save_failed():
     inst._reporter.report.assert_called_once()  # user is told the file is missing
 
 
+def test_meeting_stop_after_outage_without_file_saves_the_audio(tmp_path, monkeypatch):
+    """Review MEDIUM: outage + .md not written -> no final pass; keep the audio."""
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    inst = _stopping_app(None)
+    session = inst._meeting_session
+    session.had_engine_outage = True
+    session._session_id = "20261024_090000"
+    session.mixed_audio.return_value = np.full(16000 * 3, 0.1, dtype=np.float32)
+    with patch.object(app.pyperclip, "copy"):
+        inst._stop_meeting()
+    assert (tmp_path / "meeting_20261024_090000.wav").exists()
+    session.release_audio.assert_called_once()
+
+
 def test_meeting_stop_empty_meeting_copies_nothing():
     import app
     inst = _stopping_app(None, transcript="")
@@ -1369,9 +1378,10 @@ class _FakeQwen:
         self.model_repo = "mlx-community/Qwen3-ASR-0.6B-bf16"
         self.last_error = ""
 
-    def transcribe_final(self, audio, retry=False):
+    def transcribe_final(self, audio, retry=False, hotwords=True):
         self.calls += 1
         self.retry = retry
+        self.hotwords = hotwords
         if self.fail:
             from qwen_backend import QwenUnavailable
             raise QwenUnavailable("sidecar died")
@@ -1384,29 +1394,24 @@ class _FakeQwen:
         return self.is_ready
 
 
-def _engine_app(engine="qwen", qwen=None, translate=False):
+def _engine_app(engine="qwen", qwen=None):
     inst = _meeting_app()
     inst.engine = engine
     inst.qwen_model = "mlx-community/Qwen3-ASR-0.6B-bf16"
-    inst.translate_mode = translate
     inst._qwen = qwen if qwen is not None else _FakeQwen()
     inst._qwen_alerted = False
     return inst
 
 
-def test_use_qwen_only_when_selected_ready_and_not_translating():
+def test_use_qwen_only_when_started():
     assert _engine_app()._use_qwen() is True
-    assert _engine_app(engine="whisper")._use_qwen() is False
     assert _engine_app(qwen=_FakeQwen(ready=False))._use_qwen() is False
-    assert _engine_app(translate=True)._use_qwen() is False
 
 
 def test_final_text_uses_qwen_when_available():
     inst = _engine_app()
-    inst._whisper_final = MagicMock(return_value=("whisper text", None))
     text, engine = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
     assert text == "千问 result" and "Qwen3" in engine
-    inst._whisper_final.assert_not_called()
 
 
 def test_final_text_qwen_failure_keeps_audio_and_alerts_without_whisper(tmp_path, monkeypatch):
@@ -1414,10 +1419,8 @@ def test_final_text_qwen_failure_keeps_audio_and_alerts_without_whisper(tmp_path
     monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path / "failed"))
     inst = _engine_app(qwen=_FakeQwen(fail=True))
     audio = np.ones(16000, dtype=np.float32) * 0.1
-    inst._whisper_final = MagicMock(return_value=("whisper text", None))
     text, engine = inst._final_text(audio, (audio * 32768).astype(np.int16))
     assert text == ""                                       # nothing pasted
-    inst._whisper_final.assert_not_called()                 # no Whisper behind Qwen3
     assert inst._qwen.retry is True                         # restart + retry first
     saved = list((tmp_path / "failed").glob("*.wav"))
     assert len(saved) == 1                                  # recording kept for a retry
@@ -1524,6 +1527,13 @@ def test_qwen_live_loop_stops_when_next_recording_starts(monkeypatch):
     assert not t.is_alive()
 
 
+@pytest.fixture(autouse=True)
+def _tmp_failed_dir(tmp_path, monkeypatch):
+    """Failed recordings from tests must never land in the real ~/.macwhisper/failed."""
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path / "failed"))
+
+
 def _final_pass_app(qwen):
     inst = _engine_app(qwen=qwen)
     inst._notify = MagicMock()
@@ -1543,6 +1553,22 @@ def test_meeting_final_pass_rewrites_file_and_frees_audio():
     inst._notify.assert_called_once()
 
 
+def test_meeting_final_pass_does_not_send_the_vocabulary():
+    """Word-list prompting raised meeting MER 0.185 -> 0.549 and read the list
+    out on silence (model comparison, 2026-10-24)."""
+    q = _FakeQwen(text="会议最终文稿")
+    inst, session = _final_pass_app(q)
+    inst._meeting_final_pass(session)
+    assert q.hotwords is False
+
+
+def test_meeting_final_pass_failure_saves_audio_in_failed_dir():
+    import app
+    inst, session = _final_pass_app(_FakeQwen(fail=True))
+    inst._meeting_final_pass(session)
+    assert os.listdir(app.FAILED_DIR)                       # tmp dir, not the real one
+
+
 def test_meeting_final_pass_failure_keeps_live_transcript_and_alerts():
     inst, session = _final_pass_app(_FakeQwen(fail=True))
     inst._meeting_final_pass(session)
@@ -1551,10 +1577,9 @@ def test_meeting_final_pass_failure_keeps_live_transcript_and_alerts():
     inst._reporter.report.assert_called_once()
 
 
-def test_meeting_stop_whisper_engine_skips_final_pass_but_frees_audio():
+def test_meeting_stop_without_qwen_engine_skips_final_pass_but_frees_audio():
     import app
     inst = _meeting_app(in_meeting=True)
-    inst.engine = "whisper"
     inst._qwen = None
     inst._idle_icon = "🎙"
     inst.item_meeting = MagicMock()
@@ -1583,10 +1608,8 @@ def test_crashed_sidecar_is_retried_then_alerts(tmp_path, monkeypatch):
     import app
     monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
     inst = _engine_app(qwen=_CrashedQwen())
-    inst._whisper_final = MagicMock(return_value=("whisper text", None))
     text, model = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
     assert text == "" and inst._qwen.calls == 1
-    inst._whisper_final.assert_not_called()
     inst._reporter.report.assert_called_once()         # and the user was told
 
 
@@ -1595,10 +1618,8 @@ def test_qwen_still_loading_waits_then_transcribes():
     q.started_ok = False
     q.becomes_ready = True                              # finishes loading while we wait
     inst = _engine_app(qwen=q)
-    inst._whisper_final = MagicMock(return_value=("w", None))
     text, _ = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
     assert text == "千问 result" and q.waited > 0
-    inst._whisper_final.assert_not_called()
     inst._reporter.report.assert_not_called()
 
 
@@ -1609,10 +1630,8 @@ def test_qwen_never_ready_keeps_audio_and_alerts(tmp_path, monkeypatch):
     q.started_ok = False
     q.start = lambda repo: False                        # one more start attempt fails too
     inst = _engine_app(qwen=q)
-    inst._whisper_final = MagicMock(return_value=("w", None))
     text, _ = inst._final_text(np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
     assert text == "" and q.calls == 0
-    inst._whisper_final.assert_not_called()
     assert list(tmp_path.glob("*.wav"))
     inst._reporter.report.assert_called_once()
 
@@ -1623,7 +1642,6 @@ def test_alert_rearms_after_qwen_recovers(tmp_path, monkeypatch):
     q = _FakeQwen(fail=True)
     inst = _engine_app(qwen=q)
     inst._on_main = lambda fn, *a: fn(*a)
-    inst._whisper_final = MagicMock(return_value=("w", None))
     audio = (np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
     inst._final_text(*audio)                 # fail -> alert 1
     q.fail = False
@@ -1903,9 +1921,9 @@ def test_set_model_refreshes_settings_window():
     import app
     inst = _menu_app()
     inst._settings = MagicMock()
-    inst._warmup_model = MagicMock()
     inst._set_status = MagicMock()
-    inst._set_model("Large (Best)")
+    inst._start_qwen = MagicMock()
+    inst._set_model("Qwen3 1.7B (Best, zh+en)")
     inst._settings.refresh.assert_called_once()
 
 
@@ -2079,10 +2097,8 @@ def test_start_meeting_refuses_when_one_is_running():
     inst._meeting_session.is_recording = True
     running = inst._meeting_session
     inst.recording = False
-    inst._backend_ready = MagicMock()
     inst._start_meeting()
     assert inst._meeting_session is running          # untouched, no second session
-    inst._backend_ready.wait.assert_not_called()
 
 
 # ── Single instance (v0.7.2) ──────────────────────────────────
@@ -2258,9 +2274,6 @@ def _start_meeting_capturing(monkeypatch, qwen_ok):
     import app
     inst = _meeting_app(meeting_subtitles=False)
     inst.recording = False
-    inst._backend = MagicMock()
-    inst._backend_ready = MagicMock()
-    inst._backend_ready.wait.return_value = True
     inst._vad = MagicMock()
     inst._vad_available = True
     inst._qwen = MagicMock()
@@ -2295,8 +2308,7 @@ def test_meeting_uses_qwen_live_when_ready(monkeypatch):
     assert kw["extended_silence_ms"] == 800
     kw["on_engine_failed"](RuntimeError("sidecar died"))
     inst._qwen_failed.assert_called_once()
-    assert kw["whisper_fallback"] is False     # Qwen3 only: buffer + catch up, no Whisper
-    assert "fallback_factory" not in kw
+    assert "whisper_fallback" not in kw and "fallback_factory" not in kw  # Qwen3 only
 
 
 def test_meeting_uses_qwen_even_while_it_is_loading(monkeypatch):
@@ -2304,23 +2316,19 @@ def test_meeting_uses_qwen_even_while_it_is_loading(monkeypatch):
     import qwen_meeting
     inst, kw = _start_meeting_capturing(monkeypatch, qwen_ok=False)
     assert isinstance(kw["processor_factory"](), qwen_meeting.QwenSegmentProcessor)
-    assert kw["engine_ready"]() is False and kw["whisper_fallback"] is False
+    assert kw["engine_ready"]() is False
 
 
 def _correction_app(tmp_path, asr_text):
     import app
     import correction_flow
     import vocabulary
-    from asr_backend import TranscriptionResult
 
     inst = app.TranscriberApp.__new__(app.TranscriberApp)
-    inst.translate_mode = False
     inst.current_model = "mlx-community/whisper-small-mlx"
     inst.save_audio = False
     inst._live_loop_done = threading.Event()
     inst._live_loop_done.set()
-    inst._backend = MagicMock()
-    inst._backend.transcribe.return_value = TranscriptionResult(text=asr_text, segments=[])
     inst.qwen_model = "mlx-community/Qwen3-ASR-1.7B-bf16"
     inst._qwen = _FakeQwen(text=asr_text)
     inst._qwen_alerted = False
@@ -2436,6 +2444,29 @@ def test_retry_that_fails_again_keeps_the_single_copy(tmp_path, monkeypatch):
     inst._notify = MagicMock()
     inst._retry_failed_recording()
     assert sorted(x.name for x in tmp_path.iterdir()) == ["20261024_010101.wav"]
+
+
+def test_retry_of_a_meeting_recording_leaves_out_the_vocabulary(tmp_path, monkeypatch):
+    """Review HIGH: the only recovery path for a failed meeting got the word list."""
+    import app
+    import wave as _wave
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path / "failed"))
+    monkeypatch.setattr(app, "MEETINGS_DIR", str(tmp_path / "meetings"))
+    _sync_threads(monkeypatch)
+    monkeypatch.setattr(app.pyperclip, "copy", lambda t: None)
+    os.makedirs(app.FAILED_DIR)
+    for name in ("meeting_20261024_090000.wav", "20261024_010101.wav"):
+        with _wave.open(os.path.join(app.FAILED_DIR, name), "wb") as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+            wf.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+    q = _FakeQwen(text="会议")
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    os.utime(os.path.join(app.FAILED_DIR, "meeting_20261024_090000.wav"), (2e9, 2e9))  # newest
+    inst._retry_failed_recording()
+    assert q.hotwords is False
+    inst._retry_failed_recording()                 # now the dictation one
+    assert q.hotwords is True
 
 
 class _FakeMeetingSession:

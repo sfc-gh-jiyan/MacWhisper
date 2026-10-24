@@ -1,4 +1,4 @@
-"""Compare Push to Talk transcription: Whisper vs Qwen3-ASR on saved recordings.
+"""Compare Push to Talk transcription: Qwen3-ASR models on saved recordings.
 
 Test-only tool — does not touch the app. Reads recordings the app saved
 (~/.macwhisper/audio/*.wav) together with what the app actually pasted
@@ -7,9 +7,9 @@ applies the same post-processing as app.py's final pass, and writes a
 side-by-side Markdown report to ~/.macwhisper/eval/ (never to the repo).
 
 There is no ground truth for these clips, so the report shows:
-  - pairwise disagreement (MER between systems),
+  - disagreement (MER) of each model with what the app pasted,
   - hallucination-filtered (empty) outputs per system,
-  - "translated" outputs: Chinese in Whisper's text but none in the model's,
+  - "translated" outputs: Chinese in the pasted text but none in the model's,
   - a stratified sample for the user to judge by reading.
 
 Run with the isolated eval env (needs mlx-audio):
@@ -42,8 +42,8 @@ OUT_DIR = os.path.join(DATA_DIR, "eval")
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 _LATIN = re.compile(r"[A-Za-z]{2,}")
 
+BASELINE = "pasted"     # what the app pasted at the time (no ground truth)
 SYSTEMS = {
-    "whisper-large-v3": ("whisper", "mlx-community/whisper-large-v3-mlx"),
     "qwen3-0.6b": ("qwen3", "mlx-community/Qwen3-ASR-0.6B-bf16"),
     "qwen3-1.7b": ("qwen3", "mlx-community/Qwen3-ASR-1.7B-bf16"),
 }
@@ -130,18 +130,6 @@ def postprocess(text: str) -> str:
 
 
 def _transcriber(kind: str, repo: str):
-    if kind == "whisper":
-        from asr_backend import MLXWhisperBackend
-        from text_utils import BILINGUAL_PROMPT
-        b = MLXWhisperBackend(model_repo=repo)
-        b.transcribe(np.zeros(16000, dtype=np.float32))
-
-        def run(audio):
-            text = b.transcribe(audio, initial_prompt=BILINGUAL_PROMPT, task="transcribe").text.strip()
-            if text.startswith(BILINGUAL_PROMPT):
-                text = text[len(BILINGUAL_PROMPT):].strip()
-            return text
-        return run
     from mlx_audio.stt.utils import load
     m = load(repo)
     m.generate(np.zeros(16000, dtype=np.float32), language="Chinese")
@@ -170,22 +158,21 @@ def transcribe_all(clips: list[dict]) -> None:
 def summarize(clips: list[dict]) -> list[str]:
     audio_s = sum(c["duration_s"] for c in clips)
     lines = [f"Clips: {len(clips)} ({audio_s / 60:.1f} min of audio)", "",
-             "| system | total time | RTF | empty (filtered) | translated vs Whisper | MER vs Whisper large-v3 |",
+             "| system | total time | RTF | empty (filtered) | translated vs pasted | MER vs pasted |",
              "|---|---|---|---|---|---|"]
-    base = "whisper-large-v3"
+    base = BASELINE
     for name in SYSTEMS:
         t = sum(c[f"{name}_s"] for c in clips)
         empty = sum(1 for c in clips if not c[name])
-        trans = sum(1 for c in clips if name != base and looks_translated(c[base], c[name]))
-        mers = [compute_wer(c[name], c[base]) for c in clips if c[base] and name != base]
+        trans = sum(1 for c in clips if looks_translated(c[base], c[name]))
+        mers = [compute_wer(c[name], c[base]) for c in clips if c[base]]
         mer = f"{np.median(mers):.3f} (median)" if mers else "-"
-        lines.append(f"| {name} | {t:.0f}s | {t / audio_s:.3f} | {empty} | "
-                     f"{trans if name != base else '-'} | {mer} |")
+        lines.append(f"| {name} | {t:.0f}s | {t / audio_s:.3f} | {empty} | {trans} | {mer} |")
     return lines
 
 
 def write_report(clips: list[dict], sample: list[dict], path: str) -> None:
-    out = ["# Push to Talk: Whisper vs Qwen3-ASR", "",
+    out = ["# Push to Talk: Qwen3-ASR models vs pasted text", "",
            f"Generated {datetime.datetime.now():%Y-%m-%d %H:%M}. No ground truth — "
            "judge the side-by-side samples by reading.", "",
            "`pasted` = what the app actually pasted at the time "
@@ -198,7 +185,7 @@ def write_report(clips: list[dict], sample: list[dict], path: str) -> None:
         out.append("")
         out.append(f"- **pasted**: {c['pasted']}")
         for name in SYSTEMS:
-            flag = " ⚠️ translated?" if looks_translated(c["whisper-large-v3"], c[name]) else ""
+            flag = " ⚠️ translated?" if looks_translated(c[BASELINE], c[name]) else ""
             out.append(f"- **{name}** ({c[f'{name}_s']:.1f}s){flag}: {c[name] or '(empty)'}")
         out.append("")
     os.makedirs(os.path.dirname(path), exist_ok=True)

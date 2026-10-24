@@ -41,7 +41,7 @@ def test_start_and_transcribe(tmp_path):
     assert not b.is_ready
 
 
-def test_translate_is_rejected_so_caller_uses_whisper(tmp_path):
+def test_translate_is_rejected(tmp_path):
     b = _backend(tmp_path)
     with pytest.raises(qb.QwenUnavailable):
         b.transcribe(_audio(1.0), task="translate")
@@ -142,6 +142,18 @@ def test_hotwords_sent_to_sidecar(tmp_path):
         assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese hw=3"
         b.hotwords = []
         assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese"
+    finally:
+        b.close()
+
+
+def test_hotwords_can_be_left_out_per_request(tmp_path):
+    """Meetings transcribe without the word list; dictation keeps it."""
+    b = _backend(tmp_path)
+    try:
+        b.hotwords = ["CSE", "Snowflake", "memory"]
+        assert b.transcribe(_audio(1.0), hotwords=False).text == "fake 1.0s Chinese"
+        assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese hw=3"
+        assert b.hotwords == ["CSE", "Snowflake", "memory"]
     finally:
         b.close()
 

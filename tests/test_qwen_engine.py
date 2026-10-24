@@ -24,6 +24,7 @@ class FakeBackend:
 
     def transcribe(self, audio, **kw):
         self.calls.append(len(audio))
+        self.kw = kw
         if self.fail:
             raise QwenUnavailable("boom")
         if self.text is not None:
@@ -169,6 +170,16 @@ def test_hotwords_applied_to_current_and_new_backends():
     assert made[-1].hotwords == ["CSE", "Snowflake"]
     eng.start("m2")
     assert made[-1].hotwords == ["CSE", "Snowflake"]
+
+
+def test_transcribe_final_can_leave_out_hotwords():
+    b = FakeBackend(text="会议")
+    eng = qe.QwenEngine(backend_factory=lambda repo: b)
+    eng.start("m")
+    eng.transcribe_final(np.zeros(16000, dtype=np.float32), hotwords=False)
+    assert b.kw.get("hotwords") is False
+    eng.transcribe_final(np.zeros(16000, dtype=np.float32))
+    assert b.kw.get("hotwords", True) is True
 
 
 # ── Qwen3-only (B): no Whisper behind it ──
