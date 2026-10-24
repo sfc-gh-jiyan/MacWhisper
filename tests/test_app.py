@@ -2436,3 +2436,64 @@ def test_retry_that_fails_again_keeps_the_single_copy(tmp_path, monkeypatch):
     inst._notify = MagicMock()
     inst._retry_failed_recording()
     assert sorted(x.name for x in tmp_path.iterdir()) == ["20261024_010101.wav"]
+
+
+class _FakeMeetingSession:
+    def __init__(self, seconds=5, outage=False):
+        self._session_id = "20261024_090000"
+        self.had_engine_outage = outage
+        self.released = False
+        self.written = None
+        self._audio = np.zeros(16000 * seconds, dtype=np.float32)
+
+    def mixed_audio(self):
+        return self._audio
+
+    def write_final_transcript(self, text, engine):
+        self.written = (text, engine)
+        return "/tmp/m.md"
+
+    def release_audio(self):
+        self.released = True
+
+
+def test_meeting_final_pass_failure_keeps_meeting_audio(tmp_path, monkeypatch):
+    """Review CRITICAL: a failed final pass after an outage lost the gap for good."""
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    inst = _engine_app(qwen=_FakeQwen(fail=True))
+    inst._notify = MagicMock()
+    s = _FakeMeetingSession(outage=True)
+    inst._meeting_final_pass(s)
+    assert (tmp_path / "meeting_20261024_090000.wav").exists()
+    assert s.released and inst._qwen.retry is True
+    inst._reporter.report.assert_called_once()
+
+
+def test_meeting_final_pass_waits_for_qwen_loading(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    q = _FakeQwen(ready=False)
+    q.started_ok = False
+    q.becomes_ready = True
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    s = _FakeMeetingSession()
+    inst._meeting_final_pass(s)
+    assert s.written and s.written[0] == "千问 result" and not list(tmp_path.iterdir())
+
+
+def test_failed_start_is_not_retried_for_every_dictation(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    q = _FakeQwen(ready=False)
+    q.started_ok = False
+    starts = []
+    q.start = lambda repo: starts.append(repo) or False
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    audio = (np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.int16))
+    inst._final_text(*audio)
+    inst._final_text(*audio)
+    assert len(starts) == 1                           # second dictation: no second load
+    assert len(list(tmp_path.glob("*.wav"))) == 2       # both kept, even in the same second

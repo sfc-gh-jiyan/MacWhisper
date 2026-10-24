@@ -226,3 +226,24 @@ def test_transcribe_final_retry_still_failing_raises():
     eng.start("m")
     with pytest.raises(QwenUnavailable):
         eng.transcribe_final(np.zeros(16000, dtype=np.float32), retry=True)
+
+
+def test_concurrent_starts_for_same_model_load_once():
+    """Launch + a dictation + a meeting may all start Qwen3 at once."""
+    gate = threading.Event()
+    made = []
+
+    class Slow(FakeBackend):
+        def start(self, timeout=0):
+            gate.wait(2)
+            return True
+    eng = qe.QwenEngine(backend_factory=lambda repo: made.append(1) or Slow())
+    eng.start_async("m")
+    results = []
+    t = threading.Thread(target=lambda: results.append(eng.start("m")))
+    t.start()
+    assert eng.wait_ready(0.05) is False
+    gate.set()
+    t.join(3)
+    assert results == [True] and eng.wait_ready(1) is True
+    assert len(made) == 1                              # loaded once, not twice

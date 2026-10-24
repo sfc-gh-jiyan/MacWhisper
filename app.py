@@ -950,13 +950,7 @@ class TranscriberApp(rumps.App):
         self._qwen.start_async(repo, on_done=done)
 
     def _use_qwen(self) -> bool:
-        """Qwen3 serves this final pass: selected, started once, not translating.
-
-        Deliberately NOT gated on "ready right now": after a sidecar crash the
-        request must reach Qwen3 so it restarts it — or fails loudly (alert +
-        Whisper fallback) — instead of silently switching to Whisper. While
-        Qwen3 is still loading (never started), Whisper is used quietly.
-        """
+        """Qwen3 has started at least once (live subtitles need it ready)."""
         qwen = getattr(self, "_qwen", None)
         return (getattr(self, "engine", "whisper") == "qwen" and qwen is not None
                 and getattr(qwen, "started_ok", False) and not self.translate_mode)
@@ -1220,7 +1214,9 @@ class TranscriberApp(rumps.App):
 
         session = self._meeting_session
         self._meeting_session = None
-        if path and getattr(self, "meeting_final_pass", True) and self._use_qwen():
+        outage = bool(getattr(session, "had_engine_outage", False))
+        if path and getattr(self, "_qwen", None) is not None and (
+                getattr(self, "meeting_final_pass", True) or outage):
             threading.Thread(target=self._meeting_final_pass, args=(session,),
                              daemon=True, name="meeting-final-pass").start()
         elif session is not None:
@@ -1234,6 +1230,7 @@ class TranscriberApp(rumps.App):
         in place: final transcript first, live transcript second. Audio is
         never written to disk by this pass.
         """
+        audio = None
         try:
             audio = session.mixed_audio()
             duration = len(audio) / SAMPLE_RATE
@@ -1241,8 +1238,12 @@ class TranscriberApp(rumps.App):
                 return
             self._set_status("Meeting: final transcript (Qwen3)...")
             logger.warning("Meeting final pass started: %.0fs audio (Qwen3)", duration)
+            qwen = self._qwen
+            if not qwen.started_ok and not qwen.wait_ready(QWEN_WAIT_S) \
+                    and not qwen.start(self.qwen_model):
+                raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
             t0 = time.time()
-            text = self._qwen.transcribe_final(audio)
+            text = qwen.transcribe_final(audio, retry=True)
             label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
                           if v == self._qwen.model_repo), "Qwen3")
             path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass")
@@ -1251,11 +1252,21 @@ class TranscriberApp(rumps.App):
             self._set_status("Meeting saved (final transcript ready)")
             self._notify("MacWhisper — Final meeting transcript ready",
                          "Same file, final version on top", path or "")
-        except QwenUnavailable as e:
-            self._qwen_failed(str(e), e)
-            self._set_status("Meeting saved (live transcript only)")
         except Exception as e:
-            self._reporter.report("meeting final transcript (the live transcript is saved)", e)
+            # Never lose the meeting: the live transcript may have a gap (engine
+            # outage), so keep the audio for "Retry Last Failed Recording".
+            saved = None
+            if audio is not None and len(audio) >= SAMPLE_RATE:
+                pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+                saved = self._save_failed_audio(
+                    pcm, name=f"meeting_{getattr(session, '_session_id', time.strftime('%Y%m%d_%H%M%S'))}")
+            where = (f" Meeting audio saved: {saved} — menu → Retry Last Failed Recording."
+                     if saved else "")
+            if isinstance(e, QwenUnavailable):
+                self._qwen_failed(f"meeting final transcript: {e}.{where}", e)
+            else:
+                self._reporter.report(f"meeting final transcript (the live transcript is saved).{where}", e)
+            self._set_status("Meeting saved (live transcript only)")
         finally:
             session.release_audio()
 
@@ -1904,8 +1915,12 @@ class TranscriberApp(rumps.App):
             if not qwen.started_ok:
                 self._set_status("Qwen3 loading…")
                 logger.warning("Dictation while Qwen3 is loading — waiting up to %.0fs", QWEN_WAIT_S)
-                if not qwen.wait_ready(QWEN_WAIT_S) and not qwen.start(self.qwen_model):
-                    raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
+                if not qwen.wait_ready(QWEN_WAIT_S):
+                    # A start that just failed is not retried for every dictation
+                    recent = time.monotonic() - getattr(self, "_qwen_start_failed_at", -1e9) < 60
+                    if recent or not qwen.start(self.qwen_model):
+                        self._qwen_start_failed_at = time.monotonic()
+                        raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
             t0 = time.time()
             text = qwen.transcribe_final(audio_float, retry=True)
             self._qwen_recovered()
@@ -1918,13 +1933,22 @@ class TranscriberApp(rumps.App):
             where = (f" Recording saved: {path} — menu → Retry Last Failed Recording." if path
                      else "" if keep_on_fail else " The recording is still saved — try again later.")
             self._qwen_failed(f"{e}.{where}", e)
+            # The alert shows once per incident; every failed dictation still says so
+            self._set_status("Not transcribed — saved (menu: Retry Last Failed Recording)")
+            self._notify("MacWhisper — not transcribed", "Recording saved",
+                         "Menu → Retry Last Failed Recording")
             return "", model
 
-    def _save_failed_audio(self, audio_int16) -> str | None:
-        """Keep a recording Qwen3 could not transcribe (never lose a dictation)."""
+    def _save_failed_audio(self, audio_int16, name: str | None = None) -> str | None:
+        """Keep a recording Qwen3 could not transcribe (never lose a dictation).
+        Meeting audio lands here only when its final transcript failed."""
         try:
             os.makedirs(FAILED_DIR, exist_ok=True)
-            path = os.path.join(FAILED_DIR, time.strftime("%Y%m%d_%H%M%S") + ".wav")
+            base = os.path.join(FAILED_DIR, name or time.strftime("%Y%m%d_%H%M%S"))
+            path, n = base + ".wav", 1
+            while os.path.exists(path):          # never overwrite an earlier recording
+                n += 1
+                path = f"{base}_{n}.wav"
             with wave.open(path, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
@@ -1937,23 +1961,48 @@ class TranscriberApp(rumps.App):
             return None
 
     def _retry_failed_recording(self, _=None):
-        """Menu: transcribe the newest saved recording; the text goes to the clipboard."""
+        """Menu: transcribe the newest saved recording. Dictation text goes to
+        the clipboard; a meeting is written to a transcript file (path copied)."""
+        lock = getattr(self, "_retry_lock", None)
+        if lock is None:
+            lock = self._retry_lock = threading.Lock()
+        if not lock.acquire(blocking=False):
+            self._notify("MacWhisper", "Retry already running", "Please wait")
+            return
+
         def run():
-            files = sorted(glob.glob(os.path.join(FAILED_DIR, "*.wav")))
-            if not files:
-                self._notify("MacWhisper", "No failed recordings", "Nothing to retry")
-                return
-            path = files[-1]
-            with wave.open(path, "rb") as wf:
-                pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-            text, _model = self._final_text(pcm.astype(np.float32) / 32768.0, pcm, keep_on_fail=False)
-            if not text:
-                return                       # _final_text alerted (and kept a copy)
-            text = self.correction.process(text).text if getattr(self, "correction", None) else text
-            pyperclip.copy(text)
-            os.replace(path, path + ".done")
-            logger.warning("Retried %s -> %d chars (copied to clipboard)", path, len(text))
-            self._notify("MacWhisper — retried recording", "Text copied to clipboard", text[:80])
+            try:
+                files = sorted(glob.glob(os.path.join(FAILED_DIR, "*.wav")), key=os.path.getmtime)
+                if not files:
+                    self._notify("MacWhisper", "No failed recordings", "Nothing to retry")
+                    return
+                path = files[-1]
+                with wave.open(path, "rb") as wf:
+                    pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+                text, _model = self._final_text(pcm.astype(np.float32) / 32768.0, pcm,
+                                                keep_on_fail=False)
+                if not text:
+                    return                       # _final_text alerted; the WAV stays
+                name = os.path.basename(path)[:-4]
+                if name.startswith("meeting_"):
+                    os.makedirs(MEETINGS_DIR, exist_ok=True)
+                    out = os.path.join(MEETINGS_DIR, f"{name}_recovered.md")
+                    with open(out, "w", encoding="utf-8") as f:
+                        f.write(f"# Meeting {name[8:]} — recovered transcript (Qwen3)\n\n{text}\n")
+                    pyperclip.copy(out)
+                    what = f"Transcript saved: {out} (path copied)"
+                else:
+                    flow = getattr(self, "correction", None)
+                    text = flow.process(text).text if flow is not None else text
+                    pyperclip.copy(text)
+                    what = "Text copied to clipboard"
+                os.replace(path, path + ".done")
+                logger.warning("Retried %s -> %d chars. %s", path, len(text), what)
+                self._notify("MacWhisper — retried recording", what, text[:80])
+            except Exception as e:
+                self._reporter.report("Retry Last Failed Recording (the recording is kept)", e)
+            finally:
+                lock.release()
         threading.Thread(target=run, daemon=True).start()
 
     def _whisper_final(self, audio_float, duration):

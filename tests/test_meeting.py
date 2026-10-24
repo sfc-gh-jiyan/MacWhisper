@@ -1249,3 +1249,46 @@ class TestSegmentLevelSubtitles:
     def test_vtt_not_empty(self, tmp_path):
         p = self._session().export(str(tmp_path / "m.vtt"), fmt="vtt")
         assert "大家好" in open(p, encoding="utf-8").read()
+
+
+class TestCatchUpChunks:
+    """Review HIGH: a long outage was decoded as one huge segment stamped 'now'."""
+
+    def _session(self, texts, fail_on=None):
+        from types import SimpleNamespace
+        import qwen_meeting
+        from qwen_backend import QwenUnavailable
+        calls = []
+
+        class Q:
+            def transcribe(self, audio):
+                calls.append(len(audio) / 16000)
+                if fail_on is not None and len(calls) == fail_on:
+                    raise QwenUnavailable("again")
+                return SimpleNamespace(text=texts[min(len(calls) - 1, len(texts) - 1)])
+        s = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource(),
+                           processor_factory=lambda: qwen_meeting.QwenSegmentProcessor(Q()),
+                           whisper_fallback=False, engine_restart=lambda: False)
+        s._meeting_start = time.time() - 100
+        s._state = "recording"
+        s._segments = []
+        s._processor = qwen_meeting.QwenSegmentProcessor(Q())
+        s._processor.insert_audio_chunk(np.zeros(16000 * 40, dtype=np.float32))  # 40 s buffered
+        s._engine_down = s._fallback_used = s.had_engine_outage = True
+        s._outage_offset = 50.0
+        return s, calls
+
+    def test_buffer_is_decoded_in_15s_chunks_with_real_times(self):
+        s, calls = self._session(["一", "二", "三"])
+        s._catch_up_buffered()
+        assert calls == [15.0, 15.0, 10.0]
+        assert [(g.start_time, g.end_time) for g in s._segments] == [(50.0, 65.0), (65.0, 80.0), (80.0, 90.0)]
+        assert not s._engine_down
+
+    def test_failure_mid_catch_up_keeps_the_rest_buffered(self):
+        s, calls = self._session(["一"], fail_on=2)
+        s._catch_up_buffered()
+        s._state = "stopped"                            # end the restart thread
+        assert len(s._segments) == 1 and s._segments[0].start_time == 50.0
+        assert s._engine_down and s._outage_offset == 65.0
+        assert len(s._processor.audio_buffer) == 25 * 16000   # nothing dropped

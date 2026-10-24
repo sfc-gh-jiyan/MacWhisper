@@ -38,8 +38,11 @@ class QwenEngine:
         self.last_error = ""
         self.hotwords: list[str] = []
         self._lock = threading.Lock()
-        self._settled = threading.Event()   # set when a start() attempt finished
+        self._settled = threading.Event()   # set when no start() is in flight
         self._settled.set()
+        self._inflight = 0
+        self._inflight_repo: str | None = None
+        self._count_lock = threading.Lock()
 
     @property
     def is_ready(self) -> bool:
@@ -52,12 +55,34 @@ class QwenEngine:
         return self._settled.is_set() and self.is_ready
 
     def start(self, model_repo: str) -> bool:
-        """(Re)start the sidecar for model_repo. Blocking; returns readiness."""
-        self._settled.clear()
+        """(Re)start the sidecar for model_repo. Blocking; returns readiness.
+
+        A start for the same model already in flight is joined, not repeated
+        (launch, a dictation and a meeting can all ask at once)."""
+        if not self._enter(model_repo):
+            self._settled.wait(240)           # same model already loading: join it
+            return self.is_ready
+        return self._run_start(model_repo)
+
+    def _enter(self, model_repo: str) -> bool:
+        """Register a start; False if one for the same model is already in flight."""
+        with self._count_lock:
+            if self._inflight > 0 and self._inflight_repo == model_repo:
+                return False
+            self._inflight += 1
+            self._inflight_repo = model_repo
+            self._settled.clear()
+            return True
+
+    def _run_start(self, model_repo: str) -> bool:
         try:
             return self._start(model_repo)
         finally:
-            self._settled.set()
+            with self._count_lock:
+                self._inflight -= 1
+                if self._inflight == 0:
+                    self._inflight_repo = None
+                    self._settled.set()
 
     def _start(self, model_repo: str) -> bool:
         with self._lock:
@@ -85,10 +110,11 @@ class QwenEngine:
         logger.debug("Qwen hotwords: %d terms", len(self.hotwords))
 
     def start_async(self, model_repo: str, on_done=None) -> None:
-        self._settled.clear()             # wait_ready() waits from now, not from the thread start
+        # Registered now (not when the thread runs): a start() in between joins it
+        joined = not self._enter(model_repo)
 
         def run():
-            ok = self.start(model_repo)
+            ok = self.start(model_repo) if joined else self._run_start(model_repo)
             if on_done:
                 on_done(ok, self.last_error)
         threading.Thread(target=run, daemon=True, name="qwen-engine-start").start()

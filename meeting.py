@@ -100,6 +100,8 @@ class MeetingSession:
         self._engine_back = threading.Event()   # set by the restart thread
         self._whisper_fallback = whisper_fallback
         self._engine_down = False               # Qwen3-only: engine restarting, audio buffered
+        self.had_engine_outage = False          # app forces the final pass if True
+        self._outage_offset = 0.0               # meeting time where the buffered audio starts
         self._engine_gave_up = False
         self._engine_ready = engine_ready       # () -> bool: engine loaded (Qwen3 only)
         # Raw audio is only written to disk when explicitly enabled —
@@ -196,12 +198,15 @@ class MeetingSession:
                            else self._whisper_processor())
         self._engine_down = self._engine_gave_up = False
         self._fallback_used = False
+        self.had_engine_outage = False
         if (not self._whisper_fallback and self._engine_ready is not None
                 and not self._engine_ready()):
             # Started right after launch: Qwen3 still loading. Not an error —
             # buffer audio and catch up once it is ready (no alert).
             logger.warning("Meeting started while the live engine is loading — buffering")
             self._engine_down = True
+            self.had_engine_outage = True
+            self._outage_offset = 0.0
             self._fallback_used = True
             if self._engine_restart is not None:
                 self._engine_back.clear()
@@ -273,7 +278,10 @@ class MeetingSession:
         if not self._whisper_fallback:
             # Qwen3 only: keep the processor (and its audio); buffer until it is back
             logger.warning("Live meeting engine failed (%s) — buffering audio while it restarts", exc)
+            if not self._engine_down:   # buffered audio starts with the current segment
+                self._outage_offset = max(0.0, self._segment_start_time - self._meeting_start)
             self._engine_down = True
+            self.had_engine_outage = True
             self._engine_gave_up = False
             self._fallback_used = True
             if self._engine_restart is not None:
@@ -306,7 +314,8 @@ class MeetingSession:
 
     def _restart_engine_loop(self) -> None:
         """Background: restart the failed engine until it works, the meeting ends,
-        or engine_max_attempts fail (then Whisper keeps the rest of the meeting).
+        or engine_max_attempts fail (then Whisper — or, Qwen3-only, the final pass —
+        covers the rest of the meeting).
         Waits double after each failure (10 s, 20 s, 40 s… up to 2 min): a model
         load is heavy and a broken engine must not be reloaded every few seconds."""
         wait = self._engine_retry_s
@@ -339,27 +348,7 @@ class MeetingSession:
         Qwen3 only: decode the audio buffered while it was down as one segment."""
         self._engine_back.clear()
         if self._engine_down:
-            self._engine_down = False
-            self._fallback_used = False
-            # Fresh processor: the engine may have a new backend object after a (re)start
-            pending = getattr(self._processor, "audio_buffer", None)
-            self._processor = self._processor_factory()
-            if pending is not None and len(pending):
-                self._processor.insert_audio_chunk(pending)
-            mark = getattr(self._processor, "mark_speech", None)
-            if mark is not None:
-                mark()           # buffered audio may hold speech
-            seconds = len(getattr(self._processor, "audio_buffer", ())) / SAMPLE_RATE
-            logger.warning("Live meeting engine back — catching up %.0fs of buffered audio", seconds)
-            self._close_and_trim_segment()
-            self._segment_start_time = time.time()
-            if self.vad:
-                self.vad.reset()
-            if self._on_engine_recovered:
-                try:
-                    self._on_engine_recovered()
-                except Exception:
-                    logger.exception("on_engine_recovered callback failed")
+            self._catch_up_buffered()
             return
         if self._segment_has_text():
             self._close_and_trim_segment()
@@ -375,6 +364,52 @@ class MeetingSession:
         self._segment_start_time = time.time()
         self._fallback_used = False
         logger.warning("Live meeting subtitles back on the main engine")
+        if self._on_engine_recovered:
+            try:
+                self._on_engine_recovered()
+            except Exception:
+                logger.exception("on_engine_recovered callback failed")
+
+    CATCH_UP_CHUNK_S = 15.0     # = Qwen3 max segment: bounded decode, real timestamps
+
+    def _catch_up_buffered(self) -> None:
+        """Engine back: decode the audio buffered during the outage in 15 s
+        chunks, each committed with the meeting time it was spoken. If the
+        engine fails again, the rest goes back into the buffer."""
+        from qwen_backend import QwenUnavailable
+        pending = np.asarray(getattr(self._processor, "audio_buffer", np.zeros(0)), dtype=np.float32)
+        step = int(self.CATCH_UP_CHUNK_S * SAMPLE_RATE)
+        offset = self._outage_offset
+        self._engine_down = False
+        self._fallback_used = False
+        logger.warning("Live meeting engine back — catching up %.0fs of buffered audio",
+                       len(pending) / SAMPLE_RATE)
+        for start in range(0, len(pending), step):
+            chunk = pending[start:start + step]
+            t0 = offset + start / SAMPLE_RATE
+            if len(chunk) < 0.3 * SAMPLE_RATE:
+                break
+            proc = self._processor_factory()
+            proc.insert_audio_chunk(chunk)
+            mark = getattr(proc, "mark_speech", None)
+            if mark is not None:
+                mark()                     # buffered audio may hold speech
+            try:
+                text = proc.segment_close()
+            except QwenUnavailable as e:   # failed again: keep the rest buffered
+                self._processor = self._processor_factory()
+                self._processor.insert_audio_chunk(pending[start:])
+                self._outage_offset = t0
+                self._engine_down = True   # keeps this offset (not the segment start)
+                self._switch_to_fallback(e)
+                return
+            if text.strip():
+                self._segments.append(MeetingSegment(
+                    text=text.strip(), start_time=t0, end_time=t0 + len(chunk) / SAMPLE_RATE))
+        self._processor = self._processor_factory()
+        self._segment_start_time = time.time()
+        if self.vad:
+            self.vad.reset()
         if self._on_engine_recovered:
             try:
                 self._on_engine_recovered()
