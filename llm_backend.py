@@ -43,35 +43,50 @@ class LLMSidecarBackend(QwenSidecarBackend):
         )
 
     def complete(self, prompt: str, system: str = "", max_tokens: int = 512,
-                 timeout: float = 120.0) -> str:
-        """Generate a reply. Raises LLMUnavailable on any failure."""
+                 timeout: float = 120.0, lock_timeout: float | None = None,
+                 require_ready: bool = False) -> str:
+        """Generate a reply. Raises LLMUnavailable on any failure.
+
+        lock_timeout: give up ("busy") if another request — e.g. vocabulary
+        learning — holds the sidecar longer than this.
+        require_ready: give up ("not ready") instead of loading or restarting
+        the model inside this call (a dictation must not wait for that).
+        """
+        if not self._lock.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
+            raise LLMUnavailable("LLM busy with another request")
         try:
-            with self._lock:
-                self._ensure_running_locked()
-                self._next_id += 1
-                rid = self._next_id
-                req = {"id": rid, "cmd": "complete", "system": system, "prompt": prompt,
-                       "max_tokens": max_tokens}
-                t0 = time.time()
-                try:
-                    self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
-                    self._proc.stdin.flush()
-                except (OSError, ValueError) as e:
-                    self._fail_locked(f"LLM sidecar pipe broken: {e}")
-                while True:
-                    msg = self._wait_line(timeout)
-                    if msg is None:
-                        self._fail_locked(f"LLM request timed out after {timeout:.0f}s")
-                    if msg.get("event") == "exit":
-                        self._fail_locked("LLM sidecar exited unexpectedly")
-                    if msg.get("id") == rid:
-                        break
-                if not msg.get("ok"):
-                    self.last_error = msg.get("error", "unknown error")
-                    raise LLMUnavailable(f"LLM error: {self.last_error}")
-                logger.info("LLM completion: %d prompt chars in %.1fs", len(prompt), time.time() - t0)
-                return (msg.get("text") or "").strip()
+            if require_ready and not self.is_ready:
+                raise LLMUnavailable("LLM not ready (still loading or stopped)")
+            return self._complete_locked(prompt, system, max_tokens, timeout)
         except LLMUnavailable:
             raise
         except QwenUnavailable as e:
             raise LLMUnavailable(str(e)) from e
+        finally:
+            self._lock.release()
+
+    def _complete_locked(self, prompt: str, system: str, max_tokens: int, timeout: float) -> str:
+        self._ensure_running_locked()
+        self._next_id += 1
+        rid = self._next_id
+        req = {"id": rid, "cmd": "complete", "system": system, "prompt": prompt,
+               "max_tokens": max_tokens}
+        t0 = time.time()
+        try:
+            self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+            self._proc.stdin.flush()
+        except (OSError, ValueError) as e:
+            self._fail_locked(f"LLM sidecar pipe broken: {e}")
+        while True:
+            msg = self._wait_line(timeout)
+            if msg is None:
+                self._fail_locked(f"LLM request timed out after {timeout:.0f}s")
+            if msg.get("event") == "exit":
+                self._fail_locked("LLM sidecar exited unexpectedly")
+            if msg.get("id") == rid:
+                break
+        if not msg.get("ok"):
+            self.last_error = msg.get("error", "unknown error")
+            raise LLMUnavailable(f"LLM error: {self.last_error}")
+        logger.info("LLM completion: %d prompt chars in %.1fs", len(prompt), time.time() - t0)
+        return (msg.get("text") or "").strip()

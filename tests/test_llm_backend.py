@@ -50,3 +50,51 @@ def test_missing_env_is_unavailable(tmp_path):
                              max_restarts=0)
     with pytest.raises(lb.LLMUnavailable):
         b.complete("x")
+
+
+def test_busy_backend_gives_up_quickly_with_lock_timeout(tmp_path):
+    """The beautifier must not wait behind a long vocabulary-learning request."""
+    import threading
+    import time as _t
+    b = _backend(tmp_path, env={"MW_LLM_FAKE_DELAY_S": "2"}, max_restarts=0)
+    try:
+        assert b.start(timeout=30)
+        t = threading.Thread(target=lambda: b.complete("long job", timeout=10))
+        t.start()
+        _t.sleep(0.3)
+        t0 = _t.time()
+        with pytest.raises(lb.LLMUnavailable, match="busy"):
+            b.complete("dictation", timeout=5, lock_timeout=0.2)
+        assert _t.time() - t0 < 1.0
+        t.join(10)
+    finally:
+        b.close()
+
+
+def test_lock_timeout_holds_the_lock_it_acquired(tmp_path):
+    """Review: acquire-release-reacquire let a long request slip in between."""
+    import threading
+    b = _backend(tmp_path, env={"MW_LLM_FAKE_DELAY_S": "0.5"}, max_restarts=0)
+    try:
+        assert b.start(timeout=30)
+        seen = []
+        orig = b._complete_locked
+
+        def spy(*a, **k):
+            seen.append(b._lock.locked())
+            return orig(*a, **k)
+        b._complete_locked = spy
+        b.complete("x", timeout=5, lock_timeout=0.5)
+        assert seen == [True]
+    finally:
+        b.close()
+
+
+def test_require_ready_never_loads_the_model_inline(tmp_path):
+    """Review: a dictation must not wait while a 2.5 GB model loads."""
+    import time as _t
+    b = _backend(tmp_path, max_restarts=3)            # never started
+    t0 = _t.time()
+    with pytest.raises(lb.LLMUnavailable, match="not ready"):
+        b.complete("x", timeout=5, lock_timeout=0.5, require_ready=True)
+    assert _t.time() - t0 < 0.5 and b._proc is None

@@ -107,6 +107,7 @@ import error_alert
 import qwen_backend
 import qwen_engine
 import qwen_text
+import beautifier
 import settings_window
 import shortcuts
 import correction_flow
@@ -377,6 +378,8 @@ class TranscriberApp(rumps.App):
             "qwen_model": getattr(self, "qwen_model", DEFAULT_QWEN_MODEL),
             "qwen_strip_fillers": getattr(self, "qwen_strip_fillers", True),
             "collapse_repeats": getattr(self, "collapse_repeats", True),
+            "paste_style": getattr(self, "paste_style", "original"),
+            "custom_style": getattr(self, "custom_style", ""),
             "qwen_tight_spacing": getattr(self, "qwen_tight_spacing", True),
             "meeting_final_pass": getattr(self, "meeting_final_pass", True),
             "shortcuts": getattr(self, "shortcuts", None) or shortcuts.merged({}),
@@ -406,6 +409,9 @@ class TranscriberApp(rumps.App):
         self.qwen_model = migrated_qwen_model(cfg)
         self.qwen_strip_fillers = cfg.get("qwen_strip_fillers", True)
         self.collapse_repeats = cfg.get("collapse_repeats", True)
+        style = cfg.get("paste_style", "original")
+        self.paste_style = style if style in beautifier.LEVEL_KEYS else "original"
+        self.custom_style = str(cfg.get("custom_style", "") or "")
         self.qwen_tight_spacing = cfg.get("qwen_tight_spacing", True)
         # Re-transcribe meetings with Qwen3 from in-memory audio (never written to disk)
         self.meeting_final_pass = cfg.get("meeting_final_pass", True)
@@ -501,6 +507,9 @@ class TranscriberApp(rumps.App):
         self._qwen_alerted = False
         if self.engine == "qwen":
             self._start_qwen()
+        self._beautify_llm = None
+        if self.paste_style != "original":
+            self._start_beautifier()
 
         # VAD — created once, reset() per recording (avoids reloading Silero model)
         self._vad: VoiceActivityDetector | None = None
@@ -686,7 +695,13 @@ class TranscriberApp(rumps.App):
             if manual:
                 self._set_status("Learning vocabulary…")
             vocab_miner.mark_run(MINER_STATE_PATH, time.time())
-            backend = self._llm_backend = llm_backend.LLMSidecarBackend(max_restarts=0)
+            shared = getattr(self, "_beautify_llm", None)   # AI paste style keeps one loaded
+            if shared is not None:
+                backend = None                               # not ours to close
+                complete = shared.complete
+            else:
+                backend = self._llm_backend = llm_backend.LLMSidecarBackend(max_restarts=0)
+                complete = backend.complete
             started = []
 
             def progress(done, total, paused):
@@ -703,7 +718,7 @@ class TranscriberApp(rumps.App):
                     self._set_title(f"📖 {done}/{total}")
 
             res = vocab_miner.run(
-                backend.complete, self.correction.vocab, TRANSCRIPT_LOG, MINER_STATE_PATH,
+                complete, self.correction.vocab, TRANSCRIPT_LOG, MINER_STATE_PATH,
                 model=self._asr_model_for_mining(), min_new=1 if manual else vocab_miner.MIN_NEW_DICTATIONS,
                 should_pause=self._busy_for_mining, on_progress=progress)
             self._sync_hotwords()
@@ -895,6 +910,93 @@ class TranscriberApp(rumps.App):
         if qwen is not None and flow is not None:
             qwen.set_hotwords(flow.hotwords())
 
+    # ── AI beautifier (local LLM, opt-in) ─────────────────────
+
+    BEAUTIFY_TIMEOUT_S = 5.0          # dictation: wait at most this, then paste the original
+    BEAUTIFY_LOCK_S = 1.0             # LLM busy (vocabulary learning): give up after this
+    BEAUTIFY_MEETING_TIMEOUT_S = 60.0
+
+    def _start_beautifier(self) -> None:
+        """Keep the local LLM loaded while an AI paste style is selected."""
+        if getattr(self, "_beautify_llm", None) is not None:
+            return
+        if not llm_backend.llm_available():
+            logger.warning("AI paste style %s selected but the local LLM is not installed",
+                           self.paste_style)
+            return
+        backend = llm_backend.LLMSidecarBackend(max_restarts=3)
+        self._beautify_llm = backend
+        self._load_beautifier(backend, backend.start)
+
+    def _load_beautifier(self, backend, start) -> None:
+        """Load / reload the LLM in the background — never inside a dictation."""
+        if getattr(self, "_beautify_loading", False):
+            return
+        self._beautify_loading = True
+
+        def run():
+            try:
+                ok = start()
+                logger.warning("AI beautifier LLM %s",
+                               "ready" if ok else f"failed: {backend.last_error}")
+            except Exception:
+                logger.exception("AI beautifier LLM failed to load")
+            finally:
+                self._beautify_loading = False
+        threading.Thread(target=run, daemon=True, name="beautifier-load").start()
+
+    def _restart_beautifier_async(self) -> None:
+        backend = getattr(self, "_beautify_llm", None)
+        if backend is not None:
+            logger.warning("AI beautifier LLM not ready — reloading it in the background")
+            self._load_beautifier(backend, backend.restart)
+
+    def _stop_beautifier(self) -> None:
+        backend, self._beautify_llm = getattr(self, "_beautify_llm", None), None
+        if backend is not None:
+            threading.Thread(target=backend.close, daemon=True, name="beautifier-stop").start()
+
+    def _set_paste_style(self, style: str) -> None:
+        if style not in beautifier.LEVEL_KEYS:
+            raise ValueError(f"unknown paste style: {style}")
+        self.paste_style = style
+        if style == "original":
+            self._stop_beautifier()
+        else:
+            self._start_beautifier()
+        logger.info("Paste style = %s", style)
+        self._save_config()
+
+    def _set_custom_style(self, rules: str) -> None:
+        self.custom_style = (rules or "").strip()
+        self._save_config()
+
+    def _beautify(self, text: str) -> str | None:
+        """AI version of a dictation, or None (original style, no LLM, timeout, error)."""
+        style = getattr(self, "paste_style", "original")
+        llm = getattr(self, "_beautify_llm", None)
+        if style == "original" or llm is None or not text:
+            return None
+
+        not_ready = []
+
+        def call(prompt, **kw):
+            try:
+                return llm.complete(prompt, lock_timeout=self.BEAUTIFY_LOCK_S,
+                                    require_ready=True, **kw)
+            except llm_backend.LLMUnavailable as e:
+                if "not ready" in str(e):
+                    not_ready.append(1)
+                raise
+        t0 = time.time()
+        out = beautifier.beautify(text, style, llm=call, custom=getattr(self, "custom_style", ""),
+                                  timeout=self.BEAUTIFY_TIMEOUT_S)
+        if not_ready and not getattr(self, "_beautify_loading", False):
+            self._restart_beautifier_async()       # crashed / timed out earlier: reload
+        logger.info("AI beautify (%s): %s in %.1fs", style, "ok" if out else "failed",
+                    time.time() - t0)
+        return out
+
     def _start_qwen(self):
         """Start (or switch) the Qwen3 sidecar in the background."""
         if self._qwen is None:
@@ -1031,13 +1133,13 @@ class TranscriberApp(rumps.App):
                 qwen.close()   # never leave the sidecar holding GPU memory
             except Exception:
                 logger.exception("Closing the Qwen3 sidecar at quit failed")
-        llm = getattr(self, "_llm_backend", None)
-        proc = getattr(llm, "_proc", None)
-        if proc is not None and proc.poll() is None:
-            try:   # kill, not close(): a running generation holds the backend lock
-                proc.kill()
-            except Exception:
-                logger.exception("Stopping the LLM sidecar at quit failed")
+        for llm in (getattr(self, "_llm_backend", None), getattr(self, "_beautify_llm", None)):
+            proc = getattr(llm, "_proc", None)
+            if proc is not None and proc.poll() is None:
+                try:   # kill, not close(): a running generation holds the backend lock
+                    proc.kill()
+                except Exception:
+                    logger.exception("Stopping the LLM sidecar at quit failed")
 
     def _stop_meeting_from_overlay(self):
         """Stop button in the meeting overlay (called after the user confirms).
@@ -1192,6 +1294,25 @@ class TranscriberApp(rumps.App):
                 self._keep_meeting_audio(session)
             session.release_audio()
 
+    def _beautify_meeting(self, text: str) -> tuple[str | None, str | None]:
+        """AI version of the meeting transcript (chunked; a failed chunk keeps its
+        original). (None, None) when no AI style is selected or the LLM is missing."""
+        style = getattr(self, "paste_style", "original")
+        llm = getattr(self, "_beautify_llm", None)
+        if style == "original" or llm is None or not text:
+            return None, None
+        try:
+            out, failed = beautifier.beautify_long(
+                text, style, llm=llm.complete, custom=getattr(self, "custom_style", ""),
+                timeout=self.BEAUTIFY_MEETING_TIMEOUT_S)
+        except Exception:
+            logger.exception("AI version of the meeting failed — final transcript kept as is")
+            return None, None
+        if failed:
+            logger.warning("AI meeting version: %d chunk(s) kept as original", failed)
+        label = dict(beautifier.LEVELS).get(style, style)
+        return out, label
+
     def _keep_meeting_audio(self, session, audio=None) -> str | None:
         try:
             audio = session.mixed_audio() if audio is None else audio
@@ -1230,7 +1351,13 @@ class TranscriberApp(rumps.App):
                 text = qwen_text.collapse_repeats(text)
             label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
                           if v == self._qwen.model_repo), "Qwen3")
-            path = session.write_final_transcript(text, f"{label.split(' (')[0]}, full pass")
+            engine = f"{label.split(' (')[0]}, full pass"
+            path = session.write_final_transcript(text, engine)
+            # AI version afterwards: it can take minutes and must not delay the file
+            ai_text, ai_label = self._beautify_meeting(text)
+            if ai_text and path:
+                path = session.write_final_transcript(text, engine, ai_text=ai_text,
+                                                      ai_style=ai_label) or path
             logger.warning("MEETING FINAL TRANSCRIPT — %s (%.0fs audio in %.1fs)",
                            path, duration, time.time() - t0)
             self._set_status("Meeting saved (final transcript ready)")
@@ -1947,6 +2074,12 @@ class TranscriberApp(rumps.App):
         if getattr(self, "collapse_repeats", True):   # "我我我们" -> "我们" (roadmap D)
             tidy = qwen_text.collapse_repeats(text)
             collapsed, text = tidy != text, tidy
+        plain_text, style = text, getattr(self, "paste_style", "original")
+        ai_text = self._beautify(text) if style != "original" else None
+        if ai_text:
+            text = ai_text
+        elif style != "original" and plain_text:
+            self._set_status("AI style unavailable — pasted the original")
 
         # Save enhanced history (Qwen3 returns no word timestamps)
         save_enhanced_history(
@@ -1974,6 +2107,11 @@ class TranscriberApp(rumps.App):
             log_entry["learned"] = processed.learned
         if collapsed:
             log_entry["collapsed"] = True
+        if ai_text:
+            log_entry["plain_text"] = plain_text
+            log_entry["style"] = style
+        elif style != "original" and plain_text:
+            log_entry["style_failed"] = style
         if realtime_text:
             log_entry["realtime_text"] = realtime_text
         with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as f:

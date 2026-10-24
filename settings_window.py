@@ -72,6 +72,43 @@ class SettingsModel:
             logger.info("Settings: model -> %s", label)
             self.app._set_model(label)
 
+    # ── AI paste style (local LLM) ──
+    def style_labels(self) -> list:
+        import beautifier
+        return [label for _, label in beautifier.LEVELS]
+
+    def style_label(self) -> str:
+        import beautifier
+        return dict(beautifier.LEVELS).get(getattr(self.app, "paste_style", "original"),
+                                           beautifier.LEVELS[0][1])
+
+    def set_style_label(self, label: str) -> None:
+        import beautifier
+        key = next((k for k, lbl in beautifier.LEVELS if lbl == label), None)
+        if key is None or key == getattr(self.app, "paste_style", "original"):
+            return
+        logger.info("Settings: paste style -> %s", key)
+        self.app._set_paste_style(key)
+
+    def custom_rules(self) -> str:
+        return getattr(self.app, "custom_style", "") or ""
+
+    def set_custom_rules(self, rules: str) -> None:
+        rules = (rules or "").strip()
+        if rules != self.custom_rules():
+            logger.info("Settings: custom AI rules (%d chars)", len(rules))
+            self.app._set_custom_style(rules)
+
+    def style_available(self) -> bool:
+        import llm_backend
+        return llm_backend.llm_available()
+
+    def style_hint(self) -> str:
+        if not self.style_available():
+            return "AI styles need the local LLM — install it with: make llm-setup"
+        return ("AI version is pasted (≤5 s, else the original); the original stays in the "
+                "log. Meetings get an AI version on top of the final transcript.")
+
     # ── launch at login (state lives in macOS, not in config) ──
     def _login(self):
         return getattr(self.app, "login_item", None)
@@ -195,7 +232,14 @@ def _get_controller_cls():
         def loginChanged_(self, sender):
             self._mw_owner.on_login(sender)
 
+        def styleChanged_(self, sender):
+            self._mw_owner.on_style(sender)
+
+        def customChanged_(self, sender):
+            self._mw_owner.on_custom(sender)
+
         def windowWillClose_(self, _notification):
+            self._mw_owner.commit_pending_edits()
             self._mw_owner.stop_recording()
             self._mw_owner.restore_focus()
 
@@ -219,6 +263,9 @@ class SettingsWindow:
         self._record_buttons = {}   # (action, slot) -> NSButton
         self._tags = {}             # tag -> payload
         self._popup = None
+        self._style_popup = None
+        self._custom_field = None
+        self._style_hint = None
         self._clear_buttons = {}    # action -> NSButton (clears the 2nd shortcut)
         self._login_box = None
         self._login_hint = None
@@ -258,6 +305,13 @@ class SettingsWindow:
             box.setState_(1 if self.model.value(key) else 0)
         if self._popup is not None:
             self._popup.selectItemWithTitle_(self.model.model_label())
+        if self._style_popup is not None:
+            available = self.model.style_available()
+            self._style_popup.setEnabled_(available)
+            self._style_popup.selectItemWithTitle_(self.model.style_label())
+            self._custom_field.setEnabled_(available)
+            self._custom_field.setStringValue_(self.model.custom_rules())
+            self._style_hint.setStringValue_(self.model.style_hint())
         for (action, slot), btn in self._record_buttons.items():
             if self._recording == (action, slot):
                 continue
@@ -279,8 +333,8 @@ class SettingsWindow:
     def _build(self) -> None:
         from AppKit import (NSWindow, NSMakeRect, NSBackingStoreBuffered, NSTextField,
                             NSButton, NSPopUpButton, NSFont, NSColor, NSBox)
-        sections = 3 + len({t.section for t in TOGGLES})   # engine + toggles + general + shortcuts
-        rows = 1 + len(TOGGLES) + 2 + len(shortcuts.ACTIONS) + 2   # model, toggles, login(2), shortcuts, msg+hint
+        sections = 4 + len({t.section for t in TOGGLES})   # engine + paste + toggles + general + shortcuts
+        rows = 1 + 3 + len(TOGGLES) + 2 + len(shortcuts.ACTIONS) + 2   # model, paste(3), toggles, login(2), shortcuts, msg+hint
         height = sections * (ROW_H + 6) + rows * ROW_H + PAD + 12   # 12: bottom margin
         style = 1 | 2 | 4  # titled | closable | miniaturizable
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -320,6 +374,29 @@ class SettingsWindow:
         popup.setAction_("modelChanged:")
         content.addSubview_(popup)
         self._popup = popup
+        y -= ROW_H
+
+        # What gets pasted: original or an AI version (local LLM)
+        section("What gets pasted")
+        label("Paste", PAD + 10, y, 120)
+        sp = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(PAD + 140, y - 2, 300, ROW_H), False)
+        for lbl in self.model.style_labels():
+            sp.addItemWithTitle_(lbl)
+        sp.setTarget_(ctrl)
+        sp.setAction_("styleChanged:")
+        content.addSubview_(sp)
+        self._style_popup = sp
+        y -= ROW_H
+        label("Custom rules", PAD + 10, y, 120)
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD + 140, y - 2, WIDTH - PAD - 150, ROW_H - 2))
+        field.setPlaceholderString_("e.g. Write it as a short, polite Slack message")
+        field.setTarget_(ctrl)
+        field.setAction_("customChanged:")       # Return or leaving the field
+        content.addSubview_(field)
+        self._custom_field = field
+        y -= ROW_H
+        self._style_hint = label("", PAD + 30, y + 4, WIDTH - 2 * PAD - 30, size=11,
+                                 color=NSColor.secondaryLabelColor())
         y -= ROW_H
 
         # Toggles grouped by section
@@ -410,6 +487,19 @@ class SettingsWindow:
     def on_model(self, sender) -> None:
         title = sender.titleOfSelectedItem()
         self._safe(lambda: self.model.set_model(title), "model change")
+
+    def on_style(self, sender) -> None:
+        title = sender.titleOfSelectedItem()
+        self._safe(lambda: self.model.set_style_label(title), "paste style")
+
+    def on_custom(self, sender) -> None:
+        text = sender.stringValue()
+        self._safe(lambda: self.model.set_custom_rules(text), "custom rules")
+
+    def commit_pending_edits(self) -> None:
+        """Rules typed without pressing Return are saved when the window closes."""
+        if self._custom_field is not None:
+            self.on_custom(self._custom_field)
 
     def on_login(self, sender) -> None:
         err = self.model.set_login(sender.state() == 1)

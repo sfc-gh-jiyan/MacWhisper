@@ -24,6 +24,17 @@ class FakeApp:
         self.calls = []
         self.saved = 0
         self.model_label = "Qwen3 0.6B (Fast, zh+en)"
+        self.paste_style = "original"
+        self.custom_style = ""
+        self.collapse_repeats = True
+
+    def _set_paste_style(self, style):
+        self.paste_style = style
+        self.calls.append(("style", style))
+
+    def _set_custom_style(self, rules):
+        self.custom_style = rules.strip()
+        self.calls.append(("custom", self.custom_style))
 
     def _flip(self, attr):
         setattr(self, attr, not getattr(self, attr))
@@ -435,3 +446,51 @@ def test_real_window_login_error_shown_and_box_reverts(real_window):
     win._login_box.performClick_(None)
     assert win._login_box.state() == 0                    # reflects the real (unchanged) state
     assert "Operation not permitted" in win._error.stringValue()
+
+
+# ── AI paste style ──
+
+def test_paste_style_labels_and_selection():
+    import beautifier
+    m = sw.SettingsModel(FakeApp())
+    assert m.style_labels() == [label for _, label in beautifier.LEVELS]
+    assert m.style_label() == "Original transcript"
+    m.set_style_label("AI: smooth + remove fillers")
+    assert m.app.paste_style == "medium"
+    m.set_style_label("AI: smooth + remove fillers")          # same again: no call
+    assert m.app.calls.count(("style", "medium")) == 1
+
+
+def test_custom_rules_saved_only_when_changed():
+    m = sw.SettingsModel(FakeApp())
+    m.set_custom_rules("改成简洁的 Slack 消息")
+    m.set_custom_rules("改成简洁的 Slack 消息 ")
+    assert m.app.custom_style == "改成简洁的 Slack 消息"
+    assert [c for c in m.app.calls if c[0] == "custom"] == [("custom", "改成简洁的 Slack 消息")]
+
+
+def test_style_unavailable_without_local_llm(monkeypatch):
+    import llm_backend
+    monkeypatch.setattr(llm_backend, "llm_available", lambda: False)
+    m = sw.SettingsModel(FakeApp())
+    assert not m.style_available() and "install" in m.style_hint().lower()
+
+
+def test_real_window_has_style_popup_and_custom_rules(real_window):
+    app, win = real_window
+    assert win._style_popup.numberOfItems() == 5
+    assert win._style_popup.titleOfSelectedItem() == "Original transcript"
+    win._style_popup.selectItemWithTitle_("AI: fix typos & grammar")
+    win.on_style(win._style_popup)
+    assert app.paste_style == "light"
+    win._custom_field.setStringValue_("Write it as an email")
+    win.on_custom(win._custom_field)
+    assert app.custom_style == "Write it as an email"
+
+
+def test_custom_rules_saved_when_window_closes_without_return(real_window):
+    """Review: text typed without pressing Return was lost on close."""
+    app, win = real_window
+    win._custom_field.setStringValue_("Write it as a short Slack message")
+    win.commit_pending_edits()
+    assert app.custom_style == "Write it as a short Slack message"

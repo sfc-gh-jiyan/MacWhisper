@@ -893,6 +893,26 @@ class TestMeetingFinalTranscript:
             finally:
                 meeting.MEETINGS_DIR = orig
 
+    def test_ai_version_goes_on_top_and_the_transcript_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import meeting
+            orig = meeting.MEETINGS_DIR
+            meeting.MEETINGS_DIR = tmpdir
+            try:
+                s = self._session(tmpdir)
+                path = s._auto_save()
+                s.write_final_transcript("原始最终文稿", "Qwen3-ASR 1.7B",
+                                         ai_text="整理后的文稿", ai_style="AI: smooth")
+                md = open(path, encoding="utf-8").read()
+                assert md.index("## AI version") < md.index("## Final transcript") \
+                    < md.index("## Live transcript")
+                assert "整理后的文稿" in md and "原始最终文稿" in md and "live words" in md
+                data = json.load(open(path.replace(".md", ".json"), encoding="utf-8"))
+                assert data["ai_transcript"] == "整理后的文稿"
+                assert data["final_transcript"] == "原始最终文稿"
+            finally:
+                meeting.MEETINGS_DIR = orig
+
     def test_release_audio_frees_frames(self):
         s = self._session(None)
         s.release_audio()
