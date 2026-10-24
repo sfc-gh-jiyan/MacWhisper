@@ -599,6 +599,7 @@ class TranscriberApp(rumps.App):
         settings = rumps.MenuItem("Settings…", callback=self._open_settings, key=",")
         report = rumps.MenuItem("Error Report (7 days)…", callback=self._open_error_report)
         retry = rumps.MenuItem("Retry Last Failed Recording", callback=self._retry_failed_recording)
+        copy_last = rumps.MenuItem("Copy Last Transcript", callback=self._copy_last_transcript)
         add_fix = rumps.MenuItem("Add Correction…", callback=self._add_correction_dialog)
         fixes = rumps.MenuItem("Corrections & Vocabulary…", callback=self._open_corrections)
         mine = rumps.MenuItem("Learn New Vocabulary Now", callback=lambda _: threading.Thread(
@@ -617,6 +618,7 @@ class TranscriberApp(rumps.App):
             mine,
             rumps.separator,
             settings,
+            copy_last,
             retry,
             report,
             rumps.separator,
@@ -1995,13 +1997,64 @@ class TranscriberApp(rumps.App):
 
     # ── Auto-paste ───────────────────────────────────────────
 
-    def _auto_paste(self, text):
-        pyperclip.copy(text)
+    PASTE_TIMEOUT_S = 5
+
+    def _auto_paste(self, text) -> bool:
+        """Copy the text and press ⌘V. Returns True when the paste keystroke was sent.
+
+        Never loses a dictation: the text is already in transcripts.jsonl; on any
+        failure it stays on the clipboard (or menu → Copy Last Transcript) and
+        the user is told. A clipboard that did not take the text is never pasted
+        (⌘V would insert whatever was there before)."""
+        try:
+            pyperclip.copy(text)
+            if pyperclip.paste() != text:          # pasteboard busy: one more try
+                logger.warning("Clipboard did not take the dictation — copying again")
+                time.sleep(0.1)
+                pyperclip.copy(text)
+                if pyperclip.paste() != text:
+                    raise RuntimeError("clipboard kept its old content")
+        except Exception as e:
+            logger.error("Copying the dictation to the clipboard failed: %s", e)
+            self._notify("MacWhisper — not pasted", "Could not copy the text",
+                         "Menu → Copy Last Transcript")
+            return False
         time.sleep(0.2)
-        subprocess.run([
-            "osascript", "-e",
-            'tell application "System Events" to keystroke "v" using command down'
-        ])
+        try:
+            r = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to keystroke "v" using command down'],
+                capture_output=True, text=True, timeout=self.PASTE_TIMEOUT_S)
+            ok, why = r.returncode == 0, (r.stderr or "").strip()
+        except Exception as e:                     # timeout, osascript missing
+            ok, why = False, f"{type(e).__name__}: {e}"
+        if not ok:
+            logger.error("Auto-paste failed (%s) — text left on the clipboard", why[:200])
+            self._notify("MacWhisper — not pasted", "The text is on the clipboard",
+                         "Press ⌘V to paste it")
+        return ok
+
+    def _copy_last_transcript(self, _=None):
+        """Menu: put the newest dictation back on the clipboard."""
+        text = ""
+        try:
+            with open(TRANSCRIPT_LOG, encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in reversed(lines[-500:]):
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("text"):
+                    text = entry["text"]
+                    break
+        except OSError:
+            pass
+        if not text:
+            self._notify("MacWhisper", "No dictation yet", "Nothing to copy")
+            return
+        pyperclip.copy(text)
+        self._notify("MacWhisper — copied", "Last dictation is on the clipboard", text[:80])
 
 
 def _check_audio_device():

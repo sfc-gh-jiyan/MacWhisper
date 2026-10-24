@@ -2528,3 +2528,118 @@ def test_failed_start_is_not_retried_for_every_dictation(tmp_path, monkeypatch):
     inst._final_text(*audio)
     assert len(starts) == 1                           # second dictation: no second load
     assert len(list(tmp_path.glob("*.wav"))) == 2       # both kept, even in the same second
+
+
+# ── Paste safety (roadmap F): a dictation that is not pasted stays recoverable ──
+
+def _paste_app():
+    inst = _engine_app()
+    inst._notify = MagicMock()
+    return inst
+
+
+def test_auto_paste_success_does_not_notify(monkeypatch):
+    import app
+    board = []
+    monkeypatch.setattr(app.pyperclip, "copy", board.append)
+    monkeypatch.setattr(app.pyperclip, "paste", lambda: board[-1])
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: MagicMock(returncode=0, stderr=""))
+    inst = _paste_app()
+    assert inst._auto_paste("你好 ") is True
+    assert board == ["你好 "]
+    inst._notify.assert_not_called()
+
+
+def test_auto_paste_keystroke_failure_tells_user_text_is_on_clipboard(monkeypatch):
+    import app
+    board = []
+    monkeypatch.setattr(app.pyperclip, "copy", board.append)
+    monkeypatch.setattr(app.pyperclip, "paste", lambda: board[-1])
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: MagicMock(
+        returncode=1, stderr="System Events got an error: not allowed to send keystrokes"))
+    inst = _paste_app()
+    assert inst._auto_paste("你好 ") is False
+    assert board[-1] == "你好 "                     # still on the clipboard
+    inst._notify.assert_called_once()
+    assert "⌘V" in " ".join(map(str, inst._notify.call_args[0]))
+
+
+def test_auto_paste_keystroke_timeout_is_reported(monkeypatch):
+    import app
+    import subprocess as sp
+    board = []
+    monkeypatch.setattr(app.pyperclip, "copy", board.append)
+    monkeypatch.setattr(app.pyperclip, "paste", lambda: board[-1])
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+
+    def hang(*a, **k):
+        assert k.get("timeout"), "osascript must not be able to hang the app"
+        raise sp.TimeoutExpired(a[0], k["timeout"])
+    monkeypatch.setattr(app.subprocess, "run", hang)
+    inst = _paste_app()
+    assert inst._auto_paste("你好 ") is False
+    inst._notify.assert_called_once()
+
+
+def test_auto_paste_retries_copy_and_never_pastes_stale_clipboard(monkeypatch):
+    """Clipboard did not take the text: retry once; still wrong -> do not press
+    ⌘V (it would paste whatever was there before) and say where the text is."""
+    import app
+    monkeypatch.setattr(app.pyperclip, "copy", lambda t: None)      # copy silently lost
+    monkeypatch.setattr(app.pyperclip, "paste", lambda: "old clipboard")
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    keystrokes = []
+    monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: keystrokes.append(a))
+    inst = _paste_app()
+    assert inst._auto_paste("你好 ") is False
+    assert keystrokes == []
+    inst._notify.assert_called_once()
+    assert "Copy Last Transcript" in " ".join(map(str, inst._notify.call_args[0]))
+
+
+def test_auto_paste_copy_exception_is_caught(monkeypatch):
+    import app
+
+    def boom(t):
+        raise app.pyperclip.PyperclipException("pbcopy failed")
+    monkeypatch.setattr(app.pyperclip, "copy", boom)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    monkeypatch.setattr(app.subprocess, "run", MagicMock())
+    inst = _paste_app()
+    assert inst._auto_paste("你好 ") is False
+    app.subprocess.run.assert_not_called()
+    inst._notify.assert_called_once()
+
+
+def test_copy_last_transcript_copies_newest_text(tmp_path, monkeypatch):
+    import app
+    log = tmp_path / "transcripts.jsonl"
+    log.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in [
+        {"text": "第一句"}, {"text": "第二句"}, {"text": ""}, {"mode": "correct"}]) + "\n",
+        encoding="utf-8")
+    monkeypatch.setattr(app, "TRANSCRIPT_LOG", str(log))
+    copied = []
+    monkeypatch.setattr(app.pyperclip, "copy", copied.append)
+    inst = _paste_app()
+    inst._copy_last_transcript()
+    assert copied == ["第二句"]
+    inst._notify.assert_called_once()
+
+
+def test_copy_last_transcript_without_history(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "TRANSCRIPT_LOG", str(tmp_path / "none.jsonl"))
+    copied = []
+    monkeypatch.setattr(app.pyperclip, "copy", copied.append)
+    inst = _paste_app()
+    inst._copy_last_transcript()
+    assert copied == []
+    inst._notify.assert_called_once()
+
+
+def test_menu_has_copy_last_transcript():
+    inst = _menu_app()
+    titles = [getattr(m, "title", None) for m in inst._build_menu() if m is not None]
+    assert "Copy Last Transcript" in titles
