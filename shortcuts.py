@@ -37,19 +37,17 @@ _SPECIAL_LABEL = {
 }
 
 # Action -> default specs. Order is the display order in Settings.
-ACTIONS = ("push_to_talk", "meeting", "cycle_model", "translate", "live_subtitles")
+ACTIONS = ("push_to_talk", "meeting", "cycle_model", "live_subtitles")
 ACTION_LABELS = {
     "push_to_talk": "Push to Talk (hold)",
     "meeting": "Start / stop meeting",
     "cycle_model": "Next model",
-    "translate": "Translate mode",
     "live_subtitles": "Live subtitles",
 }
 DEFAULTS = {
     "push_to_talk": ["alt_r"],
     "meeting": ["ctrl+alt+vk46", "ctrl+shift+f8"],   # ⌃⌥M, ⌃⇧F8 (was ⌃⇧R)
     "cycle_model": ["ctrl+shift+vk46"],              # ⌃⇧M
-    "translate": ["ctrl+shift+vk17"],                # ⌃⇧T
     "live_subtitles": ["ctrl+shift+vk1"],            # ⌃⇧S
 }
 

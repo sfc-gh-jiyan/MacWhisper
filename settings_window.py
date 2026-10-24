@@ -31,7 +31,6 @@ class Toggle:
 
 TOGGLES = (
     Toggle("live_mode", "Live subtitles while recording", "Push to Talk", "_toggle_live_mode"),
-    Toggle("translate_mode", "Translate to English (uses Whisper)", "Push to Talk", "_toggle_translate"),
     Toggle("save_audio", "Save audio of each recording", "Push to Talk", "_toggle_save_audio"),
     Toggle("meeting_subtitles", "Show meeting subtitles", "Meeting", "_toggle_meeting_subtitles"),
     Toggle("save_meeting_audio", "Save meeting audio (needs participants' consent)", "Meeting",

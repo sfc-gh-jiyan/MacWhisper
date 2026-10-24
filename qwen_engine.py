@@ -38,14 +38,53 @@ class QwenEngine:
         self.last_error = ""
         self.hotwords: list[str] = []
         self._lock = threading.Lock()
+        self._settled = threading.Event()   # set when no start() is in flight
+        self._settled.set()
+        self._inflight = 0
+        self._inflight_repo: str | None = None
+        self._count_lock = threading.Lock()
 
     @property
     def is_ready(self) -> bool:
         b = self.backend
         return bool(self._ok and b is not None and getattr(b, "is_ready", False))
 
+    def wait_ready(self, timeout: float) -> bool:
+        """Wait for a running start() to finish; True when the engine is ready."""
+        self._settled.wait(timeout)
+        return self._settled.is_set() and self.is_ready
+
     def start(self, model_repo: str) -> bool:
-        """(Re)start the sidecar for model_repo. Blocking; returns readiness."""
+        """(Re)start the sidecar for model_repo. Blocking; returns readiness.
+
+        A start for the same model already in flight is joined, not repeated
+        (launch, a dictation and a meeting can all ask at once)."""
+        if not self._enter(model_repo):
+            self._settled.wait(240)           # same model already loading: join it
+            return self.is_ready
+        return self._run_start(model_repo)
+
+    def _enter(self, model_repo: str) -> bool:
+        """Register a start; False if one for the same model is already in flight."""
+        with self._count_lock:
+            if self._inflight > 0 and self._inflight_repo == model_repo:
+                return False
+            self._inflight += 1
+            self._inflight_repo = model_repo
+            self._settled.clear()
+            return True
+
+    def _run_start(self, model_repo: str) -> bool:
+        try:
+            return self._start(model_repo)
+        finally:
+            with self._count_lock:
+                self._inflight -= 1
+                if self._inflight == 0:
+                    self._inflight_repo = None
+                    self._settled.set()
+
+    def _start(self, model_repo: str) -> bool:
         with self._lock:
             if self.backend is not None:
                 try:
@@ -71,8 +110,11 @@ class QwenEngine:
         logger.debug("Qwen hotwords: %d terms", len(self.hotwords))
 
     def start_async(self, model_repo: str, on_done=None) -> None:
+        # Registered now (not when the thread runs): a start() in between joins it
+        joined = not self._enter(model_repo)
+
         def run():
-            ok = self.start(model_repo)
+            ok = self.start(model_repo) if joined else self._run_start(model_repo)
             if on_done:
                 on_done(ok, self.last_error)
         threading.Thread(target=run, daemon=True, name="qwen-engine-start").start()
@@ -83,15 +125,27 @@ class QwenEngine:
                 self.backend.close()
             self._ok = False
 
-    def transcribe_final(self, audio: np.ndarray) -> str:
+    def transcribe_final(self, audio: np.ndarray, retry: bool = False) -> str:
         """Final text for a whole utterance. Raises QwenUnavailable on failure.
 
         After a sidecar crash (started_ok but not ready) the backend restarts
-        it transparently, within its restart budget.
+        it transparently, within its restart budget. With retry=True a failed
+        request (e.g. a timeout) restarts the sidecar and tries the same audio
+        once more — there is no other engine to fall back to.
         """
         if not self.started_ok or self.backend is None:
             raise QwenUnavailable(self.last_error or "Qwen3 engine not started")
-        result = self.backend.transcribe(np.asarray(audio, dtype=np.float32))
+        audio = np.asarray(audio, dtype=np.float32)
+        try:
+            result = self.backend.transcribe(audio)
+        except QwenUnavailable as e:
+            restart = getattr(self.backend, "restart", None)
+            if not retry or restart is None:
+                raise
+            logger.warning("Qwen3 final pass failed (%s) — restarting and retrying once", e)
+            if not restart():
+                raise
+            result = self.backend.transcribe(audio)
         return qwen_text.postprocess(result.text, strip_filler_words=self.strip_fillers,
                                      tight=self.tight)
 

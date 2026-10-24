@@ -169,3 +169,81 @@ def test_hotwords_applied_to_current_and_new_backends():
     assert made[-1].hotwords == ["CSE", "Snowflake"]
     eng.start("m2")
     assert made[-1].hotwords == ["CSE", "Snowflake"]
+
+
+# ── Qwen3-only (B): no Whisper behind it ──
+
+def test_wait_ready_returns_when_start_finishes():
+    gate = threading.Event()
+
+    class Slow(FakeBackend):
+        def start(self, timeout=0):
+            gate.wait(2)
+            return True
+    eng = qe.QwenEngine(backend_factory=lambda repo: Slow())
+    eng.start_async("m")
+    assert eng.wait_ready(timeout=0.05) is False        # still loading
+    gate.set()
+    assert eng.wait_ready(timeout=2) is True
+
+
+def test_wait_ready_false_when_start_failed():
+    class Bad(FakeBackend):
+        def start(self, timeout=0):
+            self.last_error = "no env"
+            return False
+    eng = qe.QwenEngine(backend_factory=lambda repo: Bad())
+    eng.start_async("m")
+    assert eng.wait_ready(timeout=2) is False
+
+
+def test_transcribe_final_retries_once_after_restart():
+    """A dead/timed-out sidecar: restart it and try the same audio again."""
+    class Flaky(FakeBackend):
+        restarted = 0
+
+        def transcribe(self, audio, **kw):
+            self.calls.append(len(audio))
+            if len(self.calls) == 1:
+                raise QwenUnavailable("timed out")
+            return TranscriptionResult(text="好的")
+
+        def restart(self, timeout=0):
+            Flaky.restarted += 1
+            return True
+    b = Flaky()
+    eng = qe.QwenEngine(backend_factory=lambda repo: b)
+    eng.start("m")
+    assert eng.transcribe_final(np.zeros(16000, dtype=np.float32), retry=True) == "好的"
+    assert Flaky.restarted == 1 and len(b.calls) == 2
+
+
+def test_transcribe_final_retry_still_failing_raises():
+    class Dead(FakeBackend):
+        def restart(self, timeout=0):
+            return True
+    eng = qe.QwenEngine(backend_factory=lambda repo: Dead(fail=True))
+    eng.start("m")
+    with pytest.raises(QwenUnavailable):
+        eng.transcribe_final(np.zeros(16000, dtype=np.float32), retry=True)
+
+
+def test_concurrent_starts_for_same_model_load_once():
+    """Launch + a dictation + a meeting may all start Qwen3 at once."""
+    gate = threading.Event()
+    made = []
+
+    class Slow(FakeBackend):
+        def start(self, timeout=0):
+            gate.wait(2)
+            return True
+    eng = qe.QwenEngine(backend_factory=lambda repo: made.append(1) or Slow())
+    eng.start_async("m")
+    results = []
+    t = threading.Thread(target=lambda: results.append(eng.start("m")))
+    t.start()
+    assert eng.wait_ready(0.05) is False
+    gate.set()
+    t.join(3)
+    assert results == [True] and eng.wait_ready(1) is True
+    assert len(made) == 1                              # loaded once, not twice
