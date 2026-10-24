@@ -971,6 +971,15 @@ class TranscriberApp(rumps.App):
         self.custom_style = (rules or "").strip()
         self._save_config()
 
+    def _beautify_terms(self) -> list:
+        """(term, known mishearings) from the user's active vocabulary."""
+        flow = getattr(self, "correction", None)
+        try:
+            return [(e.term, tuple(e.aliases)) for e in flow.vocab.active()] if flow else []
+        except Exception:
+            logger.exception("Reading the vocabulary for the AI style failed")
+            return []
+
     def _beautify(self, text: str) -> str | None:
         """AI version of a dictation, or None (original style, no LLM, timeout, error)."""
         style = getattr(self, "paste_style", "original")
@@ -990,7 +999,7 @@ class TranscriberApp(rumps.App):
                 raise
         t0 = time.time()
         out = beautifier.beautify(text, style, llm=call, custom=getattr(self, "custom_style", ""),
-                                  timeout=self.BEAUTIFY_TIMEOUT_S)
+                                  timeout=self.BEAUTIFY_TIMEOUT_S, terms=self._beautify_terms())
         if not_ready and not getattr(self, "_beautify_loading", False):
             self._restart_beautifier_async()       # crashed / timed out earlier: reload
         logger.info("AI beautify (%s): %s in %.1fs", style, "ok" if out else "failed",
@@ -1304,7 +1313,7 @@ class TranscriberApp(rumps.App):
         try:
             out, failed = beautifier.beautify_long(
                 text, style, llm=llm.complete, custom=getattr(self, "custom_style", ""),
-                timeout=self.BEAUTIFY_MEETING_TIMEOUT_S)
+                timeout=self.BEAUTIFY_MEETING_TIMEOUT_S, terms=self._beautify_terms())
         except Exception:
             logger.exception("AI version of the meeting failed — final transcript kept as is")
             return None, None
