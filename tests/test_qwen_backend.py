@@ -144,3 +144,42 @@ def test_hotwords_sent_to_sidecar(tmp_path):
         assert b.transcribe(_audio(1.0)).text == "fake 1.0s Chinese"
     finally:
         b.close()
+
+
+# ── Recovery over a long-running app (2026-10-23) ──
+
+def test_restart_budget_refills_after_a_healthy_period(tmp_path):
+    """The app runs for days; one timeout a day must not use up a lifetime budget."""
+    b = _backend(tmp_path, max_restarts=1, healthy_reset_s=0.0)
+    try:
+        assert b.start(timeout=30)
+        b.restarts = 1                                 # budget used by an earlier incident
+        b.transcribe(_audio(0.5))                      # healthy request after the reset period
+        assert b.restarts == 0
+    finally:
+        b.close()
+
+
+def test_restart_budget_kept_while_unstable(tmp_path):
+    b = _backend(tmp_path, max_restarts=1, healthy_reset_s=3600.0)
+    try:
+        assert b.start(timeout=30)
+        b.restarts = 1
+        b.transcribe(_audio(0.5))
+        assert b.restarts == 1
+    finally:
+        b.close()
+
+
+def test_explicit_restart_after_timeout(tmp_path):
+    b = _backend(tmp_path, env={"QWEN_FAKE_DELAY_S": "2"}, base_timeout_s=0.3, per_audio_s=0.0,
+                 max_restarts=0)
+    try:
+        assert b.start(timeout=30)
+        with pytest.raises(qb.QwenUnavailable):
+            b.transcribe(_audio(0.5))                  # times out; sidecar killed
+        assert not b.is_ready
+        assert b.restart(timeout=30) is True           # meeting recovery path
+        assert b.is_ready
+    finally:
+        b.close()

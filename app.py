@@ -1165,6 +1165,9 @@ class TranscriberApp(rumps.App):
             "fallback_factory": None,     # MeetingSession builds its Whisper processor
             "on_engine_failed": lambda exc: self._qwen_failed(
                 f"live meeting subtitles: {exc}", exc),
+            # Whisper covers only while Qwen3 restarts in the background
+            "engine_restart": lambda: qwen.backend.restart(),
+            "on_engine_recovered": self._qwen_recovered,
             "extended_silence_ms": 800,
         }
 

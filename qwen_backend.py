@@ -53,6 +53,7 @@ class QwenSidecarBackend(ASRBackend):
         base_timeout_s: float = 20.0,
         per_audio_s: float = 0.5,
         max_restarts: int = 2,
+        healthy_reset_s: float = 300.0,
     ):
         self.model_repo = model_repo
         self.python_path = python_path or default_python_path()
@@ -64,6 +65,10 @@ class QwenSidecarBackend(ASRBackend):
         self.base_timeout_s = base_timeout_s
         self.per_audio_s = per_audio_s
         self.max_restarts = max_restarts
+        # The app runs for days: after this long without trouble the restart
+        # budget refills, so occasional incidents never use it up for good.
+        self.healthy_reset_s = healthy_reset_s
+        self._ready_since: float | None = None
 
         self.restarts = 0
         self.last_error = ""
@@ -84,6 +89,12 @@ class QwenSidecarBackend(ASRBackend):
     def start(self, timeout: float = 180.0) -> bool:
         """Spawn the sidecar and wait for "ready". Returns False on failure."""
         with self._lock:
+            return self._start_locked(timeout)
+
+    def restart(self, timeout: float = 180.0) -> bool:
+        """Start a fresh sidecar now (meeting recovery after a failure)."""
+        with self._lock:
+            logger.warning("Restarting Qwen sidecar on request")
             return self._start_locked(timeout)
 
     def _start_locked(self, timeout: float) -> bool:
@@ -118,6 +129,7 @@ class QwenSidecarBackend(ASRBackend):
         msg = self._wait_line(timeout)
         if msg and msg.get("event") == "ready":
             self._ready = True
+            self._ready_since = time.monotonic()
             self.load_s = msg.get("load_s")
             self.last_error = ""
             logger.info("Qwen sidecar ready (model=%s, load=%ss, pid=%s)",
@@ -222,6 +234,10 @@ class QwenSidecarBackend(ASRBackend):
                 # Model error inside a live sidecar: keep the process, fail this request
                 self.last_error = msg.get("error", "unknown error")
                 raise QwenUnavailable(f"Qwen3 error: {self.last_error}")
+            if (self.restarts and self._ready_since is not None
+                    and time.monotonic() - self._ready_since >= self.healthy_reset_s):
+                logger.info("Qwen sidecar healthy again — restart budget refilled")
+                self.restarts = 0
             logger.debug("Qwen transcribe %.1fs audio in %.2fs (infer %.2fs)",
                          duration, time.time() - t0, msg.get("infer_s", 0))
             return TranscriptionResult(text=(msg.get("text") or "").strip(), language="zh")

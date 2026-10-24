@@ -79,6 +79,14 @@ class QwenSegmentProcessor:
         self._had_speech = False
         self.transcript_buffer.reset()
 
+    # Set by the meeting loop when it runs VAD (and so calls mark_speech()).
+    # Then a segment without any speech is never decoded: on silence Qwen3
+    # reads the hotword list back and can loop until the request times out.
+    uses_vad = False
+
+    def _silent(self) -> bool:
+        return self.uses_vad and not self._had_speech
+
     def insert_audio_chunk(self, audio: np.ndarray) -> None:
         self.audio_buffer = np.concatenate([self.audio_buffer,
                                             np.asarray(audio, dtype=np.float32)])
@@ -123,7 +131,7 @@ class QwenSegmentProcessor:
         return text
 
     def process_iter(self):
-        if self.segment_seconds() < self.min_audio_s:
+        if self.segment_seconds() < self.min_audio_s or self._silent():
             return None
         t = self._now()
         if self._decoded_once and t < self._next_decode:
@@ -147,7 +155,10 @@ class QwenSegmentProcessor:
 
     def segment_close(self) -> str:
         """Final text of the current segment (one more full decode), then reset."""
-        if self.segment_seconds() < 0.3:
+        if self.segment_seconds() < 0.3 or self._silent():
+            if self._silent():
+                logger.info("Qwen meeting: %.1fs segment without speech — not decoded",
+                            self.segment_seconds())
             self.reset()
             return ""
         raw = self._decode()      # on failure the audio stays for the fallback
