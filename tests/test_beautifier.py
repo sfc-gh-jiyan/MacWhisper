@@ -140,3 +140,52 @@ def test_prompt_carries_the_language_note():
     llm = FakeLLM()
     bf.beautify("I have a question.", "custom", llm=llm, custom="改成 Slack 消息")
     assert "Write the result in English" in llm.calls[0]["prompt"]
+
+
+# ── Speech-recognition awareness (2026-10-24) ──
+
+def test_short_latin_alias_matches_only_as_a_word():
+    assert bf.relevant_terms("CICD pipeline", [("CSE", ("CIC",))]) == []
+    assert bf.relevant_terms("the CIC said", [("CSE", ("CIC",))]) == [("CSE", ("CIC",))]
+    assert bf.relevant_terms("这个漫威很好", [("memory", ("漫威",))]) == [("memory", ("漫威",))]
+
+
+def test_prompt_explains_speech_recognition_errors_cautiously():
+    system = bf.system_prompt("light").lower()
+    assert "speech recognition" in system
+    assert "sound" in system                      # misheard = sounds alike
+    assert "confident" in system and "leave" in system   # unsure -> unchanged
+    for example in ("哈希", "hash", "吉普", "jeep"):     # no hard-coded examples
+        assert example not in system
+
+
+def test_only_mishearings_heard_in_this_dictation_are_sent():
+    """A/B on real dictations: the whole list made the model swap correct names
+    (Snowhouse -> Snowflake). Only entries whose mishearing appears are sent."""
+    llm = FakeLLM()
+    terms = [("CSE", ("CIC",)), ("Snowflake", ("snow flake",)), ("Cortex", ())]
+    bf.beautify("based on the cic's perspective, check Snowhouse", "light", llm=llm, terms=terms)
+    prompt = llm.calls[0]["prompt"]
+    assert "CIC → CSE" in prompt
+    assert "Snowflake" not in prompt and "Cortex" not in prompt
+
+
+def test_without_terms_no_vocabulary_block():
+    llm = FakeLLM()
+    bf.beautify("我们先看一下", "light", llm=llm)
+    assert "Terms this speaker uses" not in llm.calls[0]["prompt"]
+
+
+def test_vocabulary_block_is_capped():
+    llm = FakeLLM()
+    terms = [(f"Term{i}", (f"alias{i}x",)) for i in range(200)]
+    text = " ".join(f"alias{i}x" for i in range(200))
+    bf.beautify(text, "light", llm=llm, terms=terms)
+    prompt = llm.calls[0]["prompt"]
+    assert "Term39" in prompt and "Term40" not in prompt
+
+
+def test_no_mishearing_in_dictation_means_no_vocabulary_block():
+    llm = FakeLLM()
+    bf.beautify("我们先看一下Snowhouse", "light", llm=llm, terms=[("Snowflake", ("snow flake",))])
+    assert "mishearing" not in llm.calls[0]["prompt"].split("</dictation>")[1].lower()

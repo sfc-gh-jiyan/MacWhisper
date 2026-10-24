@@ -40,6 +40,16 @@ _COMMON = (
     "spoken (把它move到临时文件夹 stays 把它move到临时文件夹, never 把它移动到; "
     "in case stays in case, never 万一). An English sentence stays an English sentence. "
     "Never translate anything, in either direction.\n"
+    "SPEECH RECOGNITION: the text was produced by a speech recognition model from "
+    "Chinese/English speech. Its typical mistake is a word that sounds like the intended "
+    "one: an English or technical term written as Chinese characters with a similar sound, "
+    "or as a similar-sounding English word. Correct a word only if it is listed below as a "
+    "known mishearing, or if it makes no sense at all where it is and you are confident "
+    "which term was meant. A word or name that makes sense where it is (a product, tool "
+    "or person) is correct: never swap it for a similar one. Never turn a correct Chinese "
+    "word into English. Ordinary Chinese "
+    "words, including established loanwords, are correct as they are. If you are not sure, "
+    "leave the word unchanged.\n"
     "Keep every piece of content and the speaker's meaning; never add new content. "
     "Output only the tidied text — no tags, no quotes, no explanation."
 )
@@ -108,8 +118,38 @@ def language_note(text: str) -> str:
             "English words and phrases in English exactly as written: " + ", ".join(words[:40]) + ".")
 
 
+MAX_TERMS = 40
+
+
+def _alias_in(alias: str, text: str) -> bool:
+    if re.search(r"[A-Za-z]", alias):          # Latin: whole word, any case ("CIC" not in "CICD")
+        return re.search(r"(?<![A-Za-z])" + re.escape(alias) + r"(?![A-Za-z])",
+                         text, re.IGNORECASE) is not None
+    return alias in text
+
+
+def relevant_terms(text: str, terms) -> list:
+    """Only the vocabulary entries whose known mishearing appears in this text.
+
+    Sending the whole list made the model swap correct names for listed ones
+    (Snowhouse -> Snowflake, A/B on real dictations 2026-10-24).
+    """
+    return [(t, aliases) for t, aliases in (terms or [])
+            if any(len(a) >= 2 and _alias_in(a, text) for a in aliases)]
+
+
+def terms_note(text: str, terms) -> str:
+    """Known mishearings that occur in this dictation, with the intended term."""
+    hits = relevant_terms(text, terms)[:MAX_TERMS]
+    if not hits:
+        return ""
+    heard = "; ".join(f"{a} → {t}" for t, aliases in hits for a in aliases
+                      if len(a) >= 2 and _alias_in(a, text))
+    return f"Known mishearings in this dictation (fix these): {heard}."
+
+
 def beautify(text: str, level: str, *, llm, custom: str = "",
-             timeout: float = 5.0) -> str | None:
+             timeout: float = 5.0, terms=None) -> str | None:
     """Tidied text, or None (original level, empty text, timeout, error).
 
     llm(prompt, system=..., max_tokens=..., timeout=...) -> str
@@ -118,6 +158,9 @@ def beautify(text: str, level: str, *, llm, custom: str = "",
     if level not in LEVEL_KEYS or level == "original" or not (text or "").strip():
         return None
     prompt = f"<dictation>\n{text.strip()}\n</dictation>\n{language_note(text)}"
+    vocab = terms_note(text, terms)
+    if vocab:
+        prompt += f"\n{vocab}"
     try:
         reply = llm(prompt, system=system_prompt(level, custom),
                     max_tokens=_token_budget(text, level), timeout=timeout)
@@ -147,12 +190,13 @@ def split_chunks(text: str, max_chars: int = 1500) -> list[str]:
 
 
 def beautify_long(text: str, level: str, *, llm, custom: str = "",
-                  max_chars: int = 1500, timeout: float = 60.0) -> tuple[str, int]:
+                  max_chars: int = 1500, timeout: float = 60.0,
+                  terms=None) -> tuple[str, int]:
     """Meeting transcripts: tidy chunk by chunk; a failed chunk keeps its original.
     Returns (text, number of chunks that failed)."""
     out, failed = [], 0
     for chunk in split_chunks(text, max_chars):
-        tidy = beautify(chunk, level, llm=llm, custom=custom, timeout=timeout)
+        tidy = beautify(chunk, level, llm=llm, custom=custom, timeout=timeout, terms=terms)
         if tidy is None:
             failed += 1
         out.append(tidy if tidy is not None else chunk)

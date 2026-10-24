@@ -2842,3 +2842,18 @@ def test_vocabulary_learning_reuses_the_beautifier_llm(monkeypatch):
     made.assert_not_called()
     shared.close.assert_not_called()
     assert inst._beautify_llm is shared
+
+
+def test_beautify_gets_the_users_vocabulary(tmp_path):
+    """Vocabulary correction runs first; leftovers reach the AI as mishearing hints."""
+    import beautifier
+    app, inst = _beautify_app(tmp_path, "我们先看一下这个问题")
+    seen = {}
+    real = beautifier.beautify
+
+    def spy(text, level, **kw):
+        seen.update(kw)
+        return real(text, level, **kw)
+    with patch.object(app.beautifier, "beautify", spy):
+        _dictate(tmp_path, inst)
+    assert ("CSE", ("CIC",)) in seen["terms"]
