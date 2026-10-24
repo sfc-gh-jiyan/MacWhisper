@@ -40,13 +40,13 @@ jobs:
       - name: Lint (ruff)
         run: |
           venv/bin/ruff check --select=E,F,W --ignore=E501,E402,W293,W291 \
-            app.py online_processor.py meeting.py overlay.py \
+            app.py meeting.py overlay.py qwen_meeting.py qwen_backend.py \
             asr_backend.py audio_capture.py vad.py text_utils.py subtitle_export.py
 
       - name: Import check
         run: |
           venv/bin/python -c "
-          import rumps, mlx_whisper, pynput, sounddevice
+          import rumps, pynput, sounddevice
           import pyperclip, certifi, opencc, numpy
           print('All imports OK')
           "
@@ -54,13 +54,12 @@ jobs:
       - name: Syntax check
         run: |
           venv/bin/python -m py_compile app.py
-          venv/bin/python -m py_compile online_processor.py
           venv/bin/python -m py_compile meeting.py
 
       - name: Smoke tests (pytest)
         run: |
           venv/bin/python -m pytest tests/test_app.py tests/test_meeting.py \
-            tests/test_online_processor.py tests/test_meeting_dual.py \
+            tests/test_meeting_dual.py tests/test_qwen_meeting.py \
             -m "not slow and not hardware" -q --tb=short
 
       - name: Script syntax

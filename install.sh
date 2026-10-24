@@ -67,31 +67,16 @@ echo "[3/5] Creating ${APP_NAME}.app bundle..."
 mkdir -p "$HOME/.macwhisper/logs"
 mkdir -p "$HOME/.macwhisper/audio"
 
-# ── Step 4: Pre-download model ───────────────────────────
+# ── Step 4: Qwen3-ASR engine (isolated .venv-qwen + model download) ──
 
-export SSL_CERT_FILE="$("$SCRIPT_DIR/venv/bin/python3" -c 'import certifi; print(certifi.where())')"
-MODEL_REPO="$("$SCRIPT_DIR/venv/bin/python3" -c "
-import json, os
-cfg_path = os.path.expanduser('~/.macwhisper/config.json')
-if not os.path.isfile(cfg_path):
-    cfg_path = os.path.expanduser('~/.macwhisper_config.json')
-try:
-    model = json.load(open(cfg_path))['current_model']
-except Exception:
-    model = 'mlx-community/whisper-small-mlx'
-print(model)
-")"
-echo "[4/5] Pre-downloading model: ${MODEL_REPO} (first time only)..."
-"$SCRIPT_DIR/venv/bin/python3" -c "
-from huggingface_hub import snapshot_download
-snapshot_download('${MODEL_REPO}')
-print('Model downloaded OK')
-" 2>&1 || echo "  ⚠  Model download failed (will retry on first launch). Check your internet connection."
+echo "[4/5] Setting up the Qwen3-ASR engine (first time downloads the model)..."
+"$SCRIPT_DIR/scripts/setup_qwen.sh" \
+    || echo "  ⚠  Qwen3-ASR setup failed. Run 'make qwen-setup' later (needs uv or python3.12)."
 
 # ── Step 5: Verify ────────────────────────────────────────
 
 echo "[5/5] Verifying installation..."
-"$SCRIPT_DIR/venv/bin/python3" -c "import rumps, mlx_whisper, pynput, sounddevice, pyperclip, certifi, opencc; print('All dependencies OK')"
+"$SCRIPT_DIR/venv/bin/python3" -c "import rumps, pynput, sounddevice, pyperclip, certifi, opencc; print('All dependencies OK')"
 
 echo ""
 echo "=========================================="

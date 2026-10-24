@@ -1,6 +1,6 @@
 # Qwen3-ASR sidecar environment (separate from the app venv).
-# The app venv pins mlx 0.31.1 for mlx-whisper; Qwen3-ASR needs a newer
-# mlx via mlx-audio, so it runs in its own process. Versions verified on
+# The app venv has no ML stack; Qwen3-ASR needs mlx via mlx-audio, so it
+# runs in its own process. Versions verified on
 # 2026-10-18 with Qwen3-ASR-0.6B/1.7B-bf16.
 mlx==0.32.4
 mlx-audio==0.5.9
