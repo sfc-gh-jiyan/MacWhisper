@@ -2857,3 +2857,29 @@ def test_beautify_gets_the_users_vocabulary(tmp_path):
     with patch.object(app.beautifier, "beautify", spy):
         _dictate(tmp_path, inst)
     assert ("CSE", ("CIC",)) in seen["terms"]
+
+
+def test_review_window_warns_about_everyday_words(tmp_path, monkeypatch):
+    """既然 = Jira was approved by mistake and rewrote 4 dictations (2026-10-24)."""
+    import app
+    import correction_flow
+    import vocabulary
+    v = vocabulary.Vocabulary(path=str(tmp_path / "v.json"), entries=[])
+    v.add_correction("既然", "Jira", source="suggested")
+    v.add_correction("Gira", "Jira", source="suggested")
+    inst = _engine_app()
+    inst.correction = correction_flow.CorrectionFlow(v)
+    inst._set_status = MagicMock()
+    inst._sync_hotwords = MagicMock()
+    shown = {}
+
+    class Win:
+        def __init__(self, message, **kw):
+            shown["message"], shown["text"] = message, kw["default_text"]
+
+        def run(self):
+            return MagicMock(clicked=False)
+    monkeypatch.setattr(app.rumps, "Window", Win)
+    inst._review_suggestions(force=True)
+    assert "⚠" in shown["message"] and "既然 = Jira" in shown["message"]
+    assert "Gira = Jira" in shown["text"]
