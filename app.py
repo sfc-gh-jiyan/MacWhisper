@@ -496,6 +496,7 @@ class TranscriberApp(rumps.App):
 
         # Live subtitle overlay state
         self._overlay_panel    = None
+        self._overlay_mode     = None
         self._overlay_text     = None
         self._last_overlay_key = None   # (confirmed, unconfirmed) dedup
 
@@ -1649,8 +1650,7 @@ class TranscriberApp(rumps.App):
             return
         self.recording = False
         self._close_mic_stream()
-        if self._overlay_panel:
-            AppHelper.callAfter(self._destroy_overlay)
+        self._end_talk_overlay()
         self.frames = []   # new list: the Qwen live loop exits on identity change
         self._set_title(self._idle_icon)
         self._set_status("Ready")
@@ -1671,7 +1671,7 @@ class TranscriberApp(rumps.App):
 
         # ── 1. Show overlay IMMEDIATELY (before any blocking work) ──
         if self.live_mode:
-            AppHelper.callAfter(self._create_overlay)
+            AppHelper.callAfter(lambda: self._create_overlay("talk", gen))
 
         # ── 2. Live subtitles: Qwen3 only (no Whisper preview behind it) ──
         self._qwen_live_text = ""
@@ -1739,8 +1739,7 @@ class TranscriberApp(rumps.App):
         self._close_mic_stream()
 
         # ── 2. Destroy overlay IMMEDIATELY so user sees instant response ──
-        if self._overlay_panel:
-            AppHelper.callAfter(self._destroy_overlay)
+        self._end_talk_overlay()
 
         # ── 3. Wait briefly for live loop to finish current inference ──
         # If it's stuck in a long hallucination inference, don't block forever.
@@ -2133,17 +2132,29 @@ class TranscriberApp(rumps.App):
 
     # ── Live Subtitles — overlay ──────────────────────────────
 
-    def _create_overlay(self, mode: str = "talk"):
+    def _create_overlay(self, mode: str = "talk", gen: int | None = None):
         if mode == "talk" and not getattr(self, "recording", True):
             # Queued creation that lost the race with a fast release/cancel
             logger.info("Skipping talk overlay: recording already ended")
             return
+        if mode == "talk" and gen is not None and gen != getattr(self, "_rec_gen", gen):
+            # Queued for an earlier press that was already released; a new
+            # press set recording=True again, so the check above lets it through.
+            logger.info("Skipping talk overlay: stale recording %s (now %s)",
+                        gen, self._rec_gen)
+            return
+        if self._overlay_panel:
+            # Never overwrite the reference: an unreferenced panel stays on screen
+            logger.warning("Overlay already open (%s) — closing it before a new one",
+                           getattr(self, "_overlay_mode", "?"))
+            self._destroy_overlay()
         on_stop = self._stop_meeting_from_overlay if mode == "meeting" else None
         panel, text_view = create_overlay(mode=mode, frame_path=OVERLAY_FRAME_PATH,
                                           on_stop=on_stop)
         if panel:
             self._overlay_panel = panel
             self._overlay_text = text_view
+            self._overlay_mode = mode
             print("[INFO] Overlay panel created")
         else:
             print("[ERROR] Failed to create overlay panel")
@@ -2153,7 +2164,19 @@ class TranscriberApp(rumps.App):
             destroy_overlay(self._overlay_panel)
             self._overlay_panel = None
             self._overlay_text = None
+            self._overlay_mode = None
             print("[INFO] Overlay panel destroyed")
+
+    def _end_talk_overlay(self):
+        """Queue closing the Push to Talk overlay, even if it is not built yet.
+
+        Runs on the main thread after any queued creation, so it sees the panel
+        that creation made. A meeting overlay is left alone.
+        """
+        def close():
+            if self._overlay_panel and getattr(self, "_overlay_mode", "talk") != "meeting":
+                self._destroy_overlay()
+        AppHelper.callAfter(close)
 
     # ── Auto-paste ───────────────────────────────────────────
 
