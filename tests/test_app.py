@@ -2883,3 +2883,67 @@ def test_review_window_warns_about_everyday_words(tmp_path, monkeypatch):
     inst._review_suggestions(force=True)
     assert "⚠" in shown["message"] and "既然 = Jira" in shown["message"]
     assert "Gira = Jira" in shown["text"]
+
+
+def _queued_overlay_app(monkeypatch):
+    """App whose AppHelper.callAfter queue we drain by hand, like the main thread."""
+    import app
+    queue, panels = [], []
+
+    def make(*a, **k):
+        panels.append(MagicMock(name=f"panel{len(panels)}"))
+        return panels[-1], MagicMock()
+    monkeypatch.setattr(app, "create_overlay", make)
+    destroyed = []
+    monkeypatch.setattr(app, "destroy_overlay", destroyed.append)
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queue.append((fn, a)))
+    inst = _meeting_app()
+    inst.live_mode = True
+    inst._rec_gen = 0
+    return inst, queue, panels, destroyed
+
+
+def _drain(queue):
+    while queue:
+        fn, a = queue.pop(0)
+        fn(*a)
+
+
+def test_quick_double_press_leaves_no_overlay_behind(monkeypatch):
+    """2026-10-27: press, release before the overlay was built, press again ->
+    the first queued overlay was still created and then lost, stuck on screen."""
+    inst, queue, panels, destroyed = _queued_overlay_app(monkeypatch)
+    inst._rec_gen += 1
+    first = inst._rec_gen
+    inst.recording = True
+    queue.append((inst._create_overlay, ("talk", first)))     # press 1, still queued
+    inst.recording = False                                     # release 1: no panel yet
+    inst._end_talk_overlay()
+    inst._rec_gen += 1
+    second = inst._rec_gen
+    inst.recording = True                                      # press 2
+    queue.append((inst._create_overlay, ("talk", second)))
+    _drain(queue)
+    assert len(panels) == 1                                    # stale creation skipped
+    inst.recording = False                                     # release 2
+    inst._end_talk_overlay()
+    _drain(queue)
+    assert destroyed == panels and inst._overlay_panel is None
+
+
+def test_new_overlay_replaces_and_closes_the_old_one(monkeypatch):
+    """Never overwrite _overlay_panel: an unreferenced panel can never be closed."""
+    inst, queue, panels, destroyed = _queued_overlay_app(monkeypatch)
+    inst.recording = True
+    inst._create_overlay("talk", inst._rec_gen)
+    inst._create_overlay("talk", inst._rec_gen)
+    assert len(panels) == 2 and destroyed == [panels[0]]
+    assert inst._overlay_panel is panels[1]
+
+
+def test_end_talk_overlay_keeps_a_meeting_overlay(monkeypatch):
+    inst, queue, panels, destroyed = _queued_overlay_app(monkeypatch)
+    inst._create_overlay(mode="meeting")
+    inst._end_talk_overlay()
+    _drain(queue)
+    assert destroyed == [] and inst._overlay_panel is panels[0]
