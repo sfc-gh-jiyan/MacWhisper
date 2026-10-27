@@ -23,77 +23,90 @@ A lightweight macOS menu bar app for real-time voice transcription and translati
 
 ## Requirements
 
-- macOS on Apple Silicon (M1/M2/M3/M4)
-- Python 3.10+
+- Mac with Apple Silicon (M1 or later). Intel Macs are not supported.
+- macOS 14 Sonoma or later
+- Python 3.10+ for the app, plus [uv](https://docs.astral.sh/uv/) or Python 3.12 for the speech engine
+- Command Line Tools: `xcode-select --install`
+- About 4 GB free disk (Qwen3-ASR 0.6B model ~2.9 GB). The 1.7B model needs ~7.6 GB more and downloads only when you select it.
 
 ## Installation
 
-### Option 1: Homebrew (Recommended)
+> **Install from source.** The Homebrew formula still points to v0.6.1, the older Whisper-based release, and will be updated with the next release.
+
+### 1. Get the code and run the installer
 
 ```bash
-# Step 1 — Add the tap (one time only)
-brew tap sfc-gh-jiyan/macwhisper
-
-# Step 2 — Install
-brew install macwhisper-mlx
-
-# Step 3 — Create MacWhisper.app in /Applications
-macwhisper-mlx-install
-```
-
-### Option 2: From Source
-
-```bash
+brew install uv                 # if you have neither uv nor Python 3.12
 git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
 ./install.sh
 ```
 
-The install script will:
-1. Create a Python virtual environment and install dependencies
-2. Build a `MacWhisper.app` in `/Applications` with a native launcher that runs this folder's code
-3. Set up the Qwen3-ASR engine (`.venv-qwen`) and download its model
-4. Verify all dependencies are working
+`install.sh` does four things:
+1. Creates the app environment `venv` and installs the dependencies
+2. Builds `/Applications/MacWhisper.app`, a native launcher that runs the code in this folder
+3. Sets up the Qwen3-ASR speech engine in its own environment `.venv-qwen` and downloads the model (the longest step on first install)
+4. Checks that everything imports
 
-The app always runs the current code in this folder, so after `git pull` just relaunch it. Rebuild it with `make app` only if you move the folder or recreate `venv`. Building needs the Command Line Tools (`xcode-select --install`).
+If step 3 fails, the installer goes on; run `make qwen-setup` afterwards.
 
-#### Optional: Qwen3-ASR engine
+### 2. Build the system-audio helper (for Meeting Mode)
+
+Meeting Mode records both your microphone and the other people (system audio). System audio needs a small Swift helper that `install.sh` does not build yet:
 
 ```bash
-make qwen-setup        # or ./scripts/setup_qwen.sh
-./run.sh
+cd swift/SystemAudioHelper && swift build -c release && cd ../..
 ```
 
-This creates a separate environment `.venv-qwen` (needs [uv](https://docs.astral.sh/uv/) or Python 3.12) and downloads Qwen3-ASR 0.6B (~2.9 GB on disk; 1.7B is ~7.6 GB and downloads when first selected). The app's own environment is not changed. Once `.venv-qwen` exists, the next launch switches to **Qwen3 0.6B** automatically. Qwen3 runs as a separate background process; its log is `~/.macwhisper/logs/qwen_sidecar.log`.
+Without it, meetings record your microphone only. Push to Talk does not need it.
+
+### 3. Grant permissions, then launch
+
+Open **MacWhisper** from `/Applications`, then grant the permissions below. Relaunch after granting — macOS only applies them at startup.
 
 ### Required Permissions (Important!)
 
-MacWhisper needs **three** macOS permissions to function. **The app will not work without these.**
+Go to **System Settings → Privacy & Security** and turn on `MacWhisper` in:
 
-Go to **System Settings → Privacy & Security**:
+| Permission | Needed for |
+|---|---|
+| **Microphone** | Recording your voice (macOS asks on first use) |
+| **Accessibility** | Pasting the text into the app you are typing in |
+| **Input Monitoring** | Detecting the Right Option key and other shortcuts |
+| **Screen & System Audio Recording** | Meeting Mode only: hearing the other people |
 
-**1. Microphone**
-- Navigate to: Privacy & Security → Microphone
-- Toggle **ON** for `MacWhisper`
-- *Why: needed to record audio from your microphone*
+For Accessibility and Input Monitoring, click **+**, choose `MacWhisper` in `/Applications`, then turn it on.
 
-**2. Accessibility**
-- Navigate to: Privacy & Security → Accessibility
-- Click the **+** button, find and add `MacWhisper` from `/Applications`
-- Toggle **ON** for `MacWhisper`
-- *Why: needed to simulate Cmd+V to auto-paste transcribed text*
+> **Running from Terminal?** If you use `./run.sh` instead of the app, your **terminal app** (Terminal, iTerm, Warp, …) needs these permissions instead.
 
-**3. Input Monitoring**
-- Navigate to: Privacy & Security → Input Monitoring
-- Click the **+** button, find and add `MacWhisper` from `/Applications`
-- Toggle **ON** for `MacWhisper`
-- *Why: needed to detect the Right Option key as a global hotkey*
-
-> **Running from Terminal?** If you use `macwhisper-mlx` or `./run.sh` instead of the .app, you must also add your **terminal app** (Terminal, iTerm, Warp, etc.) to **all three** permission categories above.
-
-> **Permissions not taking effect?** Grant first, then start MacWhisper. Permissions are read when the app starts, so quit and relaunch it after granting. Check `~/.macwhisper/logs/macwhisper.log` for `Permissions (...): accessibility=True input_monitoring=True`. If a switch looks on but the log says `False`, quit MacWhisper, run `make reset-permissions`, and grant both again.
+> **Permissions not taking effect?** Quit and relaunch MacWhisper after granting. Check `~/.macwhisper/logs/macwhisper.log` for `Permissions (...): accessibility=True input_monitoring=True`. If a switch looks on but the log says `False`, quit MacWhisper, run `make reset-permissions`, and grant both again.
 >
 > **No "Meeting saved" banner?** The notification goes to Notification Center. To see a banner, open System Settings → Notifications → MacWhisper and choose **Banners** or **Alerts**. If you use a Focus mode, add MacWhisper to its allowed apps.
+
+### Updating
+
+```bash
+git pull
+```
+
+Then quit and relaunch MacWhisper — the app always runs the code in this folder. Run `make app` only if you move the folder or recreate `venv`, and rebuild the helper (step 2) if `swift/` changed.
+
+### Optional: local AI text cleanup
+
+**Settings → What gets pasted** can tidy the text with a local model (Qwen3-4B, ~4.2 GB, downloaded on first use). It is off by default. To use it:
+
+```bash
+make llm-setup
+```
+
+### Uninstall
+
+```bash
+rm -rf /Applications/MacWhisper.app     # the app
+rm -rf ~/.macwhisper                    # settings, logs, vocabulary, meeting transcripts
+```
+
+Then delete the cloned folder. Downloaded models stay in `~/.cache/huggingface/` until you remove them.
 
 ## Usage
 
