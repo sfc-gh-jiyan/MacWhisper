@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-一款轻量级 macOS 菜单栏语音转录工具，基于 [OpenAI Whisper](https://github.com/openai/whisper)，通过 [MLX](https://github.com/ml-explore/mlx) 在 Apple Silicon 上本地运行。
+一款轻量级 macOS 菜单栏工具，用于语音输入和会议记录，基于 [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR)，通过 [MLX](https://github.com/ml-explore/mlx) 在 Apple Silicon 上本地运行，中英文混说识别效果好。
 
 **按住快捷键，说话，松开 — 文字立即出现。** 无需云端 API，无需订阅，一切在本地完成。
 
@@ -41,25 +41,16 @@ cd MacWhisper
 ./install.sh
 ```
 
-`install.sh` 会做四件事：
+`install.sh` 会做五件事：
 1. 创建 App 的运行环境 `venv` 并安装依赖
 2. 生成 `/Applications/MacWhisper.app`，它运行的就是这个文件夹里的代码
 3. 在独立环境 `.venv-qwen` 里装好千问 Qwen3-ASR 语音引擎，并下载模型（第一次安装时最耗时的一步）
-4. 检查所有依赖都能正常导入
+4. 编译系统声音小程序，会议模式靠它录到对方的声音
+5. 检查所有依赖都能正常导入
 
-如果第 3 步失败，安装会继续往下走；之后运行 `make qwen-setup` 补上即可。
+如果第 3 或第 4 步失败，安装会继续往下走并提示你；之后运行 `make qwen-setup` 或 `make helper` 补上即可。没有系统声音小程序，会议只能录到你自己的麦克风。
 
-### 2. 编译系统声音小程序（会议模式需要）
-
-会议模式同时录你的麦克风和对方的声音（系统声音）。录系统声音需要一个 Swift 小程序，`install.sh` 目前还不会自动编译它：
-
-```bash
-cd swift/SystemAudioHelper && swift build -c release && cd ../..
-```
-
-没有它，会议只能录到你自己的麦克风。按住说话（Push to Talk）不需要它。
-
-### 3. 授予权限，然后启动
+### 2. 授予权限，然后启动
 
 从 `/Applications` 打开 **MacWhisper**，按下面的说明授予权限。授权后要退出再重新打开，macOS 只在启动时读取权限。
 
@@ -88,7 +79,7 @@ cd swift/SystemAudioHelper && swift build -c release && cd ../..
 git pull
 ```
 
-然后退出并重新打开 MacWhisper，App 始终运行这个文件夹里的代码。只有移动了文件夹或重建了 `venv` 时才需要运行 `make app`；如果 `swift/` 有改动，重新做一次第 2 步。
+然后退出并重新打开 MacWhisper，App 始终运行这个文件夹里的代码。只有移动了文件夹或重建了 `venv` 时才需要运行 `make app`；如果 `swift/` 有改动，运行 `make helper`。
 
 ### 可选：本地 AI 文字润色
 

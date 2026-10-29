@@ -45,18 +45,18 @@ echo "Python: $PY_VERSION (OK)"
 # ── Step 1: Python virtual environment ────────────────────
 
 if [ ! -d "$SCRIPT_DIR/venv" ]; then
-    echo "[1/5] Creating Python virtual environment..."
+    echo "[1/6] Creating Python virtual environment..."
     python3 -m venv "$SCRIPT_DIR/venv"
 else
-    echo "[1/5] Virtual environment already exists, skipping."
+    echo "[1/6] Virtual environment already exists, skipping."
 fi
 
-echo "[2/5] Installing dependencies (this may take a few minutes)..."
+echo "[2/6] Installing dependencies (this may take a few minutes)..."
 "$SCRIPT_DIR/venv/bin/pip" install --progress-bar on -r "$SCRIPT_DIR/requirements.txt"
 
 # ── Step 2: Create .app bundle ────────────────────────────
 
-echo "[3/5] Creating ${APP_NAME}.app bundle..."
+echo "[3/6] Creating ${APP_NAME}.app bundle..."
 
 # Native launcher (embeds CPython): permissions belong to MacWhisper.app,
 # not to Python or Terminal. See scripts/build_app.sh.
@@ -69,13 +69,19 @@ mkdir -p "$HOME/.macwhisper/audio"
 
 # ── Step 4: Qwen3-ASR engine (isolated .venv-qwen + model download) ──
 
-echo "[4/5] Setting up the Qwen3-ASR engine (first time downloads the model)..."
+echo "[4/6] Setting up the Qwen3-ASR engine (first time downloads the model)..."
 "$SCRIPT_DIR/scripts/setup_qwen.sh" \
     || echo "  ⚠  Qwen3-ASR setup failed. Run 'make qwen-setup' later (needs uv or python3.12)."
 
-# ── Step 5: Verify ────────────────────────────────────────
+# ── Step 5: System-audio helper (Meeting Mode hears the other people) ──
 
-echo "[5/5] Verifying installation..."
+echo "[5/6] Building the system-audio helper for Meeting Mode..."
+"$SCRIPT_DIR/scripts/build_helper.sh" \
+    || echo "  ⚠  Helper build failed: meetings will record your microphone only. Run 'make helper' later (needs: xcode-select --install)."
+
+# ── Step 6: Verify ────────────────────────────────────────
+
+echo "[6/6] Verifying installation..."
 "$SCRIPT_DIR/venv/bin/python3" -c "import rumps, pynput, sounddevice, pyperclip, certifi, opencc; print('All dependencies OK')"
 
 echo ""

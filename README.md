@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-A lightweight macOS menu bar app for real-time voice transcription and translation, powered by [OpenAI Whisper](https://github.com/openai/whisper) running locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx).
+A lightweight macOS menu bar app for dictation and meeting transcripts, powered by [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) running locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx). Strong on mixed Chinese and English speech.
 
 **Hold a key, speak, release — your words appear as text instantly.** No cloud API, no subscription, everything runs on-device.
 
@@ -42,25 +42,16 @@ cd MacWhisper
 ./install.sh
 ```
 
-`install.sh` does four things:
+`install.sh` does five things:
 1. Creates the app environment `venv` and installs the dependencies
 2. Builds `/Applications/MacWhisper.app`, a native launcher that runs the code in this folder
 3. Sets up the Qwen3-ASR speech engine in its own environment `.venv-qwen` and downloads the model (the longest step on first install)
-4. Checks that everything imports
+4. Builds the system-audio helper, which lets Meeting Mode hear the other people
+5. Checks that everything imports
 
-If step 3 fails, the installer goes on; run `make qwen-setup` afterwards.
+If step 3 or 4 fails, the installer goes on and tells you; run `make qwen-setup` or `make helper` afterwards. Without the helper, meetings record your microphone only.
 
-### 2. Build the system-audio helper (for Meeting Mode)
-
-Meeting Mode records both your microphone and the other people (system audio). System audio needs a small Swift helper that `install.sh` does not build yet:
-
-```bash
-cd swift/SystemAudioHelper && swift build -c release && cd ../..
-```
-
-Without it, meetings record your microphone only. Push to Talk does not need it.
-
-### 3. Grant permissions, then launch
+### 2. Grant permissions, then launch
 
 Open **MacWhisper** from `/Applications`, then grant the permissions below. Relaunch after granting — macOS only applies them at startup.
 
@@ -89,7 +80,7 @@ For Accessibility and Input Monitoring, click **+**, choose `MacWhisper` in `/Ap
 git pull
 ```
 
-Then quit and relaunch MacWhisper — the app always runs the code in this folder. Run `make app` only if you move the folder or recreate `venv`, and rebuild the helper (step 2) if `swift/` changed.
+Then quit and relaunch MacWhisper — the app always runs the code in this folder. Run `make app` only if you move the folder or recreate `venv`, and run `make helper` if `swift/` changed.
 
 ### Optional: local AI text cleanup
 
