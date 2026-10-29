@@ -1,4 +1,4 @@
-.PHONY: llm-setup smoke qa test test-full eval-meeting qwen-setup app reset-permissions
+.PHONY: llm-setup smoke qa test test-full eval-meeting qwen-setup app helper reset-permissions
 
 # Use venv python if available, else system python
 PYTHON := $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python)
@@ -25,6 +25,10 @@ reset-permissions:
 	./scripts/reset_permissions.sh
 
 # ── Qwen3-ASR sidecar env (isolated from the app venv) ──
+# ── System-audio helper for Meeting Mode (ScreenCaptureKit) ──
+helper:
+	./scripts/build_helper.sh
+
 qwen-setup:
 	./scripts/setup_qwen.sh
 
