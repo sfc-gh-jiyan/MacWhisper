@@ -14,7 +14,7 @@ import time
 import numpy as np
 
 import qwen_text
-from qwen_backend import QwenSidecarBackend, QwenUnavailable
+from qwen_backend import QwenBusy, QwenSidecarBackend, QwenUnavailable
 from stream_text import StableText
 from text_utils import convert_t2s
 
@@ -126,7 +126,7 @@ class QwenEngine:
             self._ok = False
 
     def transcribe_final(self, audio: np.ndarray, retry: bool = False,
-                         hotwords: bool = True) -> str:
+                         hotwords: bool = True, lock_timeout: float | None = None) -> str:
         """Final text for a whole utterance. Raises QwenUnavailable on failure.
 
         After a sidecar crash (started_ok but not ready) the backend restarts
@@ -134,12 +134,16 @@ class QwenEngine:
         request (e.g. a timeout) restarts the sidecar and tries the same audio
         once more — there is no other engine to fall back to.
         hotwords=False: transcribe without the vocabulary (meetings).
+        lock_timeout: raise QwenBusy instead of waiting longer for the engine
+        (never restarted: that would kill the request holding it).
         """
         if not self.started_ok or self.backend is None:
             raise QwenUnavailable(self.last_error or "Qwen3 engine not started")
         audio = np.asarray(audio, dtype=np.float32)
         try:
-            result = self._transcribe(audio, hotwords)
+            result = self._transcribe(audio, hotwords, lock_timeout)
+        except QwenBusy:
+            raise
         except QwenUnavailable as e:
             restart = getattr(self.backend, "restart", None)
             if not retry or restart is None:
@@ -147,15 +151,19 @@ class QwenEngine:
             logger.warning("Qwen3 final pass failed (%s) — restarting and retrying once", e)
             if not restart():
                 raise
-            result = self._transcribe(audio, hotwords)
+            result = self._transcribe(audio, hotwords, lock_timeout)
         return qwen_text.postprocess(result.text, strip_filler_words=self.strip_fillers,
                                      tight=self.tight)
 
-    def _transcribe(self, audio: np.ndarray, hotwords: bool):
-        # Only pass the switch when it is off: older/fake backends take audio alone
-        if hotwords:
-            return self.backend.transcribe(audio)
-        return self.backend.transcribe(audio, hotwords=False)
+    def _transcribe(self, audio: np.ndarray, hotwords: bool,
+                    lock_timeout: float | None = None):
+        # Only pass options that are set: older/fake backends take audio alone
+        kw = {}
+        if not hotwords:
+            kw["hotwords"] = False
+        if lock_timeout is not None:
+            kw["lock_timeout"] = lock_timeout
+        return self.backend.transcribe(audio, **kw)
 
 
 

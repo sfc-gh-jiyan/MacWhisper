@@ -118,7 +118,7 @@ import vocab_miner
 import vocabulary
 import quit_guard
 import single_instance
-from qwen_backend import QwenUnavailable
+from qwen_backend import QwenBusy, QwenUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +275,9 @@ AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
 # Push to Talk recordings Qwen3 could not transcribe (menu: Retry Last Failed Recording)
 FAILED_DIR = os.path.join(_DATA_DIR, "failed")
 QWEN_WAIT_S = 60.0       # a dictation right after launch waits this long for Qwen3 to load
+PTT_ENGINE_WAIT_S = 15.0 # a dictation never queues longer than this behind another request
+FINAL_PASS_S_PER_AUDIO_S = 0.07  # meeting final pass speed seen in logs (1321s audio in 80s)
+FINALIZING_NOTICE_EVERY_S = 10.0
 TRANSCRIPT_LOG = os.path.join(_DATA_DIR, "transcripts.jsonl")
 VOCAB_PATH = os.path.join(_DATA_DIR, "vocabulary.json")
 CORRECTIONS_REPORT_PATH = os.path.join(_DATA_DIR, "corrections.md")
@@ -1121,6 +1124,14 @@ class TranscriberApp(rumps.App):
         An active meeting is saved (live transcript) with a short wait; the
         Qwen3 full pass is skipped — there is no time for it at quit.
         """
+        finalizing = getattr(self, "_finalizing_session", None)
+        if finalizing is not None and getattr(self, "_meeting_finalizing", None):
+            # Quit cuts the final pass short: keep its audio so it can be redone
+            try:
+                saved = self._keep_meeting_audio(finalizing)
+                logger.warning("Quit during the meeting final pass — audio kept: %s", saved)
+            except Exception:
+                logger.exception("Keeping the meeting audio at quit failed")
         session = getattr(self, "_meeting_session", None)
         if session is not None:
             try:
@@ -1188,6 +1199,9 @@ class TranscriberApp(rumps.App):
             return
         if self.recording:
             print("[WARN] Cannot start meeting while hold-to-record is active")
+            return
+        if getattr(self, "_meeting_finalizing", None):
+            self._notify_finalizing("A new meeting")
             return
 
         if getattr(self, "_qwen", None) is None:
@@ -1296,6 +1310,15 @@ class TranscriberApp(rumps.App):
         outage = bool(getattr(session, "had_engine_outage", False))
         if path and getattr(self, "_qwen", None) is not None and (
                 getattr(self, "meeting_final_pass", True) or outage):
+            try:   # wall-clock length: no second copy of the meeting audio
+                seconds = max(0.0, time.time() - float(session._meeting_start))
+            except (AttributeError, TypeError, ValueError):
+                seconds = 0.0
+            # Set before the thread starts: no press can slip in between
+            self._meeting_finalizing = (time.monotonic(), seconds)
+            self._finalizing_session = session
+            logger.warning("Push to Talk paused for the meeting final pass (%.0fs audio, ~%d min)",
+                           seconds, self._finalizing_minutes_left())
             threading.Thread(target=self._meeting_final_pass, args=(session,),
                              daemon=True, name="meeting-final-pass").start()
         elif session is not None:
@@ -1386,7 +1409,28 @@ class TranscriberApp(rumps.App):
                 self._reporter.report(f"meeting final transcript (the live transcript is saved).{where}", e)
             self._set_status("Meeting saved (live transcript only)")
         finally:
+            self._meeting_finalizing = None
+            self._finalizing_session = None
+            logger.warning("Meeting final pass finished — Push to Talk available again")
             session.release_audio()
+
+    def _finalizing_minutes_left(self) -> int:
+        """Rough minutes left in the meeting final pass (at least 1)."""
+        started, seconds = getattr(self, "_meeting_finalizing", None) or (time.monotonic(), 0.0)
+        left = seconds * FINAL_PASS_S_PER_AUDIO_S - (time.monotonic() - started)
+        return max(1, -int(-left // 60))   # round up: never promise too soon
+
+    def _notify_finalizing(self, what: str) -> None:
+        """Tell the user why a press did nothing (at most every few seconds)."""
+        now = time.monotonic()
+        if now - getattr(self, "_finalizing_notified_at", -1e9) < FINALIZING_NOTICE_EVERY_S:
+            return
+        self._finalizing_notified_at = now
+        minutes = self._finalizing_minutes_left()
+        logger.warning("%s blocked: meeting final pass running (~%d min left)", what, minutes)
+        self._notify("MacWhisper — meeting final transcript in progress",
+                     f"{what} is paused until it is ready",
+                     f"About {minutes} min left")
 
     def _meeting_overlay_update(self, confirmed, unconfirmed, segments, debug=None):
         """Callback from MeetingSession to update overlay."""
@@ -1533,9 +1577,12 @@ class TranscriberApp(rumps.App):
                     shortcuts.event_spec(key, self._held_mods), self.shortcuts):
                 mode = None   # ⇧+key is a user shortcut: let the combo handler take it
             if not self.recording and mode:
-                # Block hold-to-record during active meeting
+                # Block hold-to-record during an active meeting and its final
+                # pass: both use the single Qwen3 engine (2026-10-29)
                 if self._meeting_session and self._meeting_session.is_recording:
                     pass
+                elif getattr(self, "_meeting_finalizing", None):
+                    self._notify_finalizing("Push to Talk")
                 else:
                     self._ptt_cancelled = False
                     self._ptt_mode = mode
@@ -1912,13 +1959,23 @@ class TranscriberApp(rumps.App):
                         self._qwen_start_failed_at = time.monotonic()
                         raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
             t0 = time.time()
-            text = (qwen.transcribe_final(audio_float, retry=True) if hotwords else
+            text = (qwen.transcribe_final(audio_float, retry=True,
+                                          lock_timeout=PTT_ENGINE_WAIT_S) if hotwords else
                     qwen.transcribe_final(audio_float, retry=True, hotwords=False))
             self._qwen_recovered()
             print(f"[INFO] Final transcription (Qwen3): {time.time() - t0:.1f}s "
                   f"for {duration:.1f}s audio")
             print(f"[INFO] Result: {text}")
             return text, model
+        except QwenBusy as e:
+            # Engine healthy but held by another request: keep the dictation,
+            # no outage alert (2026-10-29: one was lost waiting with no timeout)
+            path = self._save_failed_audio(audio_int16) if keep_on_fail else None
+            logger.warning("Dictation not transcribed (%s) — saved: %s", e, path)
+            self._set_status("Not transcribed — engine busy, saved (menu: Retry Last Failed Recording)")
+            self._notify("MacWhisper — not transcribed (engine busy)", "Recording saved",
+                         "Menu → Retry Last Failed Recording")
+            return "", model
         except QwenUnavailable as e:
             path = self._save_failed_audio(audio_int16) if keep_on_fail else None
             where = (f" Recording saved: {path} — menu → Retry Last Failed Recording." if path

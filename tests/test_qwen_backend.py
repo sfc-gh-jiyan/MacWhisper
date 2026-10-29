@@ -195,3 +195,15 @@ def test_explicit_restart_after_timeout(tmp_path):
         assert b.is_ready
     finally:
         b.close()
+
+
+def test_busy_engine_raises_qwen_busy_after_lock_timeout(tmp_path):
+    """2026-10-29: a dictation waited forever behind a 77-min meeting final pass."""
+    b = _backend(tmp_path)
+    b._lock.acquire()                      # a long request holds the engine
+    try:
+        with pytest.raises(qb.QwenBusy):
+            b.transcribe(_audio(1), lock_timeout=0.2)
+    finally:
+        b._lock.release()
+    assert issubclass(qb.QwenBusy, qb.QwenUnavailable)
