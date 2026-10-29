@@ -258,3 +258,38 @@ def test_concurrent_starts_for_same_model_load_once():
     t.join(3)
     assert results == [True] and eng.wait_ready(1) is True
     assert len(made) == 1                              # loaded once, not twice
+
+
+class BusyBackend(FakeBackend):
+    def __init__(self):
+        super().__init__()
+        self.restarts = 0
+
+    def transcribe(self, audio, **kw):
+        self.kw = kw
+        from qwen_backend import QwenBusy
+        raise QwenBusy("Qwen3 is busy")
+
+    def restart(self):
+        self.restarts += 1
+        return True
+
+
+def test_busy_engine_is_never_restarted_or_retried():
+    """Restarting would kill the meeting final pass that holds the engine."""
+    from qwen_backend import QwenBusy
+    backend = BusyBackend()
+    eng = qe.QwenEngine(backend_factory=lambda repo: backend)
+    eng.start("m")
+    with pytest.raises(QwenBusy):
+        eng.transcribe_final(np.zeros(16000, dtype=np.float32), retry=True, lock_timeout=15)
+    assert backend.restarts == 0 and backend.kw.get("lock_timeout") == 15
+
+
+def test_lock_timeout_not_sent_when_unset():
+    """Older/fake backends take audio alone."""
+    backend = FakeBackend(text="好")
+    eng = qe.QwenEngine(backend_factory=lambda repo: backend)
+    eng.start("m")
+    eng.transcribe_final(np.zeros(16000, dtype=np.float32))
+    assert "lock_timeout" not in backend.kw

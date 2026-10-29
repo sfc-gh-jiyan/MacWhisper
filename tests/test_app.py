@@ -8,6 +8,7 @@ import json
 import os
 import queue
 import threading
+import time
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -1378,7 +1379,7 @@ class _FakeQwen:
         self.model_repo = "mlx-community/Qwen3-ASR-0.6B-bf16"
         self.last_error = ""
 
-    def transcribe_final(self, audio, retry=False, hotwords=True):
+    def transcribe_final(self, audio, retry=False, hotwords=True, lock_timeout=None):
         self.calls += 1
         self.retry = retry
         self.hotwords = hotwords
@@ -2947,3 +2948,111 @@ def test_end_talk_overlay_keeps_a_meeting_overlay(monkeypatch):
     inst._end_talk_overlay()
     _drain(queue)
     assert destroyed == [] and inst._overlay_panel is panels[0]
+
+
+# ── 2026-10-29: Push to Talk during the meeting final pass ──
+# The final pass of a 77-min meeting held the single Qwen3 engine; a dictation
+# queued behind it with no timeout, showed nothing and was lost.
+
+def test_push_to_talk_is_paused_during_meeting_final_pass(monkeypatch):
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._notify = MagicMock()
+    inst._meeting_finalizing = (time.monotonic(), 4615.0)
+    _press(inst, Key.alt_r)
+    _release(inst, Key.alt_r)
+    _press(inst, Key.alt_r)                                # second press: no new notice
+    inst._start_recording.assert_not_called()
+    inst._notify.assert_called_once()
+    assert "min" in inst._notify.call_args[0][2]
+    inst._meeting_finalizing = None
+    _release(inst, Key.alt_r)
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_called_once()
+
+
+def test_finalizing_minutes_left_estimate():
+    inst = _hotkey_app()
+    now = time.monotonic()
+    inst._meeting_finalizing = (now - 60, 4615.0)       # ~5.4 min expected, 1 min gone
+    assert inst._finalizing_minutes_left() == 5
+    inst._meeting_finalizing = (now - 3600, 4615.0)     # overrun: never 0 or negative
+    assert inst._finalizing_minutes_left() == 1
+
+
+def test_stop_meeting_marks_finalizing_before_the_final_pass_starts():
+    import app
+    inst = _meeting_app(in_meeting=True)
+    inst._qwen = _FakeQwen()
+    inst._idle_icon = "🎙"
+    inst.item_meeting = MagicMock()
+    inst._notify = MagicMock()
+    session = inst._meeting_session
+    session.stop.return_value = "text"
+    session.transcript_path = "/tmp/x.md"
+    session.segments = []
+    session._meeting_start = time.time() - 90
+    seen = {}
+    inst._meeting_final_pass = lambda s: seen.setdefault("flag", inst._meeting_finalizing)
+
+    class SyncThread:
+        def __init__(self, target, args=(), **kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+    with patch.object(app.pyperclip, "copy"), patch.object(app.threading, "Thread", SyncThread):
+        inst._stop_meeting()
+    assert seen["flag"] is not None and 89 <= seen["flag"][1] <= 91
+    session.mixed_audio.assert_not_called()               # no extra 300 MB copy
+
+
+def test_final_pass_clears_finalizing_on_success_and_failure():
+    for fail in (False, True):
+        inst, session = _final_pass_app(_FakeQwen(fail=fail))
+        inst._meeting_finalizing = (time.monotonic(), 5.0)
+        inst._meeting_final_pass(session)
+        assert inst._meeting_finalizing is None
+
+
+def test_meeting_cannot_start_during_final_pass():
+    inst = _meeting_app()
+    inst.recording = False
+    inst._notify = MagicMock()
+    inst._meeting_finalizing = (time.monotonic(), 600.0)
+    inst._start_meeting()
+    assert inst._meeting_session is None
+    inst._notify.assert_called_once()
+
+
+def test_busy_engine_saves_the_dictation_instead_of_waiting():
+    """Never lose a dictation: a busy engine gives up after a few seconds."""
+    import app
+    from qwen_backend import QwenBusy
+
+    class BusyQwen(_FakeQwen):
+        def transcribe_final(self, audio, retry=False, hotwords=True, lock_timeout=None):
+            self.lock_timeout = lock_timeout
+            raise QwenBusy("Qwen3 is busy")
+    q = BusyQwen()
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    inst._set_status = MagicMock()
+    inst._qwen_failed = MagicMock()
+    audio = np.zeros(16000 * 9, dtype=np.float32)
+    text, _ = inst._final_text(audio, (audio * 32767).astype(np.int16))
+    assert text == "" and q.lock_timeout == app.PTT_ENGINE_WAIT_S
+    assert os.listdir(app.FAILED_DIR)                      # recording kept
+    inst._qwen_failed.assert_not_called()                  # engine is fine: no outage alert
+    inst._notify.assert_called_once()
+
+
+def test_quit_during_final_pass_keeps_the_meeting_audio():
+    inst = _quit_app(in_meeting=False)
+    session = MagicMock()
+    inst._finalizing_session = session
+    inst._meeting_finalizing = (time.monotonic(), 600.0)
+    inst._keep_meeting_audio = MagicMock(return_value="/tmp/failed/meeting.wav")
+    inst._quit_cleanup(MagicMock())
+    inst._keep_meeting_audio.assert_called_once_with(session)

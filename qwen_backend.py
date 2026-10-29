@@ -37,6 +37,14 @@ class QwenUnavailable(RuntimeError):
     """Qwen3-ASR could not serve this request (the caller keeps the audio)."""
 
 
+class QwenBusy(QwenUnavailable):
+    """Another request (e.g. a long meeting final pass) holds the engine.
+
+    The engine is healthy: never restart or retry on this — a restart would
+    kill the request that holds it.
+    """
+
+
 def default_python_path(repo_root: str = _REPO_ROOT) -> str:
     return os.path.join(repo_root, ".venv-qwen", "bin", "python")
 
@@ -197,6 +205,7 @@ class QwenSidecarBackend(ASRBackend):
         initial_prompt: str | None = None,
         task: str = "transcribe",
         hotwords: bool = True,
+        lock_timeout: float | None = None,
     ) -> TranscriptionResult:
         """Transcribe via the sidecar. Raises QwenUnavailable on any failure.
 
@@ -207,43 +216,52 @@ class QwenSidecarBackend(ASRBackend):
         """
         if task != "transcribe":
             raise QwenUnavailable("Qwen3-ASR does not translate")
-        with self._lock:
-            self._ensure_running_locked()
-            pcm = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
-            pcm16 = (pcm * 32767.0).astype(np.int16)
-            self._next_id += 1
-            rid = self._next_id
-            req = {"id": rid, "cmd": "transcribe",
-                   "pcm16_b64": base64.b64encode(pcm16.tobytes()).decode("ascii")}
-            if hotwords and self.hotwords:
-                req["hotwords"] = list(self.hotwords)
-            duration = len(pcm16) / SAMPLE_RATE
-            timeout = self.base_timeout_s + self.per_audio_s * duration
-            t0 = time.time()
-            try:
-                self._proc.stdin.write(json.dumps(req) + "\n")
-                self._proc.stdin.flush()
-            except (OSError, ValueError) as e:
-                self._fail_locked(f"sidecar pipe broken: {e}")
-            while True:
-                msg = self._wait_line(timeout)
-                if msg is None:
-                    self._fail_locked(f"Qwen3 request timed out after {timeout:.0f}s")
-                if msg.get("event") == "exit":
-                    self._fail_locked("Qwen3 sidecar exited unexpectedly")
-                if msg.get("id") == rid:
-                    break
-            if not msg.get("ok"):
-                # Model error inside a live sidecar: keep the process, fail this request
-                self.last_error = msg.get("error", "unknown error")
-                raise QwenUnavailable(f"Qwen3 error: {self.last_error}")
-            if (self.restarts and self._ready_since is not None
-                    and time.monotonic() - self._ready_since >= self.healthy_reset_s):
-                logger.info("Qwen sidecar healthy again — restart budget refilled")
-                self.restarts = 0
-            logger.debug("Qwen transcribe %.1fs audio in %.2fs (infer %.2fs)",
-                         duration, time.time() - t0, msg.get("infer_s", 0))
-            return TranscriptionResult(text=(msg.get("text") or "").strip(), language="zh")
+        # lock_timeout: give up instead of queueing behind a long request
+        if not self._lock.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
+            logger.warning("Qwen3 busy: waited %.0fs for the engine — giving up", lock_timeout)
+            raise QwenBusy(f"Qwen3 is busy (still working after {lock_timeout:.0f}s)")
+        try:
+            return self._transcribe_locked(audio, hotwords)
+        finally:
+            self._lock.release()
+
+    def _transcribe_locked(self, audio: np.ndarray, hotwords: bool) -> TranscriptionResult:
+        self._ensure_running_locked()
+        pcm = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
+        pcm16 = (pcm * 32767.0).astype(np.int16)
+        self._next_id += 1
+        rid = self._next_id
+        req = {"id": rid, "cmd": "transcribe",
+               "pcm16_b64": base64.b64encode(pcm16.tobytes()).decode("ascii")}
+        if hotwords and self.hotwords:
+            req["hotwords"] = list(self.hotwords)
+        duration = len(pcm16) / SAMPLE_RATE
+        timeout = self.base_timeout_s + self.per_audio_s * duration
+        t0 = time.time()
+        try:
+            self._proc.stdin.write(json.dumps(req) + "\n")
+            self._proc.stdin.flush()
+        except (OSError, ValueError) as e:
+            self._fail_locked(f"sidecar pipe broken: {e}")
+        while True:
+            msg = self._wait_line(timeout)
+            if msg is None:
+                self._fail_locked(f"Qwen3 request timed out after {timeout:.0f}s")
+            if msg.get("event") == "exit":
+                self._fail_locked("Qwen3 sidecar exited unexpectedly")
+            if msg.get("id") == rid:
+                break
+        if not msg.get("ok"):
+            # Model error inside a live sidecar: keep the process, fail this request
+            self.last_error = msg.get("error", "unknown error")
+            raise QwenUnavailable(f"Qwen3 error: {self.last_error}")
+        if (self.restarts and self._ready_since is not None
+                and time.monotonic() - self._ready_since >= self.healthy_reset_s):
+            logger.info("Qwen sidecar healthy again — restart budget refilled")
+            self.restarts = 0
+        logger.debug("Qwen transcribe %.1fs audio in %.2fs (infer %.2fs)",
+                     duration, time.time() - t0, msg.get("infer_s", 0))
+        return TranscriptionResult(text=(msg.get("text") or "").strip(), language="zh")
 
     def _ensure_running_locked(self) -> None:
         if self.is_ready:
