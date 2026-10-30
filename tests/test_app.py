@@ -3056,3 +3056,83 @@ def test_quit_during_final_pass_keeps_the_meeting_audio():
     inst._keep_meeting_audio = MagicMock(return_value="/tmp/failed/meeting.wav")
     inst._quit_cleanup(MagicMock())
     inst._keep_meeting_audio.assert_called_once_with(session)
+
+
+# ── 2026-10-29 21:32: stream.stop() hung inside PortAudio/CoreAudio ──
+# Release never got past closing the mic: no transcription, the mic stayed
+# on until the app was killed, and every later press recorded 0 frames.
+
+class _HangingStream:
+    def __init__(self):
+        self.release = threading.Event()
+        self.closed = False
+
+    def stop(self):
+        self.release.wait(10)          # stuck in the audio layer
+
+    def close(self):
+        self.closed = True
+
+
+def _stuck_mic_app(monkeypatch):
+    import app
+    monkeypatch.setattr(app.TranscriberApp, "MIC_CLOSE_TIMEOUT_S", 0.2)
+    inst = _bare_app()
+    inst._notify = MagicMock()
+    inst.stream = _HangingStream()
+    return inst
+
+
+def test_hanging_mic_close_returns_in_time_and_alerts(monkeypatch, caplog):
+    inst = _stuck_mic_app(monkeypatch)
+    stream = inst.stream
+    t0 = time.monotonic()
+    with caplog.at_level("WARNING"):
+        ok = inst._close_mic_stream()
+    assert ok is False and time.monotonic() - t0 < 2
+    assert inst._mic_stuck is True and inst.stream is None
+    inst._notify.assert_called_once()
+    assert "restart" in " ".join(inst._notify.call_args[0]).lower()
+    # evidence next time: the stuck thread and the line it is stuck on
+    assert "Thread dump" in caplog.text and "--- mic-close" in caplog.text
+    assert "stuck in the audio layer" in caplog.text
+    stream.release.set()
+
+
+def test_normal_mic_close_is_quiet(monkeypatch):
+    inst = _stuck_mic_app(monkeypatch)
+    inst.stream = MagicMock()
+    assert inst._close_mic_stream() is True
+    assert getattr(inst, "_mic_stuck", False) is False
+    inst._notify.assert_not_called()
+
+
+def test_release_still_transcribes_when_mic_close_hangs(monkeypatch):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: None)
+    inst = _stuck_mic_app(monkeypatch)
+    stream = inst.stream
+    inst.recording = True
+    inst.frames = [np.zeros((1024, 1), dtype=np.int16)] * 32      # ~2 s of speech
+    inst._overlay_panel = None
+    inst._live_loop_done = threading.Event()
+    inst._live_loop_done.set()
+    inst._qwen_live_text = ""
+    inst._set_title = MagicMock()
+    inst._set_status = MagicMock()
+    inst.transcribe_queue = MagicMock()
+    inst._stop_and_transcribe()
+    frames = inst.transcribe_queue.put.call_args[0][0][0]
+    assert len(frames) == 32                                  # the words are not lost
+    stream.release.set()
+
+
+def test_press_while_mic_stuck_does_not_record_and_says_why(monkeypatch):
+    from pynput.keyboard import Key
+    _run_sync_threads(monkeypatch)
+    inst = _hotkey_app()
+    inst._notify = MagicMock()
+    inst._mic_stuck = True
+    _press(inst, Key.alt_r)
+    inst._start_recording.assert_not_called()
+    inst._notify.assert_called_once()
