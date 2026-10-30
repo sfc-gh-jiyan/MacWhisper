@@ -19,6 +19,7 @@ import time
 import queue
 import subprocess
 import sys
+import traceback
 import glob
 import wave
 import datetime
@@ -1583,6 +1584,12 @@ class TranscriberApp(rumps.App):
                     pass
                 elif getattr(self, "_meeting_finalizing", None):
                     self._notify_finalizing("Push to Talk")
+                elif getattr(self, "_mic_stuck", False):
+                    # A new stream records 0 frames until the app restarts
+                    logger.warning("Push to Talk blocked: microphone stuck since a hung close")
+                    self._notify("MacWhisper — microphone stuck",
+                                 "Please restart MacWhisper (menu → Quit, then open it)",
+                                 "Push to Talk is paused until then")
                 else:
                     self._ptt_cancelled = False
                     self._ptt_mode = mode
@@ -1766,17 +1773,50 @@ class TranscriberApp(rumps.App):
             stream.start()
             logger.debug("Mic stream started (gen %s)", gen)
 
-    def _close_mic_stream(self):
-        """Stop and close the mic stream (idempotent, thread-safe)."""
+    MIC_CLOSE_TIMEOUT_S = 2.0
+
+    def _close_mic_stream(self) -> bool:
+        """Stop and close the mic stream (idempotent, thread-safe).
+
+        Returns False if closing hung. 2026-10-29: stream.stop() never returned
+        inside PortAudio/CoreAudio, so release never reached transcription and
+        every later press recorded 0 frames. Closing now runs on its own thread
+        and is abandoned after MIC_CLOSE_TIMEOUT_S; the recording goes on.
+        """
         with self._stream_lock:
             stream, self.stream = self.stream, None
         if stream is None:
-            return
-        try:
-            stream.stop()
-            stream.close()
-        except Exception as e:
-            self._reporter.report("closing the microphone", e)
+            return True
+
+        def close():
+            try:
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                self._reporter.report("closing the microphone", e)
+        t = threading.Thread(target=close, daemon=True, name="mic-close")
+        t.start()
+        t.join(self.MIC_CLOSE_TIMEOUT_S)
+        if not t.is_alive():
+            return True
+        self._mic_stuck = True
+        logger.error("Closing the microphone hung for %.0fs — abandoned it; "
+                     "the audio layer is stuck until MacWhisper restarts",
+                     self.MIC_CLOSE_TIMEOUT_S)
+        self._log_thread_dump("mic close hung")
+        self._notify("MacWhisper — microphone stuck",
+                     "Please restart MacWhisper (menu → Quit, then open it)",
+                     "This dictation is still being transcribed")
+        return False
+
+    def _log_thread_dump(self, why: str) -> None:
+        """Write every thread's stack to the log: evidence for a hang."""
+        names = {t.ident: t.name for t in threading.enumerate()}
+        parts = [f"Thread dump ({why}):"]
+        for ident, frame in sys._current_frames().items():
+            parts.append(f"--- {names.get(ident, '?')} ({ident})")
+            parts.append("".join(traceback.format_stack(frame)).rstrip())
+        logger.warning("\n".join(parts))
 
     def _stop_and_transcribe(self):
         self.recording = False
