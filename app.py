@@ -18,6 +18,7 @@ import os
 import time
 import queue
 import subprocess
+import shlex
 import sys
 import traceback
 import glob
@@ -1703,7 +1704,8 @@ class TranscriberApp(rumps.App):
         if not self.recording:
             return
         self.recording = False
-        self._close_mic_stream()
+        if not self._close_mic_stream():
+            self._restart_when_idle()
         self._end_talk_overlay()
         self.frames = []   # new list: the Qwen live loop exits on identity change
         self._set_title(self._idle_icon)
@@ -1818,12 +1820,80 @@ class TranscriberApp(rumps.App):
             parts.append("".join(traceback.format_stack(frame)).rstrip())
         logger.warning("\n".join(parts))
 
+    # ── Auto-restart after a stuck microphone ─────────────────
+    # Only a restart clears a hung PortAudio/CoreAudio stream (2026-11-06:
+    # Pa_StopStream never returned). Runs only after a hung close.
+
+    RESTART_POLL_S = 5.0
+
+    def _restart_when_idle(self) -> None:
+        """Schedule one self-restart; it waits for meetings to finish."""
+        if getattr(self, "_restart_started", False):
+            return
+        self._restart_started = True
+        logger.warning("Microphone stuck — MacWhisper will restart itself when idle")
+        threading.Thread(target=self._restart_worker, daemon=True,
+                         name="mic-stuck-restart").start()
+
+    def _restart_worker(self) -> None:
+        def busy():
+            session = getattr(self, "_meeting_session", None)
+            return bool((session and session.is_recording)
+                        or getattr(self, "_meeting_finalizing", None))
+        while busy():
+            logger.info("Restart waits for the meeting to finish")
+            time.sleep(self.RESTART_POLL_S)
+        app_path = self._app_bundle_path()
+        if app_path is None:
+            # ./run.sh: a terminal session cannot be reopened from here
+            logger.warning("Not running as MacWhisper.app — no auto-restart")
+            return
+        self._set_status("Microphone stuck — restarting…")
+        AppHelper.callAfter(self._show_restart_overlay)
+        self._notify("MacWhisper — microphone stuck", "Restarting MacWhisper…",
+                     "It will be back in a few seconds")
+        pid = os.getpid()
+        logger.warning("Relaunching %s (old pid %d)", app_path, pid)
+        subprocess.Popen(["/bin/sh", "-c", self._relaunch_script(pid, app_path)],
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        AppHelper.callAfter(rumps.quit_application)
+
+    @staticmethod
+    def _relaunch_script(pid: int, app_path: str) -> str:
+        """Wait for this process to exit (kill it if a stuck stream blocks
+        exit), reopen the app, and tell the user if it did not come back
+        (Airlock can block a launch)."""
+        app = shlex.quote(app_path)
+        exe = shlex.quote(f"{app_path}/Contents/MacOS/")
+        note = ("display notification \"The microphone was stuck and MacWhisper "
+                "could not reopen itself. Please open it.\" with title \"MacWhisper\"")
+        return (f"for i in $(seq 1 20); do kill -0 {pid} 2>/dev/null || break; sleep 0.5; done; "
+                f"kill -9 {pid} 2>/dev/null; sleep 1; "
+                f"open {app}; sleep 20; "
+                f"pgrep -f {exe} >/dev/null || osascript -e {shlex.quote(note)}")
+
+    def _app_bundle_path(self) -> str | None:
+        """/Applications/MacWhisper.app when this process is the app's launcher."""
+        try:
+            exe = subprocess.run(["ps", "-o", "comm=", "-p", str(os.getpid())],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            return None
+        marker = ".app/Contents/MacOS/"
+        return exe.split(marker)[0] + ".app" if marker in exe else None
+
+    def _show_restart_overlay(self) -> None:
+        panel, text_view = create_overlay(mode="talk", frame_path=OVERLAY_FRAME_PATH)
+        if panel:
+            update_overlay(panel, text_view, "Microphone stuck — restarting MacWhisper…", "")
+
     def _stop_and_transcribe(self):
         self.recording = False
         print(f"[INFO] Recording stopped, frames: {len(self.frames)}")
 
         # ── 1. Stop audio stream IMMEDIATELY (no more data for live loop) ──
-        self._close_mic_stream()
+        mic_ok = self._close_mic_stream()
 
         # ── 2. Destroy overlay IMMEDIATELY so user sees instant response ──
         self._end_talk_overlay()
@@ -1846,10 +1916,15 @@ class TranscriberApp(rumps.App):
         if not self.frames:
             self._set_title(self._idle_icon)
             self._set_status("Ready")
+            if not mic_ok:
+                self._restart_when_idle()
             return
 
         self._set_title("💬")
         self._set_status("Transcribing...")
+        if not mic_ok:
+            # Restart only after this dictation is transcribed and pasted
+            self._restart_pending = True
         self.transcribe_queue.put((list(self.frames), realtime_text,
                                    getattr(self, "_ptt_mode", "dictate")))
         self.frames = []  # release memory immediately
@@ -1973,6 +2048,10 @@ class TranscriberApp(rumps.App):
                 self.transcribe_queue.task_done()
                 self._set_title(self._idle_icon)
                 self._set_status("Ready")
+                if (getattr(self, "_restart_pending", False)
+                        and self.transcribe_queue.unfinished_tasks == 0):
+                    self._restart_pending = False
+                    self._restart_when_idle()
 
     def _final_text(self, audio_float, audio_int16, keep_on_fail=True, hotwords=True):
         """Final text for one utterance -> (text, model_used). Qwen3 only.
