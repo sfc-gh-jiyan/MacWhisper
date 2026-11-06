@@ -3136,3 +3136,135 @@ def test_press_while_mic_stuck_does_not_record_and_says_why(monkeypatch):
     _press(inst, Key.alt_r)
     inst._start_recording.assert_not_called()
     inst._notify.assert_called_once()
+
+
+# ── Auto-restart after a stuck microphone (2026-11-06 17:12) ──
+# Only a restart clears the stuck audio layer. It happens only after a hung
+# close, after the current dictation is transcribed, never during a meeting.
+
+def _stop_app(monkeypatch, close_ok, frames=32):
+    import app
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: None)
+    inst = _bare_app()
+    inst._close_mic_stream = MagicMock(return_value=close_ok)
+    inst.recording = True
+    inst.frames = [np.zeros((1024, 1), dtype=np.int16)] * frames
+    inst._overlay_panel = None
+    inst._live_loop_done = threading.Event()
+    inst._live_loop_done.set()
+    inst._qwen_live_text = ""
+    inst._set_title = MagicMock()
+    inst._set_status = MagicMock()
+    inst._idle_icon = "🎙"
+    inst.transcribe_queue = MagicMock()
+    inst._restart_when_idle = MagicMock()
+    return inst
+
+
+def test_hung_close_restarts_after_the_dictation_not_before(monkeypatch):
+    inst = _stop_app(monkeypatch, close_ok=False)
+    inst._stop_and_transcribe()
+    inst.transcribe_queue.put.assert_called_once()
+    assert inst._restart_pending is True
+    inst._restart_when_idle.assert_not_called()          # the worker triggers it
+
+
+def test_hung_close_without_audio_restarts_right_away(monkeypatch):
+    inst = _stop_app(monkeypatch, close_ok=False, frames=0)
+    inst._stop_and_transcribe()
+    inst._restart_when_idle.assert_called_once()
+
+
+def test_normal_release_never_restarts(monkeypatch):
+    inst = _stop_app(monkeypatch, close_ok=True)
+    inst._stop_and_transcribe()
+    assert not getattr(inst, "_restart_pending", False)
+    inst._restart_when_idle.assert_not_called()
+
+
+def test_worker_restarts_once_the_pending_dictation_is_done():
+    import queue as _queue
+    inst = _bare_app()
+    inst.transcribe_queue = _queue.Queue()
+    inst._do_transcribe = MagicMock()
+    inst._set_title = MagicMock()
+    inst._set_status = MagicMock()
+    inst._idle_icon = "🎙"
+    inst._restart_pending = True
+    done = threading.Event()
+    inst._restart_when_idle = MagicMock(side_effect=lambda: done.set())
+    inst.transcribe_queue.put(([np.zeros((1024, 1), dtype=np.int16)], "", "dictate"))
+    threading.Thread(target=inst._transcription_worker, daemon=True).start()
+    assert done.wait(3)
+    inst._do_transcribe.assert_called_once()              # pasted first
+    assert inst._restart_pending is False
+
+
+def _restart_app(monkeypatch, as_app=True):
+    import app
+    inst = _bare_app()
+    inst._notify = MagicMock()
+    inst._set_status = MagicMock()
+    inst._meeting_session = None
+    inst._meeting_finalizing = None
+    calls = {"popen": [], "quit": 0, "overlay": 0}
+    monkeypatch.setattr(app.TranscriberApp, "_app_bundle_path",
+                        lambda self: "/Applications/MacWhisper.app" if as_app else None)
+    monkeypatch.setattr(app.subprocess, "Popen",
+                        lambda cmd, **kw: calls["popen"].append((cmd, kw)))
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: fn(*a))
+    monkeypatch.setattr(app.rumps, "quit_application",
+                        lambda *a: calls.__setitem__("quit", calls["quit"] + 1))
+    inst._show_restart_overlay = lambda: calls.__setitem__("overlay", calls["overlay"] + 1)
+    return inst, calls
+
+
+def test_restart_waits_for_a_meeting_and_its_final_pass(monkeypatch):
+    import app
+    inst, calls = _restart_app(monkeypatch)
+    inst._meeting_session = MagicMock(is_recording=True)
+    steps = []
+
+    def fake_sleep(s):
+        steps.append(s)
+        if len(steps) == 1:                      # meeting ends, final pass starts
+            inst._meeting_session = None
+            inst._meeting_finalizing = (time.monotonic(), 60.0)
+        elif len(steps) == 2:
+            inst._meeting_finalizing = None
+    monkeypatch.setattr(app.time, "sleep", fake_sleep)
+    inst._restart_worker()
+    assert len(steps) == 2 and calls["quit"] == 1 and len(calls["popen"]) == 1
+
+
+def test_relauncher_waits_kills_reopens_and_warns_if_airlock_blocks(monkeypatch):
+    import os
+    inst, calls = _restart_app(monkeypatch)
+    inst._restart_worker()
+    (cmd, kw), = calls["popen"]
+    script = cmd[-1]
+    pid = str(os.getpid())
+    assert f"kill -0 {pid}" in script and f"kill -9 {pid}" in script
+    assert "open /Applications/MacWhisper.app" in script
+    assert "osascript" in script                          # not back: tell the user
+    assert kw.get("start_new_session") is True            # survives our exit
+    assert calls["overlay"] == 1 and calls["quit"] == 1
+    inst._notify.assert_called_once()
+
+
+def test_no_auto_restart_when_not_running_as_the_app(monkeypatch):
+    """./run.sh: we cannot reopen a terminal session — keep the notice only."""
+    inst, calls = _restart_app(monkeypatch, as_app=False)
+    inst._restart_worker()
+    assert calls["popen"] == [] and calls["quit"] == 0
+
+
+def test_restart_is_scheduled_only_once(monkeypatch):
+    import app
+    inst, calls = _restart_app(monkeypatch)
+    started = []
+    monkeypatch.setattr(app.threading, "Thread",
+                        lambda target, **kw: MagicMock(start=lambda: started.append(target)))
+    inst._restart_when_idle()
+    inst._restart_when_idle()
+    assert len(started) == 1
