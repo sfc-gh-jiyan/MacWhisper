@@ -121,6 +121,8 @@ import vocabulary
 import quit_guard
 import single_instance
 from qwen_backend import QwenBusy, QwenUnavailable
+import permissions
+import setup_wizard
 
 logger = logging.getLogger(__name__)
 
@@ -623,6 +625,8 @@ class TranscriberApp(rumps.App):
         mine = rumps.MenuItem("Learn New Vocabulary Now", callback=lambda _: threading.Thread(
             target=self._run_vocab_miner, kwargs={"manual": True}, daemon=True).start())
         review = rumps.MenuItem("Review Suggestions…", callback=lambda _: self._review_suggestions(force=True))
+        perms = rumps.MenuItem("Permissions…",
+                               callback=lambda _: self._open_permission_wizard(from_menu=True))
         return [
             rumps.MenuItem("Status: Ready"),
             rumps.separator,
@@ -636,6 +640,7 @@ class TranscriberApp(rumps.App):
             mine,
             rumps.separator,
             settings,
+            perms,
             copy_last,
             retry,
             report,
@@ -1473,6 +1478,17 @@ class TranscriberApp(rumps.App):
         logger.warning("Permissions (pid %d, %s): accessibility=%s input_monitoring=%s",
                        os.getpid(), sys.executable, status["accessibility"],
                        status["input_monitoring"])
+        statuses = {perm.key: permissions.status(perm.key) for perm in permissions.PERMISSIONS}
+        unknown = [k for k, v in statuses.items() if v == permissions.UNKNOWN]
+        if unknown:
+            logger.warning("Could not check permissions %s — not opening the setup for them", unknown)
+        # Only a definite "missing" opens it at startup: a failing check must not nag every launch
+        missing = [k for k, v in statuses.items() if v not in (permissions.GRANTED, permissions.UNKNOWN)]
+        if missing:
+            # The step-by-step setup replaces the old notifications
+            logger.warning("Missing permissions %s — opening the setup dialogs", missing)
+            AppHelper.callAfter(self._open_permission_wizard)
+            return
         if not status["accessibility"]:
             print("[WARN] Accessibility permission NOT granted — auto-paste will fail")
             print("       → System Settings → Privacy & Security → Accessibility")
@@ -1835,7 +1851,9 @@ class TranscriberApp(rumps.App):
         threading.Thread(target=self._restart_worker, daemon=True,
                          name="mic-stuck-restart").start()
 
-    def _restart_worker(self) -> None:
+    def _restart_worker(self, title: str = "MacWhisper — microphone stuck",
+                        status: str = "Microphone stuck — restarting…",
+                        overlay: bool = True) -> None:
         def busy():
             session = getattr(self, "_meeting_session", None)
             return bool((session and session.is_recording)
@@ -1848,10 +1866,10 @@ class TranscriberApp(rumps.App):
             # ./run.sh: a terminal session cannot be reopened from here
             logger.warning("Not running as MacWhisper.app — no auto-restart")
             return
-        self._set_status("Microphone stuck — restarting…")
-        AppHelper.callAfter(self._show_restart_overlay)
-        self._notify("MacWhisper — microphone stuck", "Restarting MacWhisper…",
-                     "It will be back in a few seconds")
+        self._set_status(status)
+        if overlay:
+            AppHelper.callAfter(self._show_restart_overlay)
+        self._notify(title, "Restarting MacWhisper…", "It will be back in a few seconds")
         pid = os.getpid()
         logger.warning("Relaunching %s (old pid %d)", app_path, pid)
         subprocess.Popen(["/bin/sh", "-c", self._relaunch_script(pid, app_path)],
@@ -1887,6 +1905,27 @@ class TranscriberApp(rumps.App):
         panel, text_view = create_overlay(mode="talk", frame_path=OVERLAY_FRAME_PATH)
         if panel:
             update_overlay(panel, text_view, "Microphone stuck — restarting MacWhisper…", "")
+
+    # ── Permission setup (main thread) ────────────────────────
+
+    def _open_permission_wizard(self, from_menu: bool = False) -> None:
+        if getattr(self, "_wizard_open", False):
+            return
+        self._wizard_open = True
+        try:
+            result = setup_wizard.run(setup_wizard.AlertUI(),
+                                      can_restart=self._app_bundle_path() is not None,
+                                      from_menu=from_menu)
+        except Exception as e:
+            self._reporter.report("the permission setup", e)
+            return
+        finally:
+            self._wizard_open = False
+        if result.restart:
+            threading.Thread(target=self._restart_worker, daemon=True, name="permission-restart",
+                             kwargs={"title": "MacWhisper — applying permissions",
+                                     "status": "Applying permissions — restarting…",
+                                     "overlay": False}).start()
 
     def _stop_and_transcribe(self):
         self.recording = False

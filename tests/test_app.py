@@ -2260,13 +2260,18 @@ def test_check_permissions_logs_status_and_warns_input_monitoring(monkeypatch, c
     inst._notify = MagicMock()
     monkeypatch.setattr(app, "_permission_status",
                         lambda: {"accessibility": True, "input_monitoring": False})
+    monkeypatch.setattr(app.permissions, "status",
+                        lambda k: app.permissions.DENIED if k == "input_monitoring" else app.permissions.GRANTED)
     monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append(fn))
     with caplog.at_level(logging.WARNING):
         inst._check_permissions()
     text = caplog.text
     assert "accessibility=True" in text and "input_monitoring=False" in text
-    assert "Input Monitoring" in text
-    inst._notify.assert_called()
+    assert "input_monitoring" in text
+    assert queued == [inst._open_permission_wizard]        # setup dialogs, not notifications
+    inst._notify.assert_not_called()
 
 
 # ── Meeting live subtitles on Qwen3 (v0.7.3) ──────────────────
@@ -3268,3 +3273,84 @@ def test_restart_is_scheduled_only_once(monkeypatch):
     inst._restart_when_idle()
     inst._restart_when_idle()
     assert len(started) == 1
+
+
+# ── Permission setup dialogs ──
+
+def test_permissions_all_granted_open_nothing(monkeypatch):
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._key_event_received = True
+    inst._notify = MagicMock()
+    monkeypatch.setattr(app, "_permission_status",
+                        lambda: {"accessibility": True, "input_monitoring": True})
+    monkeypatch.setattr(app.permissions, "status", lambda k: app.permissions.GRANTED)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append(fn))
+    inst._check_permissions()
+    assert queued == []
+
+
+def test_menu_has_permissions_item():
+    inst = _menu_app()
+    titles = [getattr(m, "title", None) for m in inst._build_menu() if m is not None]
+    assert "Permissions…" in titles
+
+
+def _wizard_app(monkeypatch, restart):
+    import app
+    import setup_wizard
+    inst = _bare_app()
+    seen = {}
+
+    def fake_run(ui, **kw):
+        seen.update(kw)
+        return setup_wizard.Result(granted=["accessibility"], restart=restart)
+    monkeypatch.setattr(app.setup_wizard, "run", fake_run)
+    monkeypatch.setattr(app.TranscriberApp, "_app_bundle_path",
+                        lambda self: "/Applications/MacWhisper.app")
+    started = []
+    monkeypatch.setattr(app.threading, "Thread",
+                        lambda target, **kw: MagicMock(start=lambda: started.append((target, kw))))
+    return inst, seen, started
+
+
+def test_wizard_restart_now_relaunches_without_the_stuck_mic_overlay(monkeypatch):
+    inst, seen, started = _wizard_app(monkeypatch, restart=True)
+    inst._open_permission_wizard(from_menu=True)
+    assert seen == {"can_restart": True, "from_menu": True}
+    (target, kw), = started
+    assert target == inst._restart_worker and kw["kwargs"]["overlay"] is False
+
+
+def test_wizard_later_does_not_restart(monkeypatch):
+    inst, _, started = _wizard_app(monkeypatch, restart=False)
+    inst._open_permission_wizard()
+    assert started == []
+
+
+def test_wizard_never_opens_twice(monkeypatch):
+    inst, _, _ = _wizard_app(monkeypatch, restart=False)
+    inst._wizard_open = True
+    import app
+    monkeypatch.setattr(app.setup_wizard, "run", MagicMock(side_effect=AssertionError))
+    inst._open_permission_wizard()
+
+
+def test_a_failing_permission_check_does_not_open_the_setup_every_launch(monkeypatch, caplog):
+    import logging
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._key_event_received = True
+    inst._notify = MagicMock()
+    monkeypatch.setattr(app, "_permission_status",
+                        lambda: {"accessibility": True, "input_monitoring": True})
+    monkeypatch.setattr(app.permissions, "status",
+                        lambda k: app.permissions.UNKNOWN if k == "microphone" else app.permissions.GRANTED)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    queued = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: queued.append(fn))
+    with caplog.at_level(logging.WARNING):
+        inst._check_permissions()
+    assert queued == [] and "Could not check permissions ['microphone']" in caplog.text

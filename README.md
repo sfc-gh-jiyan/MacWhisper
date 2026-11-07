@@ -53,7 +53,7 @@ If step 3 or 4 fails, the installer goes on and tells you; run `make qwen-setup`
 
 ### 2. Grant permissions, then launch
 
-Open **MacWhisper** from `/Applications`, then grant the permissions below. Relaunch after granting — macOS only applies them at startup.
+Open **MacWhisper** from `/Applications`. On first launch it walks you through the three required permissions one by one: it asks macOS for each one, opens the right System Settings page, checks that it is on, and offers to restart at the end (macOS applies Accessibility and Input Monitoring only after a restart). You can open it again any time from the menu: **Permissions…**. The details are below if you prefer to do it by hand.
 
 ### Required Permissions (Important!)
 
