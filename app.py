@@ -1219,6 +1219,10 @@ class TranscriberApp(rumps.App):
         self._meeting_session = MeetingSession(
             backend=self._qwen.backend,
             vad=self._vad if self._vad_available else None,
+            # Remote track needs its own (stateful) VAD
+            vad_factory=(lambda: VoiceActivityDetector(
+                threshold=0.5, min_silence_ms=800, min_speech_ms=250,
+            )) if self._vad_available else None,
             min_chunk_size=MIN_CHUNK_SIZE,
             max_buffer_s=MAX_BUFFER_S,
             language=None,

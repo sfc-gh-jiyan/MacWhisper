@@ -576,12 +576,9 @@ def _fast_qwen(backend):
     return qwen_meeting.QwenSegmentProcessor(backend, step=0.05, min_audio_s=0.1)
 
 
-class TestRMSPrioritySelection:
-    """Unit tests for overlap priority selection logic in dual-channel mode.
-
-    Verifies that _meeting_loop_impl correctly picks the louder source
-    during overlap and falls back to mic on tie.
-    """
+class TestDualTrackRouting:
+    """Dual-channel mode: mic audio feeds only the Mic track and system audio
+    only the Remote track (the old RMS overlap selection is gone)."""
 
     def _make_dual_session(self):
         """Create a dual-channel MeetingSession with mock backend."""
@@ -634,8 +631,8 @@ class TestRMSPrioritySelection:
         assert isinstance(transcript, str)
         assert backend._call_count > 0, "Processor was never called with sys-only data"
 
-    def test_overlap_picks_louder_source(self):
-        """During overlap, the source with higher RMS wins."""
+    def test_overlap_feeds_each_source_to_its_own_track(self):
+        """During overlap both sources are kept, each on its own track."""
         backend = MockBackend(responses=[f"word{i}" for i in range(500)])
 
         # Create custom sources with controllable amplitude
@@ -668,37 +665,31 @@ class TestRMSPrioritySelection:
         session._sys_source = loud_sys
         session._audio_source = None
 
-        # Track what gets fed to processor
-        fed_rms_values = []
-        original_insert = None
+        # Track what gets fed to each track's processor
+        fed_rms = {"mic": [], "remote": []}
 
         session.start()
         time.sleep(0.1)
 
-        # Monkey-patch processor to record RMS of fed chunks
-        if session._processor:
-            original_insert = session._processor.insert_audio_chunk
+        for track in session._tracks:
+            original_insert = track.processor.insert_audio_chunk
 
-            def tracking_insert(chunk):
-                rms = float(np.sqrt(np.mean(chunk ** 2)))
-                fed_rms_values.append(rms)
-                return original_insert(chunk)
+            def tracking_insert(chunk, _orig=original_insert, _src=track.source):
+                fed_rms[_src].append(float(np.sqrt(np.mean(chunk ** 2))))
+                return _orig(chunk)
 
-            session._processor.insert_audio_chunk = tracking_insert
+            track.processor.insert_audio_chunk = tracking_insert
 
         time.sleep(0.8)
         session.stop()
 
-        # During overlap, the loud source should win most of the time
-        # RMS of loud source ~2100/32768 ≈ 0.064, quiet ~100/32768 ≈ 0.003
-        assert len(fed_rms_values) > 0, "No chunks were fed to processor"
-        high_rms_count = sum(1 for r in fed_rms_values if r > 0.03)
-        total = len(fed_rms_values)
-        assert high_rms_count > total * 0.5, \
-            f"Expected loud source to win majority, but only {high_rms_count}/{total} had high RMS"
+        # RMS of loud sys ~2100/32768 ≈ 0.064, quiet mic ~100/32768 ≈ 0.003
+        assert fed_rms["mic"] and fed_rms["remote"], f"A track got no audio: {fed_rms}"
+        assert all(r < 0.03 for r in fed_rms["mic"]), "System audio reached the Mic track"
+        assert all(r > 0.03 for r in fed_rms["remote"]), "Mic audio reached the Remote track"
 
-    def test_tie_break_favors_mic(self):
-        """When both sources have equal RMS, mic is chosen."""
+    def test_equal_levels_both_tracks_run(self):
+        """Equal levels on both sources: both tracks run, nothing crashes."""
         backend = MockBackend(responses=[f"word{i}" for i in range(500)])
 
         class FixedSource(MockAudioSource):
@@ -735,7 +726,7 @@ class TestRMSPrioritySelection:
         time.sleep(0.5)
         transcript = session.stop()
 
-        # Session should not crash; mic wins all tie-breaks
+        # Session should not crash; both tracks transcribe
         assert isinstance(transcript, str)
         assert backend._call_count > 0
 

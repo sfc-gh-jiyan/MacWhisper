@@ -387,7 +387,7 @@ class TestOverlappingChannels:
 
 
 class TestDualChannelPipelineV2:
-    """Layer 1 integration: dual-channel path (separate mic/sys sources, RMS priority)."""
+    """Layer 1 integration: dual-channel path (separate Mic and Remote tracks)."""
 
     def _get_scenario(self, name="integration_alternating"):
         scenarios = _load_scenarios("integration")
@@ -431,7 +431,7 @@ class TestDualChannelPipelineV2:
         assert len(transcript) > 0, "Dual-channel alternating produced empty transcript"
 
     def test_dual_channel_overlapping(self):
-        """Dual-channel mode handles overlapping sources via RMS priority."""
+        """Dual-channel mode keeps both sides of overlapping speech (one track per source)."""
         s, mic_path, sys_path = self._get_scenario("integration_overlapping")
         session, backend = self._make_dual_session(
             mic_path, sys_path, offset_s=s["system_offset_s"],
@@ -605,7 +605,7 @@ class TestDualChannelQuality:
     def _run_and_evaluate(self, s, mic_path, sys_path, backend, pipeline="mixed"):
         """Run a scenario through the specified pipeline and return (transcript, scores).
 
-        pipeline: "mixed" (legacy MixedAudioSource) or "dual" (RMS priority selection)
+        pipeline: "mixed" (legacy MixedAudioSource) or "dual" (separate Mic and Remote tracks)
         """
         mode = s.get("mode", "alternating")
 
@@ -704,7 +704,7 @@ class TestDualChannelQuality:
         self._assert_thresholds(s, scores, mode)
 
     def test_scenario_quality_dual(self, scenario, backend):
-        """Run scenario via dual-channel RMS priority selection."""
+        """Run scenario via the dual-channel path (separate Mic and Remote tracks)."""
         s, mic_path, sys_path = scenario
         _, scores, mode, _ = self._run_and_evaluate(
             s, mic_path, sys_path, backend, pipeline="dual",
@@ -755,7 +755,7 @@ class TestGeneratedScenarios:
         mic_src = WavFileSource(mic_path, speed=1.0)
         sys_src = WavFileSource(sys_path, offset_s=s["system_offset_s"], speed=1.0)
 
-        # Use dual-channel path (RMS priority selection)
+        # Use dual-channel path (separate Mic and Remote tracks)
         session = MeetingSession(
             backend=backend,
             audio_source=mic_src,

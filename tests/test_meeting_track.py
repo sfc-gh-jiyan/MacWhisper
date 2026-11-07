@@ -42,6 +42,9 @@ class FakeProc:
         self._word_start = word_start
         self._n = 0
 
+    def reset(self):
+        pass
+
     def insert_audio_chunk(self, a):
         self.audio_buffer = np.concatenate([self.audio_buffer, a])
 
@@ -240,3 +243,162 @@ def test_close_failure_then_catch_up_keeps_content_in_order(fake_clock):
     starts = [g.start_time for g in s.segments]
     assert starts == sorted(starts) and all(g.end_time >= g.start_time for g in s.segments)
     assert s._tracks[0].segment_start is None                        # fresh segment after catch-up
+
+
+# ── Task 3: two labelled tracks, echo removal ──
+
+@pytest.fixture(autouse=True)
+def _tmp_meetings_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(meeting, "MEETINGS_DIR", str(tmp_path))   # stop() auto-saves
+
+class TagProc(FakeProc):
+    """Returns text tagged by which channel's processor it is."""
+
+    def __init__(self, text):
+        super().__init__()
+        self._text = text
+
+    def segment_close(self):
+        return self._text if self.committed else ""
+
+
+def _dual_session(clock, mic_text="hello from mic", remote_text="hi from remote",
+                  vad_factory=ScriptVAD):
+    procs = iter([TagProc(mic_text), TagProc(remote_text)])
+    s = MeetingSession(backend=None, vad=ScriptVAD(), audio_source=SimpleNamespace(),
+                       processor_factory=lambda: next(procs, None) or CatchProc(),
+                       vad_factory=vad_factory)
+    s._dual_channel = True
+    s._session_id = "20261107_120000"
+    s._meeting_start = clock.t
+    s._state = "recording"
+    s._segments = []
+    s._build_tracks()
+    return s
+
+
+def _tick(s, clock, t, mic=None, remote=None):
+    """mic/remote: None = no audio, "speech" / "quiet" / "close" (silence)."""
+    clock.t = t
+    for track, mode in zip(s._tracks, (mic, remote)):
+        if mode is not None:
+            track.vad.speech = mode == "speech"
+            track.vad.silence = mode == "close"
+    s._process_new_audio(CHUNK if mic else [], CHUNK if remote else [])
+
+
+def test_dual_lines_are_labelled_and_time_ordered(fake_clock):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock)
+    for t in range(2, 5):
+        _tick(s, fake_clock, t0 + t, mic="speech")
+    for t in range(5, 8):
+        _tick(s, fake_clock, t0 + t, remote="speech")
+    _tick(s, fake_clock, t0 + 8, remote="close")      # remote commits first
+    _tick(s, fake_clock, t0 + 9, mic="close")
+    md = s._format_markdown()
+    assert "**[00:02] Mic:** hello from mic" in md
+    assert md.index("Mic:** hello") < md.index("Remote:** hi from remote")
+
+
+def test_crosstalk_keeps_both_channels(fake_clock):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock)
+    for t in range(1, 6):
+        _tick(s, fake_clock, t0 + t, mic="speech", remote="speech")
+    _tick(s, fake_clock, t0 + 6, mic="close", remote="close")
+    assert {g.source for g in s.segments} == {"mic", "remote"}
+
+
+def test_remote_only_meeting_has_no_empty_mic_lines(fake_clock):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock)
+    for t in range(1, 6):
+        _tick(s, fake_clock, t0 + t, mic="quiet", remote="speech")
+    _tick(s, fake_clock, t0 + 6, mic="close", remote="close")
+    s._mic_source = s._sys_source = SimpleNamespace(stop=lambda: None)
+    s.stop(wait_s=0)
+    assert s.segments and all(g.source == "remote" and g.text for g in s.segments)
+
+
+def test_echo_mic_segment_dropped_remote_kept(fake_clock, caplog):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock, mic_text="OK, which warehouse is this?",
+                      remote_text="OK which warehouse is this")
+    for t in range(1, 6):
+        _tick(s, fake_clock, t0 + t, mic="speech", remote="speech")
+    with caplog.at_level("INFO", logger="meeting"):
+        _tick(s, fake_clock, t0 + 6, mic="close", remote="close")
+    assert [g.source for g in s.segments] == ["remote"]
+    assert "Echo dropped (Mic)" in caplog.text
+
+
+def test_echo_dropped_when_mic_commits_after_remote(fake_clock):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock, mic_text="same words here", remote_text="same words here")
+    for t in range(1, 6):
+        _tick(s, fake_clock, t0 + t, mic="speech", remote="speech")
+    _tick(s, fake_clock, t0 + 6, remote="close")
+    _tick(s, fake_clock, t0 + 7, mic="close")
+    assert [g.source for g in s.segments] == ["remote"]
+
+
+class _Caught(FakeProc):
+    def __init__(self, text):
+        super().__init__()
+        self._text = text
+
+    def segment_close(self):
+        return self._text if len(self.audio_buffer) else ""
+
+
+def test_outage_catch_up_keeps_labels(fake_clock):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock)
+    s._switch_to_fallback(RuntimeError("down"))
+    for t in range(1, 6):
+        _tick(s, fake_clock, t0 + t, mic="speech", remote="speech")
+    texts = iter(["mic words caught", "", "remote reply caught", ""])   # chunk, fresh proc, ... (distinct: no echo)
+    s._new_processor = lambda: _Caught(next(texts, ""))
+    s._catch_up_buffered()
+    assert {g.source for g in s.segments} == {"mic", "remote"}
+    assert all(g.start_time >= 0 for g in s.segments)
+    assert not s._engine_down
+
+
+def test_stop_commits_pending_segments_of_both_tracks(fake_clock):
+    t0 = fake_clock.t
+    s = _dual_session(fake_clock)
+    for t in range(1, 4):
+        _tick(s, fake_clock, t0 + t, mic="speech", remote="speech")
+    s._mic_source = s._sys_source = SimpleNamespace(stop=lambda: None)
+    s.stop(wait_s=0)
+    assert sorted(g.source for g in s.segments) == ["mic", "remote"]
+
+
+def test_txt_and_cues_have_labels(fake_clock):
+    s = _dual_session(fake_clock)
+    s._segments = [MeetingSegment("hello", 1.0, 2.0, source="mic"),
+                   MeetingSegment("hi", 3.0, 4.0, source="remote")]
+    assert s._build_transcript().splitlines()[0].startswith("Mic: ")
+    assert s._subtitle_cues()[0][2].startswith("Mic: ")
+    assert s._subtitle_cues()[1][2] == "Remote: hi"
+
+
+def test_each_track_has_its_own_vad(fake_clock):
+    s = _dual_session(fake_clock)
+    assert [t.source for t in s._tracks] == ["mic", "remote"]
+    assert s._tracks[0].vad is s.vad
+    assert s._tracks[1].vad is not None and s._tracks[1].vad is not s._tracks[0].vad
+
+
+def test_no_vad_factory_remote_track_has_no_vad(fake_clock):
+    s = _dual_session(fake_clock, vad_factory=None)
+    assert s._tracks[1].vad is None
+
+
+def test_mic_chunks_only_reach_mic_track(fake_clock):
+    s = _dual_session(fake_clock)
+    _tick(s, fake_clock, fake_clock.t + 1, mic="speech")
+    assert len(s._tracks[0].processor.audio_buffer) == 16000
+    assert len(s._tracks[1].processor.audio_buffer) == 0
