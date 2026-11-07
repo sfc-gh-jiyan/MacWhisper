@@ -753,19 +753,15 @@ class MeetingSession:
         unconfirmed — active track's unconfirmed; prefixed with "Label: " only when
                       that track has no confirmed text yet (label not yet visible).
         """
-        lines = []
-        for t in self._tracks:
-            lc = confirmed if t is active_track else t.live_confirmed
-            if lc:
-                label = source_label(t.source)
-                lines.append(f"{label}: {lc}")
-        ov_confirmed = "\n".join(lines)
+        # _feed_track stores live_confirmed on every track (the active one
+        # included) before calling this, so all tracks read the same field.
+        ov_confirmed = "\n".join(_labelled(t.source, t.live_confirmed)
+                                 for t in self._tracks if t.live_confirmed)
 
-        label = source_label(active_track.source)
-        if confirmed:
+        if confirmed or not unconfirmed:
             ov_unconfirmed = unconfirmed
         else:
-            ov_unconfirmed = f"{label}: {unconfirmed}" if unconfirmed else ""
+            ov_unconfirmed = _labelled(active_track.source, unconfirmed)
 
         return ov_confirmed, ov_unconfirmed
 

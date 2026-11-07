@@ -1078,6 +1078,53 @@ class TestOverlayLabels:
         assert "Remote: " in (c + u), (
             f"Expected 'Remote: ' in c+u; got c={c!r} u={u!r}"
         )
+        assert any(line.startswith("Remote: ") for line in lines), (
+            f"Expected a confirmed line starting with 'Remote: '; got: {c!r}"
+        )
+
+    def _session_with(self, sources, segments, live):
+        session = MeetingSession(backend=MockBackend())
+        from meeting_track import ChannelTrack
+        session._tracks = [ChannelTrack(s, None, None) for s in sources]
+        session._segments = segments
+        for track, (c, u) in zip(session._tracks, live):
+            track.live_confirmed, track.live_unconfirmed = c, u
+        return session
+
+    def test_live_lines(self):
+        """live_lines covers both / prior only / confirmed only / neither."""
+        segs = [
+            MeetingSegment(text="mic old", start_time=0.0, end_time=1.0, source="mic"),
+            MeetingSegment(text="mic last", start_time=1.0, end_time=2.0, source="mic"),
+            MeetingSegment(text="remote last", start_time=2.0, end_time=3.0, source="remote"),
+        ]
+        # both (mic) / prior only (remote)
+        session = self._session_with(["mic", "remote"], segs,
+                                     [("mic now", "mic gray"), ("", "")])
+        assert session.live_lines() == [
+            ("Mic", "mic last\nmic now", "mic gray"),
+            ("Remote", "remote last", ""),
+        ]
+        # confirmed only (mic) / neither (remote)
+        session = self._session_with(["mic", "remote"], [],
+                                     [("mic now", ""), ("", "remote gray")])
+        assert session.live_lines() == [
+            ("Mic", "mic now", ""),
+            ("Remote", "", "remote gray"),
+        ]
+        # single channel: unlabelled
+        session = self._session_with(
+            [None], [MeetingSegment(text="seg", start_time=0.0, end_time=1.0)],
+            [("now", "gray")])
+        assert session.live_lines() == [(None, "seg\nnow", "gray")]
+
+    def test_overlay_text_for_unlabelled_track_has_no_none_prefix(self):
+        """A track without a label never shows 'None: ' in the overlay."""
+        session = self._session_with([None], [], [("hi", "")])
+        c, u = session._overlay_text_for(session._tracks[0], "hi", "")
+        assert c == "hi"
+        c, u = session._overlay_text_for(session._tracks[0], "", "gray")
+        assert u == "gray"
 
     def test_single_channel_overlay_unchanged(self):
         """Single-channel on_update passes through confirmed/unconfirmed verbatim."""
