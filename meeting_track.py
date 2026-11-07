@@ -22,6 +22,8 @@ class ChannelTrack:
         self.buffer_start: float | None = None    # wall clock where audio_buffer starts
         self.outage_offset = 0.0          # meeting time where the buffered audio starts
         self.vad_skip_count = 0
+        self.live_confirmed: str = ""     # latest confirmed text from process_iter
+        self.live_unconfirmed: str = ""   # latest unconfirmed text from process_iter
         logger.debug("ChannelTrack created (source=%s)", source)
 
     def mark_speech_start(self, now: float) -> None:

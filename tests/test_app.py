@@ -909,6 +909,76 @@ def test_meeting_start_respects_subtitles_pref():
     assert "if self.meeting_subtitles:" in source
 
 
+# ── Test: meeting overlay segment labels (Task 4) ─────────────
+
+def _overlay_update_app():
+    """Minimal TranscriberApp instance for _meeting_overlay_update tests."""
+    import app
+    inst = app.TranscriberApp.__new__(app.TranscriberApp)
+    inst._overlay_panel = MagicMock()
+    inst._overlay_text = MagicMock()
+    inst._last_overlay_key = None
+    inst._log_subtitle_live = MagicMock()
+    return inst
+
+
+def test_meeting_overlay_update_labels_dual_segments(monkeypatch):
+    """_meeting_overlay_update prepends 'Label: text' for labelled segments."""
+    import app
+    from meeting import MeetingSegment
+    from unittest.mock import patch
+
+    captured_calls = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: captured_calls.append(fn))
+
+    inst = _overlay_update_app()
+    segs = [
+        MeetingSegment(text="mic text", start_time=0.0, end_time=1.0, source="mic"),
+        MeetingSegment(text="remote text", start_time=1.0, end_time=2.0, source="remote"),
+    ]
+    inst._meeting_overlay_update("Mic: live", "", segs)
+
+    assert captured_calls, "callAfter never called"
+    overlay_calls = []
+    with patch.object(app, "update_overlay",
+                      lambda panel, text, c, u, mode=None: overlay_calls.append((c, u))):
+        for fn in captured_calls:
+            fn()
+
+    assert overlay_calls, "update_overlay never called"
+    full_c, _ = overlay_calls[-1]
+    assert "Mic: mic text" in full_c, f"Expected 'Mic: mic text' in {full_c!r}"
+    assert "Remote: remote text" in full_c, f"Expected 'Remote: remote text' in {full_c!r}"
+
+
+def test_meeting_overlay_update_single_channel_unchanged(monkeypatch):
+    """_meeting_overlay_update passes through plain text when source is None."""
+    import app
+    from meeting import MeetingSegment
+    from unittest.mock import patch
+
+    captured_calls = []
+    monkeypatch.setattr(app.AppHelper, "callAfter", lambda fn, *a: captured_calls.append(fn))
+
+    inst = _overlay_update_app()
+    segs = [
+        MeetingSegment(text="some text", start_time=0.0, end_time=1.0, source=None),
+    ]
+    inst._meeting_overlay_update("live confirmed", "", segs)
+
+    assert captured_calls, "callAfter never called"
+    overlay_calls = []
+    with patch.object(app, "update_overlay",
+                      lambda panel, text, c, u, mode=None: overlay_calls.append((c, u))):
+        for fn in captured_calls:
+            fn()
+
+    assert overlay_calls, "update_overlay never called"
+    full_c, _ = overlay_calls[-1]
+    assert "Mic: " not in full_c, f"'Mic:' must not appear in single-channel overlay: {full_c!r}"
+    assert "some text" in full_c, f"Segment text must appear verbatim: {full_c!r}"
+
+
 # ── Test: crash safety (fix/crash-alerts) ─────────────────────
 
 def _bare_app():

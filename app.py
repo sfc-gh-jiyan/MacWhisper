@@ -104,6 +104,7 @@ from vad import VoiceActivityDetector
 from overlay import create_overlay, update_overlay, destroy_overlay
 from subtitle_export import save_enhanced_history
 from meeting import MeetingSession, MEETINGS_DIR
+from meeting_labels import source_label as _seg_source_label
 import crash_guard
 import error_alert
 import qwen_backend
@@ -1445,8 +1446,15 @@ class TranscriberApp(rumps.App):
 
     def _meeting_overlay_update(self, confirmed, unconfirmed, segments, debug=None):
         """Callback from MeetingSession to update overlay."""
-        # Prepend committed segment text for context
-        seg_text = "\n".join(s.text for s in segments[-2:]) if segments else ""
+        # Prepend committed segment text for context; use "Label: text" for labelled sources.
+        if segments:
+            parts = []
+            for s in segments[-2:]:
+                label = _seg_source_label(s.source)
+                parts.append(f"{label}: {s.text}" if label else s.text)
+            seg_text = "\n".join(parts)
+        else:
+            seg_text = ""
         if seg_text:
             full_confirmed = seg_text + "\n" + confirmed
         else:

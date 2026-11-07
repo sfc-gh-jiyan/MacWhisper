@@ -722,16 +722,75 @@ class MeetingSession:
 
         confirmed, unconfirmed = result
 
+        # Store live text on this track (used by live_lines and dual overlay)
+        track.live_confirmed = confirmed
+        track.live_unconfirmed = unconfirmed
+
         # Notify overlay
         if self._on_update:
             try:
                 debug = track.processor.last_debug if track.processor else {}
-                self._on_update(confirmed, unconfirmed, self._segments, debug)
+                if self._dual_channel:
+                    ov_c, ov_u = self._overlay_text_for(track, confirmed, unconfirmed)
+                else:
+                    ov_c, ov_u = confirmed, unconfirmed
+                self._on_update(ov_c, ov_u, self._segments, debug)
             except Exception:
                 pass
 
 
     # ── Internal: segment management ─────────────────────────
+
+    def _overlay_text_for(
+        self,
+        active_track: ChannelTrack,
+        confirmed: str,
+        unconfirmed: str,
+    ) -> tuple[str, str]:
+        """Build combined (confirmed, unconfirmed) for the overlay in dual-channel.
+
+        confirmed  — "Label: text" line per track that has confirmed text, joined by \\n.
+        unconfirmed — active track's unconfirmed; prefixed with "Label: " only when
+                      that track has no confirmed text yet (label not yet visible).
+        """
+        lines = []
+        for t in self._tracks:
+            lc = confirmed if t is active_track else t.live_confirmed
+            if lc:
+                label = source_label(t.source)
+                lines.append(f"{label}: {lc}")
+        ov_confirmed = "\n".join(lines)
+
+        label = source_label(active_track.source)
+        if confirmed:
+            ov_unconfirmed = unconfirmed
+        else:
+            ov_unconfirmed = f"{label}: {unconfirmed}" if unconfirmed else ""
+
+        return ov_confirmed, ov_unconfirmed
+
+    def live_lines(self) -> list[tuple[str | None, str, str]]:
+        """Per-track live state: (label, confirmed, unconfirmed).
+
+        confirmed = last committed segment text + current processor confirmed text.
+        """
+        result = []
+        for track in self._tracks:
+            label = source_label(track.source)
+            last_seg = next(
+                (s for s in reversed(self._segments) if s.source == track.source),
+                None,
+            )
+            prior = last_seg.text if last_seg else ""
+            if prior and track.live_confirmed:
+                combined = prior + "\n" + track.live_confirmed
+            elif prior:
+                combined = prior
+            else:
+                combined = track.live_confirmed
+            result.append((label, combined, track.live_unconfirmed))
+        return result
+
 
     def _commit_segment(self, track: ChannelTrack, text: str) -> None:
         """Add a committed segment to the meeting record.
