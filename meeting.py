@@ -38,6 +38,7 @@ class MeetingSegment:
     start_time: float  # seconds from meeting start
     end_time: float    # seconds from meeting start
     words: list[tuple[float, float, str]] = field(default_factory=list)
+    source: str | None = None
 
 
 class MeetingSession:
