@@ -16,10 +16,10 @@ from __future__ import annotations
 import re
 
 from text_utils import (
+    OVERLAP_STRIP_CHARS,
     _HALLUCINATION_PHRASES,
     _HALLUCINATION_SUBSTRINGS,
     convert_t2s,
-    strip_trailing_repetition,
 )
 
 _CJK = r"\u4e00-\u9fff\u3400-\u4dbf"
@@ -103,10 +103,51 @@ def is_qwen_hallucination(text: str) -> bool:
     return any(sub in text for sub in _HALLUCINATION_SUBSTRINGS)
 
 
+# People repeat 2-4 times on purpose ("naughty, naughty, naughty", "no no no");
+# a looping decoder repeats dozens of times (2026-10-29: 我们 x ~225).
+LOOP_MIN_REPEATS = 6
+SHORT_UNIT_MIN_REPEATS = 12   # 1-2 chars: 哈哈哈哈哈哈 / 对对对对对对 are speech
+_LOOP_MAX_UNIT = 80
+_TAIL_PUNCT = " ,，。.!！?？"
+
+
+def trim_runaway_loop(text: str) -> str:
+    """Cut a tail repeated LOOP_MIN_REPEATS+ times down to one copy.
+
+    Replaces Whisper's strip_trailing_repetition for Qwen3: that rule deleted
+    any tail repeated 3+ times, so "Naughty, naughty, naughty." became ""
+    (2026-11-07). Matching ignores case, spaces and punctuation, like it did.
+    """
+    stripped = text.rstrip()
+    norm, pos = [], []                       # normalized char -> index in stripped
+    for i, ch in enumerate(stripped):
+        if ch not in OVERLAP_STRIP_CHARS:
+            norm.append(ch.lower())
+            pos.append(i)
+    norm_s = "".join(norm)
+    best = None                              # (start of the repeated run, end of first copy)
+    for unit_len in range(1, min(_LOOP_MAX_UNIT, len(norm_s) // LOOP_MIN_REPEATS) + 1):
+        unit = norm_s[-unit_len:]
+        start = len(norm_s)
+        count = 0
+        while start >= unit_len and norm_s[start - unit_len:start] == unit:
+            count += 1
+            start -= unit_len
+        needed = SHORT_UNIT_MIN_REPEATS if unit_len <= 2 else LOOP_MIN_REPEATS
+        if count >= needed and (best is None or start < best[0]):
+            best = (start, start + unit_len)
+    if best is None:
+        return text
+    first_end = best[1]
+    kept = stripped[:pos[first_end - 1] + 1].rstrip()   # text up to the end of one copy
+    tail = stripped[len(stripped.rstrip(_TAIL_PUNCT)):].strip()
+    return kept + tail[:1]                   # keep the sentence's final punctuation
+
+
 def postprocess(text: str, strip_filler_words: bool = True, tight: bool = True,
                 collapse: bool = False) -> str:
     text = convert_t2s((text or "").strip())
-    text = strip_trailing_repetition(text)
+    text = trim_runaway_loop(text)
     if strip_filler_words:
         text = strip_fillers(text)
     if collapse:

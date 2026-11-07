@@ -115,3 +115,47 @@ def test_postprocess_collapses_only_when_asked():
     """The app collapses the final text itself so it can log the original."""
     assert qt.postprocess("我我我们走吧") == "我我我们走吧"
     assert qt.postprocess("我我我们走吧", collapse=True) == "我们走吧"
+
+
+# ── Intentional repeats vs. runaway loops (2026-11-07) ──
+# Whisper's strip_trailing_repetition deleted any tail repeated 3+ times, so
+# "Naughty, naughty, naughty." was pasted as "" and "Hailey is naughty,
+# naughty, naughty." as "Hailey is". People repeat 2-4 times on purpose;
+# a looping model repeats dozens of times.
+
+@pytest.mark.parametrize("text", [
+    "Naughty, naughty, naughty.",
+    "Hailey is naughty, naughty, naughty.",
+    "Bye bye bye.",
+    "No, no, no.",
+    "我们走吧走吧走吧。",
+    "对对对对。",
+    "哈哈哈哈哈哈哈哈",
+    "对对对对对对，就是这样。",
+    "No no no no no no.",
+])
+def test_intentional_repeats_are_kept(text):
+    assert qt.postprocess(text, strip_filler_words=False) == text
+
+
+def test_runaway_loop_keeps_one_copy():
+    """2026-10-29 meeting: the live decoder looped on 我们 ~225 times."""
+    text = "will be like required to? " + "我们" * 120
+    out = qt.postprocess(text, strip_filler_words=False, tight=False)
+    assert out.startswith("will be like required to?")
+    assert out.count("我们") == 1
+
+
+def test_runaway_english_loop_keeps_one_copy():
+    out = qt.postprocess("Okay. " + "Thank you. " * 9, strip_filler_words=False)
+    assert out.lower().count("thank you") == 1 and out.startswith("Okay.")
+
+
+def test_six_repeats_of_a_phrase_count_as_a_loop():
+    out = qt.trim_runaway_loop("so " + "let me check " * 6)
+    assert out.count("let me check") == 1
+
+
+def test_five_repeats_are_still_speech():
+    text = "go go go go go"
+    assert qt.trim_runaway_loop(text) == text
