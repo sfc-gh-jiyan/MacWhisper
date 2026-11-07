@@ -156,8 +156,8 @@ def test_mark_speech_start_first_call_wins():
     t.mark_speech_start(5.0)
     t.mark_speech_start(9.0)
     assert t.segment_start == 5.0
-    t.reset_segment()
-    assert t.segment_start is None
+    t.reset_segment(7.0)
+    assert t.segment_start is None and t.buffer_start == 7.0
 
 
 def test_processor_setter_works_before_start():
@@ -165,3 +165,78 @@ def test_processor_setter_works_before_start():
     p = FakeProc()
     s._processor = p
     assert s._tracks[0].processor is p and s._processor is p
+
+
+# ── Review fixes: outage offset = buffer start; close failure path ──
+
+class FailProc(FakeProc):
+    """Fails like Qwen3 once the clock passes fail_at (process_iter or close)."""
+
+    def __init__(self, clock, fail_at, on="iter"):
+        super().__init__()
+        self._clock, self._fail_at, self._on = clock, fail_at, on
+
+    def _maybe_fail(self, where):
+        from qwen_backend import QwenUnavailable
+        if where == self._on and self._clock.t >= self._fail_at:
+            raise QwenUnavailable("down")
+
+    def process_iter(self):
+        self._maybe_fail("iter")
+        return super().process_iter()
+
+    def segment_close(self):
+        self._maybe_fail("close")
+        return super().segment_close()
+
+
+class CatchProc(FakeProc):
+    def segment_close(self):
+        return "caught" if len(self.audio_buffer) else ""
+
+
+def _outage_session(clock, proc):
+    s = MeetingSession(backend=None, vad=ScriptVAD(), audio_source=SimpleNamespace(),
+                       processor_factory=lambda: CatchProc())
+    s._meeting_start = clock.t
+    s._state = "recording"
+    s._segments = []
+    s._processor = proc
+    s._tracks[0].buffer_start = clock.t        # what start() does
+    return s
+
+
+def test_catch_up_starts_at_buffer_start_not_first_speech(fake_clock):
+    start = fake_clock.t
+    s = _outage_session(fake_clock, FailProc(fake_clock, fail_at=start + 25))
+    for t in range(1, 10):
+        _feed(s, fake_clock, start + t, speech=True)
+    _feed(s, fake_clock, start + 10, speech=False, silence=True)    # close #1 at 10
+    for t in range(11, 20):
+        _feed(s, fake_clock, start + t, speech=False)
+    for t in range(20, 30):                                         # fails at 25
+        _feed(s, fake_clock, start + t, speech=True)
+    assert s._engine_down
+    s._catch_up_buffered()
+    caught = [g for g in s.segments if g.text == "caught"]
+    assert caught and caught[0].start_time == pytest.approx(10.0, abs=1.0)
+
+
+def test_close_failure_then_catch_up_keeps_content_in_order(fake_clock):
+    start = fake_clock.t
+    s = _outage_session(fake_clock, FailProc(fake_clock, fail_at=start + 10, on="close"))
+    for t in range(1, 10):
+        _feed(s, fake_clock, start + t, speech=True)
+    _feed(s, fake_clock, start + 10, speech=False, silence=True)    # close fails
+    assert s._engine_down and not s.segments
+    for t in range(11, 15):
+        _feed(s, fake_clock, start + t, speech=True)
+    fake_clock.t = start + 15
+    s._catch_up_buffered()
+    assert s.segments and all(g.text == "caught" for g in s.segments)
+    assert s.segments[0].start_time == pytest.approx(0.0, abs=0.1)   # nothing lost
+    total = sum(g.end_time - g.start_time for g in s.segments)
+    assert total == pytest.approx(14.0, abs=1.0)                     # all buffered audio
+    starts = [g.start_time for g in s.segments]
+    assert starts == sorted(starts) and all(g.end_time >= g.start_time for g in s.segments)
+    assert s._tracks[0].segment_start is None                        # fresh segment after catch-up

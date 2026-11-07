@@ -220,6 +220,7 @@ class MeetingSession:
         # One live track (Qwen3 processor) for now; dual channel still mixes
         # mic/system by RMS into this single track.
         self._tracks = [ChannelTrack(None, self._new_processor(), self.vad)]
+        self._tracks[0].buffer_start = self._meeting_start
         self._engine_down = self._engine_gave_up = False
         self._fallback_used = False
         self.had_engine_outage = False
@@ -297,7 +298,9 @@ class MeetingSession:
         if not self._engine_down:   # buffered audio starts with the current segment
             now = time.time()
             for track in self._tracks:
-                track.outage_offset = max(0.0, (track.segment_start or now) - self._meeting_start)
+                # catch-up decodes the whole buffer, which starts at the last
+                # trim (not at the first speech)
+                track.outage_offset = max(0.0, (track.buffer_start or now) - self._meeting_start)
         self._engine_down = True
         self.had_engine_outage = True
         self._engine_gave_up = False
@@ -383,7 +386,7 @@ class MeetingSession:
                 self._segments.append(MeetingSegment(
                     text=text.strip(), start_time=t0, end_time=t0 + len(chunk) / SAMPLE_RATE))
         self._processor = self._new_processor()
-        self._track0().reset_segment()
+        self._track0().reset_segment(time.time())
         if self._on_engine_recovered:
             try:
                 self._on_engine_recovered()
@@ -730,7 +733,7 @@ class MeetingSession:
             return
         if text.strip():
             self._commit_segment(track, text)
-        track.reset_segment()
+        track.reset_segment(time.time())
 
     # ── Internal: transcript formatting ──────────────────────
 

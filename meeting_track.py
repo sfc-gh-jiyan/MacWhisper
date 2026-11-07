@@ -19,6 +19,7 @@ class ChannelTrack:
         self.processor = processor
         self.vad = vad
         self.segment_start: float | None = None   # wall clock of first speech chunk
+        self.buffer_start: float | None = None    # wall clock where audio_buffer starts
         self.outage_offset = 0.0          # meeting time where the buffered audio starts
         self.vad_skip_count = 0
         logger.debug("ChannelTrack created (source=%s)", source)
@@ -53,7 +54,7 @@ class ChannelTrack:
         ready = getattr(self.processor, "ready_to_close", None)
         return True if ready is None else bool(ready(silence_ms))
 
-    def reset_segment(self) -> None:
+    def reset_segment(self, now: float) -> None:
         """After a segment close: trim the buffer and start a fresh segment.
 
         After segment_close() the audio buffer still holds all old audio.
@@ -76,3 +77,4 @@ class ChannelTrack:
         if self.vad:
             self.vad.reset()
         self.segment_start = None
+        self.buffer_start = now           # the trimmed buffer holds audio from here on
