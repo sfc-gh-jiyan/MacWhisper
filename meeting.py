@@ -21,6 +21,7 @@ import numpy as np
 from audio_capture import AudioSource, MicrophoneSource, SystemAudioSource
 from asr_backend import ASRBackend, WordTimestamp
 from vad import VoiceActivityDetector
+from meeting_track import ChannelTrack
 from subtitle_export import export_cues, export_srt, export_vtt, word_cues  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,6 @@ class MeetingSession:
         self._engine_back = threading.Event()   # set by the restart thread
         self._engine_down = False               # Qwen3-only: engine restarting, audio buffered
         self.had_engine_outage = False          # app forces the final pass if True
-        self._outage_offset = 0.0               # meeting time where the buffered audio starts
         self._engine_gave_up = False
         self._engine_ready = engine_ready       # () -> bool: engine loaded (Qwen3 only)
         # Raw audio is only written to disk when explicitly enabled —
@@ -155,10 +155,41 @@ class MeetingSession:
         self._segments: list[MeetingSegment] = []
         self.transcript_path: str | None = None  # set by _auto_save()
         self._meeting_start: float = 0.0
-        self._processor = None   # live processor (QwenSegmentProcessor)
+        self._tracks: list[ChannelTrack] = []   # per-source live state
 
         # Session ID for file naming
         self._session_id: str = ""
+
+    # ── Track-0 compatibility (single channel; tests and app.py use these) ──
+
+    def _track0(self) -> ChannelTrack:
+        if not self._tracks:
+            self._tracks = [ChannelTrack(None, None, self.vad)]
+        return self._tracks[0]
+
+    @property
+    def _processor(self):
+        return self._tracks[0].processor if self._tracks else None
+
+    @_processor.setter
+    def _processor(self, proc) -> None:
+        self._track0().processor = proc
+
+    @property
+    def _outage_offset(self) -> float:
+        return self._track0().outage_offset
+
+    @_outage_offset.setter
+    def _outage_offset(self, value: float) -> None:
+        self._track0().outage_offset = value
+
+    @property
+    def _segment_start_time(self) -> float | None:
+        return self._track0().segment_start
+
+    @_segment_start_time.setter
+    def _segment_start_time(self, value: float | None) -> None:
+        self._track0().segment_start = value
 
     @property
     def state(self) -> str:
@@ -185,10 +216,10 @@ class MeetingSession:
         self._segments = []
         self._mic_frames = []
         self._sys_frames = []
-        self._segment_start_time = time.time()  # wall-clock start of current segment
 
-        # Create the live processor (Qwen3)
-        self._processor = self._new_processor()
+        # One live track (Qwen3 processor) for now; dual channel still mixes
+        # mic/system by RMS into this single track.
+        self._tracks = [ChannelTrack(None, self._new_processor(), self.vad)]
         self._engine_down = self._engine_gave_up = False
         self._fallback_used = False
         self.had_engine_outage = False
@@ -232,10 +263,11 @@ class MeetingSession:
         self._stop_sources()
 
         # Commit current segment
-        if self._processor:
-            text = self._processor.segment_close()
-            if text.strip():
-                self._commit_segment(text)
+        for track in self._tracks:
+            if track.processor:
+                text = track.processor.segment_close()
+                if text.strip():
+                    self._commit_segment(track, text)
 
         print("[MEETING] Paused")
 
@@ -263,7 +295,9 @@ class MeetingSession:
         buffer until the engine is back; saved segments stay."""
         logger.warning("Live meeting engine failed (%s) — buffering audio while it restarts", exc)
         if not self._engine_down:   # buffered audio starts with the current segment
-            self._outage_offset = max(0.0, self._segment_start_time - self._meeting_start)
+            now = time.time()
+            for track in self._tracks:
+                track.outage_offset = max(0.0, (track.segment_start or now) - self._meeting_start)
         self._engine_down = True
         self.had_engine_outage = True
         self._engine_gave_up = False
@@ -349,9 +383,7 @@ class MeetingSession:
                 self._segments.append(MeetingSegment(
                     text=text.strip(), start_time=t0, end_time=t0 + len(chunk) / SAMPLE_RATE))
         self._processor = self._new_processor()
-        self._segment_start_time = time.time()
-        if self.vad:
-            self.vad.reset()
+        self._track0().reset_segment()
         if self._on_engine_recovered:
             try:
                 self._on_engine_recovered()
@@ -370,31 +402,16 @@ class MeetingSession:
             return None
 
     def _may_close_on_silence(self, silence_ms: int) -> bool:
-        """Let the live processor veto a silence close (Qwen3: a tiny
-        fragment waits for a longer pause). Processors without a veto always close."""
-        ready = getattr(self._processor, "ready_to_close", None)
-        return True if ready is None else bool(ready(silence_ms))
+        """Let the live processor veto a silence close (see ChannelTrack)."""
+        return self._track0().may_close_on_silence(silence_ms)
 
     def _has_pending_segment(self) -> bool:
-        """Text OR untranscribed audio in the current segment (at stop:
-        a Qwen3 segment can have audio but no decode result yet)."""
-        if self._segment_has_text():
-            return True
-        pending = getattr(self._processor, "has_pending_speech", None)
-        return bool(pending()) if pending is not None else False
+        """Text OR untranscribed audio in the current segment."""
+        return self._track0().has_pending()
 
     def _segment_has_text(self) -> bool:
-        """True if the current segment has confirmed OR unconfirmed words.
-
-        Both segment-close triggers used to require confirmed words. With
-        unstable recognition nothing ever confirmed, so the whole hypothesis
-        stayed gray on screen and never reached the transcript; segment_close
-        force-confirms the gray tail, so it is safe to close on either.
-        """
-        p = self._processor
-        if p is None:
-            return False
-        return bool(p.committed or p.transcript_buffer.peek_unconfirmed())
+        """True if the current segment has confirmed OR unconfirmed words."""
+        return self._track0().has_text()
 
     def stop(self, wait_s: float = 5.0) -> str:
         """Stop meeting and return full transcript text.
@@ -417,18 +434,19 @@ class MeetingSession:
         # Commit final segment. Under the processor lock: if the loop thread
         # is still inside a decode (wait timed out), wait for it to finish.
         with self._proc_lock:
-            if self._processor and self._engine_down:
-                logger.warning("Meeting stopped while the live engine was down — "
-                               "%.0fs of audio left to the final pass",
-                               len(getattr(self._processor, "audio_buffer", ())) / SAMPLE_RATE)
-                self._processor.reset()
-                self._processor = None
-            if self._processor:
-                if self._has_pending_segment():
-                    self._close_and_trim_segment()
-                if self._processor:
-                    self._processor.reset()
-                self._processor = None
+            for track in self._tracks:
+                if track.processor and self._engine_down:
+                    logger.warning("Meeting stopped while the live engine was down — "
+                                   "%.0fs of audio left to the final pass",
+                                   len(getattr(track.processor, "audio_buffer", ())) / SAMPLE_RATE)
+                    track.processor.reset()
+                    track.processor = None
+                if track.processor:
+                    if track.has_pending():
+                        self._close_and_trim_segment(track)
+                    if track.processor:
+                        track.processor.reset()
+                    track.processor = None
 
         # Build full transcript
         full_text = self._build_transcript()
@@ -533,7 +551,8 @@ class MeetingSession:
         """
         last_mic_idx = 0
         last_sys_idx = 0
-        self._vad_skip_count = 0
+        for track in self._tracks:
+            track.vad_skip_count = 0
 
         while self.state == "recording":
             time.sleep(0.05)
@@ -583,73 +602,79 @@ class MeetingSession:
         else:
             chosen = sys_chunk
 
-        # Convert and feed to processor
+        self._feed_track(self._track0(), chosen)
+
+    def _feed_track(self, track: ChannelTrack, chosen) -> None:
+        """Feed one chunk to a track: VAD, segment breaks, transcription."""
+        proc = track.processor
+        now = time.time()
         audio_float = chosen.astype(np.float32) / 32768.0
         if self._engine_down:
             # Qwen3 only, engine restarting: collect audio, decode nothing
             if self._engine_gave_up:
                 return               # the meeting final pass will transcribe it
-            self._processor.insert_audio_chunk(audio_float)
-            if self.vad and self.vad.process_chunk(chosen)["is_speech"]:
-                mark = getattr(self._processor, "mark_speech", None)
-                if mark is not None:
-                    mark()
+            proc.insert_audio_chunk(audio_float)
+            if not track.vad or track.vad.process_chunk(chosen)["is_speech"]:
+                track.mark_speech_start(now)
+                if track.vad:
+                    mark = getattr(proc, "mark_speech", None)
+                    if mark is not None:
+                        mark()
             return
-        self._processor.insert_audio_chunk(audio_float)
+        proc.insert_audio_chunk(audio_float)
 
-        # VAD processing
-        if self.vad:
+        if not track.vad:
+            track.mark_speech_start(now)   # no VAD: every chunk counts as speech
+        else:
             # Silero is a stateful RNN: each chunk must reach it exactly
-            # ONCE. Re-evaluating the same chunk (the old is_speech() call
-            # below) corrupted its hidden state and misclassified over
-            # half of real speech as silence.
-            vad_state = self.vad.process_chunk(chosen)
+            # ONCE. Re-evaluating the same chunk corrupted its hidden state
+            # and misclassified over half of real speech as silence.
+            vad_state = track.vad.process_chunk(chosen)
             chunk_is_speech = vad_state["is_speech"]
-            if hasattr(self._processor, "uses_vad"):
-                self._processor.uses_vad = True
-            mark = getattr(self._processor, "mark_speech", None)
-            if mark is not None and chunk_is_speech:
-                mark()            # Qwen3: this segment has had real speech
+            if hasattr(proc, "uses_vad"):
+                proc.uses_vad = True
+            if chunk_is_speech:
+                track.mark_speech_start(now)
+                mark = getattr(proc, "mark_speech", None)
+                if mark is not None:
+                    mark()            # Qwen3: this segment has had real speech
 
             # Safety: force segment break if current segment exceeds 30s.
             # Natural speech rarely has 2s clean silence, so the extended-
             # silence trigger alone can produce unbounded segments (56s+).
-            # A 30s cap keeps segments manageable and limits accumulation
-            # of transcription errors within a single segment.
-            # NOTE: use wall-clock time, NOT audio_buffer length — the
-            # buffer is capped at max_buffer_s (8s) by pre-inference trim.
+            # Measured from the segment's first speech (wall clock, NOT
+            # audio_buffer length — the buffer is capped by pre-inference trim).
             MAX_SEGMENT_DURATION_S = 30.0
-            seg_elapsed = time.time() - self._segment_start_time
-            if seg_elapsed > MAX_SEGMENT_DURATION_S and self._segment_has_text():
-                self._close_and_trim_segment()
+            seg_elapsed = now - (track.segment_start or now)
+            if seg_elapsed > MAX_SEGMENT_DURATION_S and track.has_text():
+                self._close_and_trim_segment(track)
                 return
             # Extended silence -> paragraph break (segment commit)
-            if self.vad.is_extended_silence(self.extended_silence_ms):
-                seg_duration = len(self._processor.audio_buffer) / SAMPLE_RATE
-                silence_ms = getattr(self.vad, "silence_ms", self.extended_silence_ms)
-                if (seg_duration > 1.0 and self._segment_has_text()
-                        and self._may_close_on_silence(silence_ms)):
-                    self._close_and_trim_segment()
+            if track.vad.is_extended_silence(self.extended_silence_ms):
+                seg_duration = len(proc.audio_buffer) / SAMPLE_RATE
+                silence_ms = getattr(track.vad, "silence_ms", self.extended_silence_ms)
+                if (seg_duration > 1.0 and track.has_text()
+                        and track.may_close_on_silence(silence_ms)):
+                    self._close_and_trim_segment(track)
                     return
 
             # VAD pre-filter: skip transcription during pure silence
             if not chunk_is_speech:
-                self._vad_skip_count += 1
-                if self._vad_skip_count % 20 == 0:
-                    print(f"[MEETING] VAD skip (silence): {self._vad_skip_count} chunks")
+                track.vad_skip_count += 1
+                if track.vad_skip_count % 20 == 0:
+                    print(f"[MEETING] VAD skip (silence): {track.vad_skip_count} chunks")
                 return
-            else:
-                self._vad_skip_count = 0
+            track.vad_skip_count = 0
 
         # Qwen3: bound each segment's audio (every decode re-reads it all).
         # Outside the VAD block so it holds with or without VAD.
-        seg_full = getattr(self._processor, "segment_full", None)
+        seg_full = getattr(proc, "segment_full", None)
         if seg_full is not None and seg_full():
-            self._close_and_trim_segment()
+            self._close_and_trim_segment(track)
             return
 
         # Run transcription iteration
-        result = self._guarded(self._processor.process_iter)
+        result = self._guarded(proc.process_iter)
         if result is None:
             return
 
@@ -658,7 +683,7 @@ class MeetingSession:
         # Notify overlay
         if self._on_update:
             try:
-                debug = self._processor.last_debug if self._processor else {}
+                debug = track.processor.last_debug if track.processor else {}
                 self._on_update(confirmed, unconfirmed, self._segments, debug)
             except Exception:
                 pass
@@ -666,76 +691,46 @@ class MeetingSession:
 
     # ── Internal: segment management ─────────────────────────
 
-    def _commit_segment(self, text: str) -> None:
-        """Add a committed segment to the meeting record."""
-        elapsed = time.time() - self._meeting_start
-        # Estimate segment start from word timestamps
-        # Use committed (current segment words), NOT get_confirmed_words()
-        # which returns committed_history (all words since meeting start).
-        # At this point segment_close() has been called but committed hasn't
-        # been cleared yet, so it contains exactly this segment's words.
-        words = list(self._processor.committed) if self._processor else []
+    def _commit_segment(self, track: ChannelTrack, text: str) -> None:
+        """Add a committed segment to the meeting record.
 
-        start_time = elapsed - len(text) * 0.1  # rough estimate
-        if words:
-            start_time = words[0][0]
+        start_time is the wall clock of the segment's first speech chunk:
+        word timestamps are relative to a trimmed buffer (gave negative or
+        previous-close starts), so they are never used for it.
+        """
+        now = time.time()
+        elapsed = now - self._meeting_start
+        start_time = max(0.0, (track.segment_start or now) - self._meeting_start)
+        # committed still holds exactly this segment's words (not yet cleared)
+        words = list(track.processor.committed) if track.processor else []
 
         segment = MeetingSegment(
             text=text.strip(),
             start_time=start_time,
             end_time=elapsed,
             words=list(words),
+            source=track.source,
         )
         self._segments.append(segment)
         print(f"[MEETING] Segment #{len(self._segments)}: "
               f"{len(text)} chars at {elapsed:.0f}s")
 
-    def _close_and_trim_segment(self) -> None:
-        """Close current segment, trim audio buffer, and reset for next segment.
+    def _close_and_trim_segment(self, track: ChannelTrack | None = None) -> None:
+        """Close the track's segment, trim its audio buffer, start the next.
 
-        This is the standard segment-break sequence used by both extended-silence
-        detection and the max-segment-duration safety net.
-
-        After segment_close(), the audio buffer still contains all old audio.
-        Without trimming, the next process_iter() would re-transcribe it,
-        causing: (1) echo detection dropping legitimate new confirmations
-        (content loss), and (2) near-duplicate text slipping past echo
-        detection (duplication).  Trimming the buffer to the segment's end
-        time eliminates both problems at the source.
+        Used by extended-silence detection, the max-duration safety net,
+        segment_full and stop. Trimming stops the next process_iter() from
+        re-transcribing old audio (content loss / duplication).
         """
-        text = self._guarded(self._processor.segment_close)
+        track = track or self._track0()
+        text = self._guarded(track.processor.segment_close)
         if text is None:          # Qwen3 failed; the processor keeps buffering the audio
-            if self.vad:
-                self.vad.reset()
-            self._segment_start_time = time.time()
+            if track.vad:
+                track.vad.reset()
             return
         if text.strip():
-            self._commit_segment(text)
-
-        # Trim audio buffer up to the last committed word's end time.
-        # Keep only audio that arrived after the segment ended.
-        if self._processor.committed:
-            seg_end = self._processor.committed[-1][1]
-            trim_samples = int(
-                (seg_end - self._processor.buffer_time_offset) * SAMPLE_RATE
-            )
-            trim_samples = min(trim_samples, len(self._processor.audio_buffer))
-            if trim_samples > 0:
-                self._processor.audio_buffer = self._processor.audio_buffer[trim_samples:]
-                self._processor.buffer_time_offset = seg_end
-
-        # Clear committed words so next segment starts fresh.
-        self._processor.committed = []
-        # Clear echo state: old audio is trimmed, so there's nothing to
-        # echo-detect against. Without this, the retained _last_committed_raw
-        # would cause echo detection to drop legitimate new words.
-        self._processor._last_committed_raw = ""
-
-        if self.vad:
-            self.vad.reset()
-
-        # Reset segment timer for the next segment
-        self._segment_start_time = time.time()
+            self._commit_segment(track, text)
+        track.reset_segment()
 
     # ── Internal: transcript formatting ──────────────────────
 
@@ -745,11 +740,12 @@ class MeetingSession:
         for seg in self._segments:
             parts.append(seg.text)
 
-        # Add any uncommitted text from current processor
-        if self._processor and self._processor.committed_history:
-            current = "".join(w[2] for w in self._processor.committed_history)
-            if current.strip():
-                parts.append(current.strip())
+        # Add any uncommitted text from the live processors
+        for track in self._tracks:
+            if track.processor and track.processor.committed_history:
+                current = "".join(w[2] for w in track.processor.committed_history)
+                if current.strip():
+                    parts.append(current.strip())
 
         return "\n\n".join(parts)
 
