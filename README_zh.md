@@ -35,46 +35,48 @@
 
 > **请从源码安装。** Homebrew 配方目前还是 v0.6.1，那是旧的 Whisper 版本，会在下一次发版时更新。
 
-### 1. 下载代码并运行安装脚本
+### 1. 检查系统要求
+
+- Apple Silicon Mac（其他架构 `install.sh` 会直接停止）
+- PATH 中有 `python3` 3.10 或更高版本（`python3 --version`）
+- 语音引擎需要 [uv](https://docs.astral.sh/uv/) **或** PATH 中的 `python3.12`（`brew install uv`）
+- Command Line Tools（`xcode-select --install`）：`clang` 用来编译 App 启动器，`swift` 用来编译 Meeting Mode 的辅助程序
+- 约 4 GB 可用磁盘空间（见[系统要求](#系统要求)）
+
+### 2. 下载代码并运行安装脚本
 
 ```bash
-brew install uv                 # 如果 uv 和 Python 3.12 都没有
 git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
-./install.sh
+bash install.sh
 ```
 
-`install.sh` 会做五件事：
-1. 创建 App 的运行环境 `venv` 并安装依赖
-2. 生成 `/Applications/MacWhisper.app`，它运行的就是这个文件夹里的代码
-3. 在独立环境 `.venv-qwen` 里装好千问 Qwen3-ASR 语音引擎，并下载模型（第一次安装时最耗时的一步）
-4. 编译系统声音小程序，会议模式靠它录到对方的声音
-5. 检查所有依赖都能正常导入
+`install.sh` 会显示六个步骤：
 
-如果第 3 或第 4 步失败，安装会继续往下走并提示你；之后运行 `make qwen-setup` 或 `make helper` 补上即可。没有系统声音小程序，会议只能录到你自己的麦克风。
+| 步骤 | 做什么 | 装到哪里 |
+|---|---|---|
+| 1/6 | 创建 App 的 Python 环境（已存在则跳过） | 本文件夹的 `venv/` |
+| 2/6 | 安装 `requirements.txt`（需要几分钟） | `venv/` |
+| 3/6 | 编译原生启动器 App（`scripts/build_app.sh`），并创建数据文件夹 | `/Applications/MacWhisper.app`、`~/.macwhisper/logs`、`~/.macwhisper/audio` |
+| 4/6 | 在独立环境中安装 Qwen3-ASR 语音引擎，并下载 0.6B 模型（约 2.9 GB，最耗时的一步） | `.venv-qwen/`；模型在 `~/.cache/huggingface/` |
+| 5/6 | 编译系统音频辅助程序，让 Meeting Mode 能听到其他参会者 | `swift/SystemAudioHelper/.build/release/SystemAudioHelper` |
+| 6/6 | 检查 App 的依赖能否导入 | — |
 
-### 2. 授予权限，然后启动
+第 4 或第 5 步失败时，安装会继续并显示警告。解决原因后（uv / Python 3.12，或 Command Line Tools），再运行 `make qwen-setup` 或 `make helper`。没有辅助程序时，会议只录你的麦克风。
 
-从 `/Applications` 打开 **MacWhisper**。第一次启动时，它会一步步带你完成三个必需权限：逐个向 macOS 申请、打开对应的系统设置页面、确认已经打开，最后提示重启（辅助功能和输入监控要重启后才生效）。之后随时可以从菜单 **Permissions…** 再打开。想手动设置的话，详细说明见下文。
+`MacWhisper.app` 只是一个启动器：它用 `venv` 运行这个文件夹里的代码。安装后不要移动或删除这个文件夹（移动后请运行 `make app`）。
 
-### 必需权限（重要！）
+### 3. 第一次启动
 
-打开 **系统设置 → 隐私与安全性**，为 `MacWhisper` 打开：
+1. 从 `/Applications`（或 Spotlight）打开 **MacWhisper**。
+2. 如果缺少权限，设置引导会自动打开，逐项处理——见[权限](#权限)。
+3. 最后点击 **Restart Now**，让 Accessibility 和 Input Monitoring 生效。
 
-| 权限 | 用途 |
-|---|---|
-| **麦克风** | 录你的声音（第一次使用时系统会询问） |
-| **辅助功能** | 把文字粘贴到你正在输入的 App |
-| **输入监控** | 识别右 Option 键和其他快捷键 |
-| **录屏与系统录音** | 仅会议模式需要：录到对方的声音 |
+### 4. 确认能用
 
-辅助功能和输入监控需要点 **+**，在 `/Applications` 里选 `MacWhisper`，再打开开关。
-
-> **从终端运行？** 如果你用 `./run.sh` 而不是 App，需要给你的**终端程序**（Terminal、iTerm、Warp 等）授予这些权限。
-
-> **权限没生效？** 授权后退出并重新打开 MacWhisper。在 `~/.macwhisper/logs/macwhisper.log` 里查找 `Permissions (...): accessibility=True input_monitoring=True`。如果开关看起来已打开但日志显示 `False`，退出 MacWhisper，运行 `make reset-permissions`，再重新授权这两项。
->
-> **没看到"会议已保存"的横幅？** 通知会进通知中心。想看到横幅，打开 系统设置 → 通知 → MacWhisper，选择 **横幅** 或 **提醒**。如果你开了专注模式，请把 MacWhisper 加入允许的 App。
+1. 菜单栏出现麦克风图标（🎙）。
+2. 点进任意输入框（例如备忘录），按住 **右 ⌥** 说一句话，松开。录音时图标变为 🔴，转写时为 💬，然后文字被粘贴进去。
+3. 没有反应时，见[故障排查](#故障排查)。
 
 ### 更新
 
@@ -100,6 +102,47 @@ rm -rf ~/.macwhisper                    # 设置、日志、词表、会议记�
 ```
 
 再删掉克隆下来的文件夹即可。下载的模型保存在 `~/.cache/huggingface/`，需要的话手动删除。
+
+## 权限
+
+Push to Talk 需要三项 macOS 权限，Meeting Mode 还需要第四项。都在 **System Settings → Privacy & Security** 中。
+
+| 权限 | Privacy & Security 中的位置 | 用途 | 没有它会怎样 |
+|---|---|---|---|
+| **Microphone** | Microphone | 录你的声音 | 什么都录不到 |
+| **Accessibility** | Accessibility | 把文字粘贴到你正在输入的 App | 文字不会被粘贴 |
+| **Input Monitoring** | Input Monitoring | 识别右 ⌥ 和其他快捷键 | 按住右 ⌥ 没有反应 |
+| **Screen & System Audio Recording**（仅 Meeting Mode） | Screen & System Audio Recording（旧版 macOS：Screen Recording） | 录下会议中其他人的声音（系统音频） | 辅助程序只收到静音；没有 Remote 行 |
+
+### 设置引导
+
+启动时 MacWhisper 会检查三项必需权限。缺少任何一项，逐步设置引导会自动打开。也可以随时从菜单栏打开：**Permissions…**。每一项权限：
+
+1. 先说明为什么需要。点击 **Allow**（macOS 弹出自己的授权提示）或 **Open Settings**（打开对应的 System Settings 页面）。**Skip** 跳过。
+2. 在 System Settings 里打开 **MacWhisper**。
+3. 如果仍未打开，对话框会提供 **Check Again**、**Open Settings** 和 **Skip**。
+4. 最后，如果刚授予了 Accessibility 或 Input Monitoring，点击 **Restart Now**：macOS 只有在 App 重启后才对正在运行的 App 应用这两项权限。
+
+手动设置：Accessibility 和 Input Monitoring 点击 **+**，选择 `/Applications` 中的 `MacWhisper`，再打开开关。
+
+### 该打开哪一项
+
+- 从 `/Applications/MacWhisper.app` 启动：打开 **MacWhisper**。启动器内嵌了 Python，所以权限属于这个 App，而不是 Python 或 Terminal。
+- 用 `./run.sh` 启动：需要给你的**终端 App**（Terminal、iTerm、Warp……）授权。
+
+想确认结果，可以在 `~/.macwhisper/logs/macwhisper.log` 里找这一行：`Permissions (pid …): accessibility=True input_monitoring=True`。`False` 表示那项权限还没开。（这一行里显示的路径是内嵌的 Python，从 App 启动时也是这样；要打开的是 **MacWhisper**，不是 Python。）
+
+## 故障排查
+
+**按住右 ⌥ 没反应，或者文字没有粘贴。** 从菜单打开 **Permissions…**，检查 Input Monitoring（按键）和 Accessibility（粘贴），然后重启 MacWhisper。如果开关看起来是开的但日志里是 `False`：重新编译 App 后，旧的权限记录可能和新 App 不再匹配。退出 MacWhisper，运行 `make reset-permissions`，重新打开并再次授权。
+
+**会议里没有 Remote 行。** 确认辅助程序已编译（`make helper`；需要 `xcode-select --install`），并且 MacWhisper 的 **Screen & System Audio Recording** 已打开，然后重启。
+
+**没有看到"Meeting saved"横幅。** 通知会进入通知中心。要看到横幅，打开 System Settings → Notifications → MacWhisper，选择 **Banners** 或 **Alerts**。如果你使用专注模式，把 MacWhisper 加入允许的 App。
+
+**公司电脑上 App 打不开。** `MacWhisper.app` 是在你的 Mac 上编译的，没有 Apple 开发者 ID 签名。受管理的 Mac 上的安全软件可能会拦截它。请联系 IT 部门。
+
+**日志。** `~/.macwhisper/logs/macwhisper.log`。
 
 ## 使用
 
