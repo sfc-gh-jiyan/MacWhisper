@@ -78,3 +78,47 @@ def test_write_report(tmp_path):
     path = error_report.write_report(str(p), str(out), days=1, now=NOW)
     assert path == str(out)
     assert "PortAudioError" in out.read_text()
+
+
+# ── Dictated text must not reach error_report.md ─────────────
+
+def test_redact_correction_not_understood():
+    msg = "Correction command not understood: '我的密码是 hunter2'"
+    out = error_report._redact_user_text(msg)
+    assert "hunter2" not in out
+    assert out == "Correction command not understood: <13 chars>"
+
+
+def test_redact_same_sides_double_quoted_repr():
+    msg = 'Correction command heard both sides the same: "it\'s x = x"'
+    out = error_report._redact_user_text(msg)
+    assert out == "Correction command heard both sides the same: <10 chars>"
+
+
+def test_redact_taught_by_voice_both_sides():
+    out = error_report._redact_user_text("Correction taught by voice: 'haxi' -> 'hash'")
+    assert out == "Correction taught by voice: <4 chars> -> <4 chars>"
+
+
+def test_redact_manual_corrections_list_and_text():
+    out = error_report._redact_user_text("Manual corrections: [('哈什', 'hash')]")
+    assert "hash" not in out and out.startswith("Manual corrections: <")
+    out = error_report._redact_user_text("Manual corrections: secret words")
+    assert out == "Manual corrections: <12 chars>"
+
+
+def test_redact_leaves_other_messages_alone():
+    msg = "Error in thread 'Thread-29 (_start_recording)': PortAudioError"
+    assert error_report._redact_user_text(msg) == msg
+
+
+def test_report_sample_is_redacted_but_signature_groups(tmp_path):
+    p = tmp_path / "m.log"
+    p.write_text(
+        "2026-10-20 10:00:00 __main__ ERROR Correction command not understood: 'timed out secret'\n"
+        "2026-10-20 10:01:00 __main__ ERROR Correction command not understood: 'other words'\n"
+    )
+    groups = error_report.summarize(str(p), days=1, now=NOW)
+    text = error_report.render(groups, days=1, now=NOW)
+    assert "secret" not in text and "other words" not in text
+    assert "<16 chars>" in text or "<11 chars>" in text

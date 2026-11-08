@@ -33,3 +33,7 @@ meetings/
 .venv-eval/
 .venv-qwen/
 .venv-llm/
+
+# Local notes / review output (never commit)
+.memory/
+.security-review/

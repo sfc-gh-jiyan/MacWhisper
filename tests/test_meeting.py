@@ -940,7 +940,8 @@ class TestSegmentCloseWithoutConfirmedWords:
         session = MeetingSession(backend=backend, vad=SilenceAfterSpeechVad(),
                                  audio_source=MockAudioSource(), min_chunk_size=0.3)
         session.start()
-        deadline = time.time() + 6
+        # Generous cap: slow CI runners took >6 s (PR #39); the loop exits as soon as a segment exists.
+        deadline = time.time() + 20
         while time.time() < deadline and not session.segments:
             time.sleep(0.05)
         segments_before_stop = len(session.segments)
@@ -1004,7 +1005,8 @@ class TestQwenLiveInMeeting:
         self._unused = unused   # only processor_factory's backend may decode
         return session, qwen, failures
 
-    def _run(self, session, until, timeout=6):
+    def _run(self, session, until, timeout=20):
+        # Exits as soon as `until()` is true; the cap only matters on slow CI runners.
         session.start()
         deadline = time.time() + timeout
         while time.time() < deadline and not until():
@@ -1064,7 +1066,9 @@ class TestQwenLiveInMeeting:
         session, qwen, failures = self._session(
             ["ok"], fail_on=2, engine_restart=lambda: attempts.append(1) or False)
         session._engine_max_attempts = 3
-        self._run(session, until=lambda: False, timeout=1.5)
+        # Wait for the give-up itself, not a fixed 1.5 s: slow CI runners got only 2 attempts in.
+        self._run(session, until=lambda: session._engine_gave_up)
+        assert session._engine_gave_up
         assert len(attempts) == 3
 
     def test_restart_thread_stops_with_the_meeting(self):
