@@ -26,7 +26,7 @@ Qwen3-ASR is now the only engine. This release also adds self-correction, an opt
 - **See and type corrections:** **Add Correction…** (`哈什 = hash`) and **Corrections & Vocabulary…**; edits to `vocabulary.json` are picked up without a restart.
 - **Self-correction (phase A)** — MacWhisper learns your terms instead of you fixing them:
   - Vocabulary (`~/.macwhisper/vocabulary.json`): terms + how they get misheard (seeded with CSE, Snowflake, Cortex, memory).
-  - Vocabulary terms are sent to Qwen3 as hotwords and added to the Whisper prompt.
+  - Vocabulary terms are sent to Qwen3 as hotwords.
   - Rules on every dictation: spelled acronyms joined (`C S E` → `CSE`, stutters like `I I` kept), aliases replaced (`CIC` → `CSE`, `漫威` → `memory` only in mixed Chinese/English text), canonical casing.
   - Teach by voice: hold **⇧ + Push to Talk** and say "CIC 应该是 CSE" / "change CIC to CSE" — nothing is pasted, the correction is active at once.
   - Retype learning: re-dictating nearly the same sentence within 30 s records the changed words; a correction becomes active after it is seen twice.
@@ -56,6 +56,7 @@ Qwen3-ASR is now the only engine. This release also adds self-correction, an opt
 - Review and Add Correction guard against reversed or harmful corrections.
 - **Qwen3 meeting timeouts:** generation is capped, silent segments are skipped, and Qwen3 restarts during the meeting with backoff.
 - Meeting timestamps could be negative after an outage catch-up.
+- `scripts/bump_version.sh` moved `~/.macwhisper/transcripts.jsonl` into `archive/` on every version bump, emptying the dictation history; it now copies a snapshot and keeps the original.
 
 ## [0.7.3] — 2026-10-20
 
