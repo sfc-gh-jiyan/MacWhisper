@@ -10,7 +10,7 @@ on:
 jobs:
   verify:
     name: Verify & Test
-    runs-on: macos-14  # Apple Silicon (M1)
+    runs-on: macos-15  # Apple Silicon
     steps:
       - uses: actions/checkout@v4
 
@@ -69,10 +69,11 @@ jobs:
           bash -n scripts/build.sh
           bash -n scripts/release.sh
           bash -n tests/test_install.sh
+          bash -n tests/check_install.sh
 
   release:
     name: Release & Publish
-    runs-on: macos-14
+    runs-on: macos-15
     needs: verify
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
