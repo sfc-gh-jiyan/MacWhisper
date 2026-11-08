@@ -387,7 +387,7 @@ class TestOverlappingChannels:
 
 
 class TestDualChannelPipelineV2:
-    """Layer 1 integration: dual-channel path (separate mic/sys sources, RMS priority)."""
+    """Layer 1 integration: dual-channel path (separate Mic and Remote tracks)."""
 
     def _get_scenario(self, name="integration_alternating"):
         scenarios = _load_scenarios("integration")
@@ -431,7 +431,7 @@ class TestDualChannelPipelineV2:
         assert len(transcript) > 0, "Dual-channel alternating produced empty transcript"
 
     def test_dual_channel_overlapping(self):
-        """Dual-channel mode handles overlapping sources via RMS priority."""
+        """Dual-channel mode keeps both sides of overlapping speech (one track per source)."""
         s, mic_path, sys_path = self._get_scenario("integration_overlapping")
         session, backend = self._make_dual_session(
             mic_path, sys_path, offset_s=s["system_offset_s"],
@@ -605,7 +605,7 @@ class TestDualChannelQuality:
     def _run_and_evaluate(self, s, mic_path, sys_path, backend, pipeline="mixed"):
         """Run a scenario through the specified pipeline and return (transcript, scores).
 
-        pipeline: "mixed" (legacy MixedAudioSource) or "dual" (RMS priority selection)
+        pipeline: "mixed" (legacy MixedAudioSource) or "dual" (separate Mic and Remote tracks)
         """
         mode = s.get("mode", "alternating")
 
@@ -704,7 +704,7 @@ class TestDualChannelQuality:
         self._assert_thresholds(s, scores, mode)
 
     def test_scenario_quality_dual(self, scenario, backend):
-        """Run scenario via dual-channel RMS priority selection."""
+        """Run scenario via the dual-channel path (separate Mic and Remote tracks)."""
         s, mic_path, sys_path = scenario
         _, scores, mode, _ = self._run_and_evaluate(
             s, mic_path, sys_path, backend, pipeline="dual",
@@ -755,7 +755,7 @@ class TestGeneratedScenarios:
         mic_src = WavFileSource(mic_path, speed=1.0)
         sys_src = WavFileSource(sys_path, offset_s=s["system_offset_s"], speed=1.0)
 
-        # Use dual-channel path (RMS priority selection)
+        # Use dual-channel path (separate Mic and Remote tracks)
         session = MeetingSession(
             backend=backend,
             audio_source=mic_src,
@@ -1009,3 +1009,115 @@ def test_ground_truth_includes_archive_and_basenames(tmp_path):
         + json.dumps({"audio_file": "b.wav", "text": "live"}) + "\n")
     gt = _load_ground_truth(str(tmp_path))
     assert gt == {"a.wav": "archived", "b.wav": "live"}
+
+
+# ── Overlay label tests ───────────────────────────────────────
+
+class TestOverlayLabels:
+    """on_update text is labelled in dual-channel and plain in single-channel."""
+
+    class _FakeProc:
+        """Minimal processor stub: returns fixed (confirmed, unconfirmed)."""
+
+        def __init__(self, confirmed="", unconfirmed=""):
+            self._c, self._u = confirmed, unconfirmed
+            self.committed = [("word", 0.0)] if confirmed else []
+            self.last_debug = {}
+            self.audio_buffer = []
+            self._last_committed_raw = ""
+
+            class _TB:
+                def peek_unconfirmed(self):
+                    return []
+
+            self.transcript_buffer = _TB()
+
+        def insert_audio_chunk(self, _audio):
+            pass
+
+        def process_iter(self):
+            return self._c, self._u
+
+        def segment_full(self):
+            return False
+
+        def has_pending_speech(self):
+            return False
+
+    def _dual_session(self, on_update):
+        backend = MockBackend()
+        session = MeetingSession(backend=backend, on_update=on_update)
+        session._dual_channel = True
+        session._meeting_start = time.time()
+        session._build_tracks()
+        return session
+
+    def test_overlay_text_has_both_labels(self):
+        """Dual-channel on_update confirmed has 'Mic: ' lines and 'Remote: ' present."""
+        updates = []
+        session = self._dual_session(
+            lambda c, u, segs, dbg=None: updates.append((c, u))
+        )
+        chunk = np.zeros((1024, 1), dtype=np.int16)
+
+        # Mic first so its live_confirmed is stored on the track
+        session._tracks[0].processor = self._FakeProc("hello world", "mic tail")
+        session._feed_track(session._tracks[0], chunk)
+
+        # Remote with confirmed text — final update must show both tracks
+        session._tracks[1].processor = self._FakeProc("OK let me check", "remote tail")
+        session._feed_track(session._tracks[1], chunk)
+
+        assert updates, "on_update never called"
+        c, u = updates[-1]
+        lines = c.splitlines()
+        assert len(lines) >= 2, f"Expected >=2 lines in confirmed; got: {c!r}"
+        assert lines[-2].startswith("Mic: "), (
+            f"Second-to-last line must start with 'Mic: '; got: {lines[-2]!r}"
+        )
+        assert "Remote: " in (c + u), (
+            f"Expected 'Remote: ' in c+u; got c={c!r} u={u!r}"
+        )
+        assert any(line.startswith("Remote: ") for line in lines), (
+            f"Expected a confirmed line starting with 'Remote: '; got: {c!r}"
+        )
+
+    def _session_with(self, sources, segments, live):
+        session = MeetingSession(backend=MockBackend())
+        from meeting_track import ChannelTrack
+        session._tracks = [ChannelTrack(s, None, None) for s in sources]
+        session._segments = segments
+        for track, (c, u) in zip(session._tracks, live):
+            track.live_confirmed, track.live_unconfirmed = c, u
+        return session
+
+    def test_overlay_text_for_unlabelled_track_has_no_none_prefix(self):
+        """A track without a label never shows 'None: ' in the overlay."""
+        session = self._session_with([None], [], [("hi", "")])
+        c, u = session._overlay_text_for(session._tracks[0], "hi", "")
+        assert c == "hi"
+        c, u = session._overlay_text_for(session._tracks[0], "", "gray")
+        assert u == "gray"
+
+    def test_single_channel_overlay_unchanged(self):
+        """Single-channel on_update passes through confirmed/unconfirmed verbatim."""
+        updates = []
+        backend = MockBackend()
+        session = MeetingSession(
+            backend=backend,
+            on_update=lambda c, u, segs, dbg=None: updates.append((c, u)),
+        )
+        # _dual_channel stays False (default)
+        session._meeting_start = time.time()
+        session._build_tracks()
+        session._tracks[0].processor = self._FakeProc("hello world", "unconfirmed text")
+
+        chunk = np.zeros((1024, 1), dtype=np.int16)
+        session._feed_track(session._tracks[0], chunk)
+
+        assert updates, "on_update never called"
+        c, u = updates[-1]
+        assert "Mic: " not in c, f"'Mic:' must not appear in single-channel confirmed: {c!r}"
+        assert "Mic: " not in u, f"'Mic:' must not appear in single-channel unconfirmed: {u!r}"
+        assert c == "hello world", f"Single-channel confirmed must be verbatim; got: {c!r}"
+        assert u == "unconfirmed text", f"Single-channel unconfirmed must be verbatim; got: {u!r}"
