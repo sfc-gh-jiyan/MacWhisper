@@ -27,7 +27,7 @@ def test_parse_response_tolerates_fences_and_prose():
 
 
 def test_validate_requires_verbatim_evidence():
-    corpus = "这个哈什会变吗。我在用Gira开票。"
+    corpus = "这个哈什每次都一样吗。我在用Gira记任务。"
     cands = [
         {"heard": "哈什", "correct": "hash", "confidence": "high"},
         {"heard": "不存在的词", "correct": "x", "confidence": "high"},     # invented
@@ -48,7 +48,7 @@ def test_validate_skips_known_aliases():
 
 
 def test_run_applies_high_active_medium_pending_and_advances_state(tmp_path):
-    log = _log(tmp_path, ["这个哈什会变吗 version", "我在用Gira开票", "哈什又变了"])
+    log = _log(tmp_path, ["这个哈什每次都一样吗 version", "我在用Gira记任务", "哈什又不一样了"])
     v = _vocab(tmp_path)
     state = tmp_path / "state.json"
     reply = json.dumps([
@@ -62,7 +62,7 @@ def test_run_applies_high_active_medium_pending_and_advances_state(tmp_path):
     assert [(c.heard, c.correct) for c in res.pending] == [("Gira", "Jira")]
     assert v.find("hash").status == "active" and v.find("hash").source == "ai"
     assert v.find("Jira").status == "pending"
-    assert "这个哈什会变吗" in prompts[0]
+    assert "这个哈什每次都一样吗" in prompts[0]
     # second run: nothing new -> no LLM call
     res2 = vm.run(llm, v, log, str(state), model=MODEL, min_new=1)
     assert res2.examined == 0 and len(prompts) == 1
@@ -122,13 +122,13 @@ import pytest
 
 
 @pytest.mark.parametrize("heard,correct", [
-    ("fold的这个东西", "fold's thing"),                 # mixed-script phrase / translation
-    ("MCP不包括这个功能", "MCP does not include this feature"),
-    ("它它那个session", "it that session"),
-    ("At Atlassian MCP", "Atlassian MCP"),             # stutter removal
-    ("flip the those two parameters", "flip the two parameters"),
+    ("box的这个东西", "box's thing"),                 # mixed-script phrase / translation
+    ("API不包括这个按钮", "API does not include this button"),
+    ("它它那个window", "it that window"),
+    ("Gi GitHub app", "GitHub app"),             # stutter removal
+    ("swap the these two values", "swap the two values"),
     ("back up", "backup"),                             # spacing only
-    ("provisioning on the Thailand", "provisioning in Thailand"),
+    ("shipping on the Japan", "shipping in Japan"),
 ])
 def test_validate_rejects_rewrites(heard, correct):
     corpus = f"xx {heard} yy"

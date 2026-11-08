@@ -277,10 +277,10 @@ def test_strip_trailing_long_sentence_repetition():
 def test_strip_trailing_repetition_punct_variation():
     """Repetition with different punctuation between copies should be caught."""
     from text_utils import strip_trailing_repetition
-    text = "正常内容。人们最关心的是AI如何帮助推理。人们最关心的是AI如何帮助推理"
+    text = "正常内容。周末大家都想去公园散步。周末大家都想去公园散步"
     result = strip_trailing_repetition(text)
     assert "正常内容" in result
-    assert result.count("人们最关心的是AI如何帮助推理") <= 1
+    assert result.count("周末大家都想去公园散步") <= 1
 
 
 def test_strip_trailing_repetition_mixed_punct():
@@ -344,8 +344,8 @@ def test_find_after_overlap():
 def test_find_after_overlap_case_insensitive():
     """Overlap matching ignores case differences from Whisper."""
     from text_utils import find_after_overlap
-    committed = "我不知道test3,我不知道为什么。"
-    raw = "我不知道Test3,我不知道为什么,但是之后的效果还是不错的。"
+    committed = "我不知道test3,我不知道怎么办。"
+    raw = "我不知道Test3,我不知道怎么办,但是之后的天气还是不错的。"
     result = find_after_overlap(committed, raw)
     assert "但是之后" in result
     assert "我不知道" not in result

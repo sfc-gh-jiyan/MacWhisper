@@ -46,24 +46,24 @@ def test_teach_unparsable(tmp_path):
 
 def test_retype_learns_after_two_sightings(tmp_path):
     flow, v, changed, clock = _flow(tmp_path)
-    flow.process("这个agent的漫威不够")
+    flow.process("这个手机的漫威不够")
     clock.t += 5
-    out = flow.process("这个agent的memory不够")
+    out = flow.process("这个手机的memory不够")
     assert out.learned == [("漫威", "memory")]
     assert v.find("memory").status == "pending"
     clock.t += 300
-    flow.process("我的漫威满了 agent")
+    flow.process("我的漫威满了 phone")
     clock.t += 5
-    flow.process("我的memory满了 agent")
+    flow.process("我的memory满了 phone")
     assert v.find("memory").status == "active"
     assert changed
 
 
 def test_retype_outside_window_ignored(tmp_path):
     flow, v, _, clock = _flow(tmp_path)
-    flow.process("这个agent的漫威不够")
+    flow.process("这个手机的漫威不够")
     clock.t += cf.RETYPE_WINDOW_S + 1
-    assert flow.process("这个agent的memory不够").learned == []
+    assert flow.process("这个手机的memory不够").learned == []
     assert v.find("memory") is None
 
 
@@ -98,7 +98,7 @@ def test_add_manual_pairs(tmp_path):
     assert flow.add_manual([("哈什", "hash"), ("哈时", "hash")]) == [("哈什", "hash"), ("哈时", "hash")]
     assert v.find("hash").aliases == ("哈什", "哈时")
     assert changed
-    assert flow.process("这个哈什会变吗 version").text == "这个hash会变吗 version"
+    assert flow.process("这个哈什每次都一样吗 version").text == "这个hash每次都一样吗 version"
 
 
 def test_external_edit_is_picked_up(tmp_path):
@@ -128,10 +128,10 @@ def test_real_echo_with_multiword_terms_and_repeat_dropped(tmp_path):
 
 def test_real_sentences_with_terms_kept(tmp_path):
     flow, _, _, _ = _flow(tmp_path, [Entry(t) for t in REAL_TERMS])
-    for s in ["我需要在Jira里面开一个ticket给CSE看一下这个Snowflake的问题",
-              "Check the Confluence page and the roadmap before the CoCo session",
+    for s in ["请在Jira里面记一下，让CSE明天看Snowflake的这个报错",
+              "Read the Confluence notes and the roadmap before the CoCo demo",
               "MCP and Cortex",
-              "Snowflake, MCP, CSE, Jira and Cortex are the main things I use every day at work"]:
+              "Snowflake, MCP, CSE, Jira and Cortex all show up in this test sentence"]:
         assert flow.process(s).text != "", s
 
 
