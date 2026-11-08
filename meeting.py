@@ -272,10 +272,10 @@ class MeetingSession:
             remote_vad = self._vad_factory() if self._vad_factory else None
             self._tracks = [ChannelTrack("mic", self._new_processor(), self.vad),
                             ChannelTrack("remote", self._new_processor(), remote_vad)]
-            logger.info("Meeting started: dual channel (Mic + Remote)")
+            logger.warning("Meeting started: dual channel (Mic + Remote)")
         else:
             self._tracks = [ChannelTrack(None, self._new_processor(), self.vad)]
-            logger.info("Meeting started: single channel")
+            logger.warning("Meeting started: single channel")
         for track in self._tracks:
             track.buffer_start = self._meeting_start
         self._tick = 0
@@ -807,7 +807,7 @@ class MeetingSession:
 
     @staticmethod
     def _log_echo(mic: MeetingSegment, remote: MeetingSegment) -> None:
-        logger.info("Echo dropped (Mic): %r ~ %r (%.2f)",
+        logger.warning("Echo dropped (Mic): %r ~ %r (%.2f)",
                     mic.text, remote.text, text_similarity(mic.text, remote.text))
 
     def _close_and_trim_segment(self, track: ChannelTrack | None = None) -> None:
