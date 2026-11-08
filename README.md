@@ -35,46 +35,48 @@ A lightweight macOS menu bar app for dictation and meeting transcripts, powered 
 
 > **Install from source.** The Homebrew formula still points to v0.6.1, the older Whisper-based release, and will be updated with the next release.
 
-### 1. Get the code and run the installer
+### 1. Check the requirements
+
+- Apple Silicon Mac (`install.sh` stops on any other architecture)
+- `python3` 3.10 or newer on your PATH (`python3 --version`)
+- [uv](https://docs.astral.sh/uv/) **or** `python3.12` on your PATH, for the speech engine (`brew install uv`)
+- Command Line Tools (`xcode-select --install`): `clang` builds the app launcher, `swift` builds the Meeting Mode helper
+- About 4 GB free disk (see [Requirements](#requirements))
+
+### 2. Get the code and run the installer
 
 ```bash
-brew install uv                 # if you have neither uv nor Python 3.12
 git clone https://github.com/sfc-gh-jiyan/MacWhisper.git
 cd MacWhisper
-./install.sh
+bash install.sh
 ```
 
-`install.sh` does five things:
-1. Creates the app environment `venv` and installs the dependencies
-2. Builds `/Applications/MacWhisper.app`, a native launcher that runs the code in this folder
-3. Sets up the Qwen3-ASR speech engine in its own environment `.venv-qwen` and downloads the model (the longest step on first install)
-4. Builds the system-audio helper, which lets Meeting Mode hear the other people
-5. Checks that everything imports
+`install.sh` prints six steps:
 
-If step 3 or 4 fails, the installer goes on and tells you; run `make qwen-setup` or `make helper` afterwards. Without the helper, meetings record your microphone only.
+| Step | What it does | Where it lands |
+|---|---|---|
+| 1/6 | Creates the app's Python environment (skipped if it exists) | `venv/` in this folder |
+| 2/6 | Installs `requirements.txt` (takes a few minutes) | `venv/` |
+| 3/6 | Builds the native launcher app (`scripts/build_app.sh`) and creates the data folders | `/Applications/MacWhisper.app`, `~/.macwhisper/logs`, `~/.macwhisper/audio` |
+| 4/6 | Sets up the Qwen3-ASR speech engine in its own environment and downloads the 0.6B model (~2.9 GB, the longest step) | `.venv-qwen/`; model in `~/.cache/huggingface/` |
+| 5/6 | Builds the system-audio helper that lets Meeting Mode hear the other people | `swift/SystemAudioHelper/.build/release/SystemAudioHelper` |
+| 6/6 | Checks that the app's dependencies import | — |
 
-### 2. Grant permissions, then launch
+If step 4 or 5 fails, the installer goes on and prints a warning. Fix the cause (uv / Python 3.12, or the Command Line Tools), then run `make qwen-setup` or `make helper`. Without the helper, meetings record your microphone only.
 
-Open **MacWhisper** from `/Applications`. On first launch it walks you through the three required permissions one by one: it asks macOS for each one, opens the right System Settings page, checks that it is on, and offers to restart at the end (macOS applies Accessibility and Input Monitoring only after a restart). You can open it again any time from the menu: **Permissions…**. The details are below if you prefer to do it by hand.
+`MacWhisper.app` is only a launcher: it runs the code in this folder with `venv`. Do not move or delete the folder after installing (if you move it, run `make app`).
 
-### Required Permissions (Important!)
+### 3. First launch
 
-Go to **System Settings → Privacy & Security** and turn on `MacWhisper` in:
+1. Open **MacWhisper** from `/Applications` (or Spotlight).
+2. If a permission is missing, the setup opens by itself and goes through them one by one — see [Permissions](#permissions).
+3. Click **Restart Now** at the end, so Accessibility and Input Monitoring take effect.
 
-| Permission | Needed for |
-|---|---|
-| **Microphone** | Recording your voice (macOS asks on first use) |
-| **Accessibility** | Pasting the text into the app you are typing in |
-| **Input Monitoring** | Detecting the Right Option key and other shortcuts |
-| **Screen & System Audio Recording** | Meeting Mode only: hearing the other people |
+### 4. Check that it works
 
-For Accessibility and Input Monitoring, click **+**, choose `MacWhisper` in `/Applications`, then turn it on.
-
-> **Running from Terminal?** If you use `./run.sh` instead of the app, your **terminal app** (Terminal, iTerm, Warp, …) needs these permissions instead.
-
-> **Permissions not taking effect?** Quit and relaunch MacWhisper after granting. Check `~/.macwhisper/logs/macwhisper.log` for `Permissions (...): accessibility=True input_monitoring=True`. If a switch looks on but the log says `False`, quit MacWhisper, run `make reset-permissions`, and grant both again.
->
-> **No "Meeting saved" banner?** The notification goes to Notification Center. To see a banner, open System Settings → Notifications → MacWhisper and choose **Banners** or **Alerts**. If you use a Focus mode, add MacWhisper to its allowed apps.
+1. A microphone icon (🎙) is in the menu bar.
+2. Click into any text field (e.g. Notes), hold **Right ⌥**, say a sentence, release. The icon turns 🔴 while recording, 💬 while transcribing, and the text is pasted.
+3. If nothing happens, see [Troubleshooting](#troubleshooting).
 
 ### Updating
 
@@ -100,6 +102,47 @@ rm -rf ~/.macwhisper                    # settings, logs, vocabulary, meeting tr
 ```
 
 Then delete the cloned folder. Downloaded models stay in `~/.cache/huggingface/` until you remove them.
+
+## Permissions
+
+MacWhisper needs three macOS permissions for Push to Talk, and a fourth for Meeting Mode. All are in **System Settings → Privacy & Security**.
+
+| Permission | Section in Privacy & Security | Used for | Without it |
+|---|---|---|---|
+| **Microphone** | Microphone | Recording your voice | Nothing is recorded |
+| **Accessibility** | Accessibility | Pasting the text into the app you are typing in | Text is not pasted |
+| **Input Monitoring** | Input Monitoring | Detecting Right ⌥ and the other shortcuts | Holding Right ⌥ does nothing |
+| **Screen & System Audio Recording** (Meeting Mode only) | Screen & System Audio Recording (older macOS: Screen Recording) | Recording the other people in a meeting (system audio) | The helper gets silence; no Remote lines |
+
+### The setup dialogs
+
+At launch, MacWhisper checks the three required permissions. If one is missing, a step-by-step setup opens by itself. You can open it any time from the menu bar: **Permissions…**. For each permission:
+
+1. It explains why it is needed. Click **Allow** (macOS shows its own prompt) or **Open Settings** (opens the right System Settings page). **Skip** moves on.
+2. In System Settings, turn on **MacWhisper**.
+3. If it is still off, the dialog offers **Check Again**, **Open Settings** and **Skip**.
+4. At the end, if you just granted Accessibility or Input Monitoring, click **Restart Now**: macOS applies those two to a running app only after it restarts.
+
+To do it by hand: for Accessibility and Input Monitoring, click **+**, choose `MacWhisper` in `/Applications`, then turn it on.
+
+### Which entry to turn on
+
+- Started from `/Applications/MacWhisper.app`: turn on **MacWhisper**. The launcher embeds Python, so the permissions belong to the app, not to Python or Terminal.
+- Started with `./run.sh`: your **terminal app** (Terminal, iTerm, Warp, …) needs the permissions instead.
+
+The log shows which program asked: `~/.macwhisper/logs/macwhisper.log` has a line `Permissions (pid …, <program>): accessibility=True input_monitoring=True`.
+
+## Troubleshooting
+
+**Holding Right ⌥ does nothing, or the text is not pasted.** Open **Permissions…** from the menu and check Input Monitoring (key) and Accessibility (paste), then restart MacWhisper. If a switch looks on but the log says `False`: rebuilding the app can leave a permission entry that no longer matches it. Quit MacWhisper, run `make reset-permissions`, open it again and grant the permissions once more.
+
+**A meeting has no Remote lines.** Check that the helper exists (`make helper`; needs `xcode-select --install`) and that **Screen & System Audio Recording** is on for MacWhisper, then restart it.
+
+**No "Meeting saved" banner.** The notification goes to Notification Center. To see a banner, open System Settings → Notifications → MacWhisper and choose **Banners** or **Alerts**. If you use a Focus mode, add MacWhisper to its allowed apps.
+
+**The app does not open on a company Mac.** `MacWhisper.app` is built on your Mac and not signed by an Apple developer ID. Security software on managed Macs may block it. Ask your IT team.
+
+**Logs.** `~/.macwhisper/logs/macwhisper.log`.
 
 ## Usage
 
