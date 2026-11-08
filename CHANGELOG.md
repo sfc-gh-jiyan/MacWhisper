@@ -4,9 +4,20 @@ All notable changes to MacWhisper will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.8.0] — 2026-11-07
+
+Qwen3-ASR is now the only engine. This release also adds self-correction, an optional local AI style, labelled Mic / Remote meeting lines, a permission setup wizard and many Push to Talk reliability fixes.
 
 ### Added
+- **Meeting Mode labels each line Mic or Remote.** Your microphone and the system audio (the other side of the call) are transcribed as two separate tracks.
+  - Remote speech that your microphone also picked up (speaker echo) is removed by comparing the text.
+  - The meeting overlay shows two lines, one for Mic and one for Remote.
+  - The final pass after Stop runs per track, so the labels are kept in the final transcript.
+- **Permission setup wizard:** step-by-step dialogs for Microphone, Accessibility and Input Monitoring. It opens at startup when a permission is missing, and from the menu with **Permissions…**.
+- **Optional AI style for dictations and meetings** (local LLM, opt-in): Original transcript, fix typos & grammar, smooth + remove fillers, tidy format, or your own custom rules. The AI style knows the text is speech-recognition output, never translates, and never makes a dictation wait. Needs `make llm-setup`.
+- **Stutter repeats are removed from the final text** (setting `collapse_repeats`, on by default).
+- **A dictation that could not be pasted is never lost:** auto-paste checks that the clipboard took the text (one retry, never pastes a stale clipboard) and notifies you when a paste failed; the text stays on the clipboard. New menu item **Copy Last Transcript** restores the newest dictation.
+- **MacWhisper restarts itself after a stuck microphone.** The overlay shows "Microphone stuck — restarting".
 - **Daily vocabulary learning with a local LLM** (Qwen3-4B-Instruct, 4-bit, runs in its own `.venv-llm`; the ASR environments are untouched):
   - Once a day, when you are not dictating or in a meeting, new dictations made with the current ASR model are read and misheard terms are proposed. The model is unloaded right after.
   - Every suggestion is checked against the real text (must appear verbatim; numbers, grammar/translation edits, stutters, spacing/inflection changes and reversals of known terms are dropped).
@@ -21,6 +32,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   - Retype learning: re-dictating nearly the same sentence within 30 s records the changed words; a correction becomes active after it is seen twice.
   - `transcripts.jsonl` keeps `raw_text`, `corrections` and `learned` when something changed.
   - `tests/eval_corrections.py` replays saved transcripts through the rules (text only) to check for false positives.
+- Vocabulary learning shows its progress, and pauses (instead of stopping) while you dictate.
+
+### Changed
+- **Qwen3-ASR is the only engine** (0.6B default, 1.7B in the menu). A saved Whisper setting is migrated to the closest Qwen3 model. If Qwen3 fails during a meeting, it recovers in the meeting; the final pass covers any gap.
+- Meetings are transcribed without the vocabulary prompt.
+- **Push to Talk is paused while the meeting final pass runs.** A notice says how many minutes are left. A dictation is never lost.
+- AI suggestions for a term that already exists wait for review instead of being applied. Review Suggestions gives a visible answer, and scans are faster.
+- Everyday words are never auto-learned as mishearings.
+- `install.sh` also builds the system-audio helper for Meeting Mode (`make helper` builds it later if that step fails).
+- README installation section rewritten for the Qwen-only app.
+- Echo drops and the meeting channel mode are logged at WARNING, so they show in the default log.
+
+### Removed
+- **Whisper engine and models** (Small / Medium / Large), the Whisper fallback, the `mlx-whisper` dependency, and **Translate to English** (Whisper-only).
+
+### Fixed
+- **Push to Talk window stuck after releasing the key.** The key is now read from the HID flag bits (verified on device).
+- A quick double press of the Push to Talk key left an overlay stuck on screen.
+- **A hung microphone close no longer freezes Push to Talk:** it times out after 2 s, writes a thread dump to the log and shows a notice.
+- **Intentional repeats are kept** ("naughty, naughty, naughty" is no longer deleted). Only runaway decoder loops (6 or more repeats) are trimmed to one copy.
+- **Qwen vocabulary-list echoes:** holding Push to Talk in silence no longer pastes or previews the vocabulary list or a lone vocabulary word.
+- Review and Add Correction guard against reversed or harmful corrections.
+- **Qwen3 meeting timeouts:** generation is capped, silent segments are skipped, and Qwen3 restarts during the meeting with backoff.
+- Meeting timestamps could be negative after an outage catch-up.
 
 ## [0.7.3] — 2026-10-20
 

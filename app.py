@@ -1,5 +1,5 @@
 """
-MacWhisper - macOS Menu Bar App  v0.7.3
+MacWhisper - macOS Menu Bar App  v0.8.0
 Hold Right Option to record, release to transcribe
 Ctrl + Shift + M  switch model
 Ctrl + Shift + S  toggle live subtitles (show preview while recording)
@@ -8,7 +8,7 @@ v0.5: LocalAgreement architecture — word-level confirmation,
       dual-color overlay, Silero VAD, pluggable ASR backend.
 """
 
-__version__ = "0.7.3"
+__version__ = "0.8.0"
 
 import json
 import io

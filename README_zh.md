@@ -10,12 +10,15 @@
 
 - **按住录音** — 按住右 Option 键录音，松开自动转录并粘贴到光标位置
 - **实时字幕** — 浮动窗口实时显示已确认（白色）和未确认（灰色）的转录文字
-- **会议模式** — 持续录制，自动分段，支持麦克风 + 系统音频双声道捕获，导出 Markdown/JSON/SRT
-- **中英双语** — 支持中文、英文、中英混合语音识别
-- **翻译模式** — 一键切换，将任何语言翻译成英文输出
-- **三种模型** — 随时在 Small、Medium、Large 之间切换
-- **菜单栏状态** — 🎙 就绪 / 🔴 录音中 / 💬 转录中 / 🌐 翻译模式
-- **快捷键可自定义** — 默认：按住右 ⌥ 说话，`⌃⌥M` 或 `⌃⇧F8` 会议，`⌃⇧M` 切换模型，`⌃⇧T` 翻译，`⌃⇧S` 实时字幕；都可以在 **Settings…** 里修改
+- **会议模式** — 持续录制，自动分段，捕获麦克风 + 系统音频，导出 Markdown/JSON/SRT。每行标注 **Mic**（你）或 **Remote**（通话另一方）；扬声器回声会被去掉，字幕窗口每方一行。停止后可选的终稿转录会按轨道重新转录（`meeting_final_pass`，默认开启）
+- **中英双语** — 支持中文、英文、中英混合语音识别；英文原样保留（不会被翻译）
+- **Qwen3-ASR 引擎** — Qwen3-ASR 0.6B（默认，快）或 1.7B（最准），随时切换
+- **自动纠错** — 你的术语词表（作为热词发给 Qwen3）、纠错规则、语音教学（⇧ + Push to Talk）、用本地 LLM 每日学习新词、**Review Suggestions…**
+- **可选 AI 润色** — 本地 LLM 可以改错字、让文字更通顺、整理格式，或按你的自定义规则处理（`make llm-setup`）
+- **听写不丢失** — 粘贴失败会提示，**Copy Last Transcript** 可恢复最新一条听写
+- **权限设置向导** — 逐步引导开启麦克风、辅助功能、输入监控（缺权限时启动即弹出，或菜单 → **Permissions…**）
+- **菜单栏状态** — 🎙 就绪 / 🔴 录音中 / 💬 转录中
+- **快捷键可自定义** — 默认：按住右 ⌥ 说话，`⌃⌥M` 或 `⌃⇧F8` 会议，`⌃⇧M` 切换模型，`⌃⇧S` 实时字幕；都可以在 **Settings…** 里修改
 - **设置窗口** — 所有选项在一页里（菜单栏 → Settings…，`⌘,`）
 - **设置持久化** — 模型选择和所有开关重启后自动恢复
 - **完全本地** — 全部在 Apple Silicon GPU 上处理，数据不离开你的电脑
@@ -119,7 +122,6 @@ rm -rf ~/.macwhisper                    # 设置、日志、词表、会议记�
 | **会议模式** | **⌃⌥M** 或 **⌃⇧F8**、菜单，或会议字幕窗口里的 **■ Stop** |
 | **切换模型** | **⌃⇧M** 或菜单 |
 | **实时字幕** | **⌃⇧S** 或 Settings |
-| **翻译开关** | **⌃⇧T** 或 Settings |
 | **所有选项 / 修改快捷键** | 菜单栏 → **Settings…**（`⌘,`） |
 | **退出** | 点菜单栏图标 → Quit |
 
@@ -129,53 +131,44 @@ rm -rf ~/.macwhisper                    # 设置、日志、词表、会议记�
 
 | 图标 | 状态 |
 |---|---|
-| 🎙 | 就绪（转录模式） |
-| 🌐 | 就绪（翻译模式） |
+| 🎙 | 就绪 |
 | 🔴 | 录音中 |
 | 💬 | 转录中 |
 
-## 模型对比
+## 模型
 
-我们用同一段中英混合的测试台词，对比了三个模型的准确率：
+| 菜单名称 | 模型 | 说明 |
+|---|---|---|
+| **Qwen3 0.6B (Fast, zh+en)** | `mlx-community/Qwen3-ASR-0.6B-bf16` | 默认 |
+| **Qwen3 1.7B (Best, zh+en)** | `mlx-community/Qwen3-ASR-1.7B-bf16` | 更准，较慢 |
 
-> 我上周在San Francisco参加了一个conference，speaker是一个叫做Andrew Ng的professor。他讲了about artificial intelligence and machine learning。会议是在March 15th，大概有2000 people参加。The ticket price was $299 per person。
+用 **⌃⇧M** 或菜单切换。Qwen3 在独立进程中运行（`.venv-qwen`）；可选的 AI 润色和词表学习使用另一个本地 LLM（`.venv-llm`）。
 
-### 测试结果
-
-| 测试项 | 预期结果 | Small | Medium | Large |
-|---|---|---|---|---|
-| San Francisco | San Francisco | ❌ 三方西斯与庆祝 | ✅ San Francisco | ✅ San Francisco |
-| conference | conference | ❌ 订阅会 | ✅ conference | ✅ conference |
-| Andrew Ng | Andrew Ng | ❌ AndroidNG | ❌ Andre NG | ✅ Andrew N.G. |
-| professor | professor | ❌ 教授 | ✅ professor | ✅ professor |
-| March 15th | March 15th | ⚠️ march 15 | ⚠️ March 15 | ✅ March 15th |
-| 2000 people | 2000 people | ❌ 2000批会 | ⚠️ 2000人 | ✅ 2000 people |
-| ticket price | ticket price | ❌ taking surprise | ✅ ticket price | ✅ ticket price |
-| $299 | $299 | ❌ 299 | ⚠️ 299 | ✅ $299 |
-
-### 总结
-
-| 模型 | 大小 | 首次加载 | 准确率 | 适用场景 |
-|---|---|---|---|---|
-| **Small** | ~460 MB | ~5秒 | 低 — 中文中夹杂英文时容易出错 | 快速草稿、纯单语使用 |
-| **Medium** | ~1.5 GB | ~10秒 | 良好 — 双语处理好，偶尔专有名词出错 | 日常使用（推荐） |
-| **Large** | ~3 GB | ~30秒 | 优秀 — 专有名词、数字、格式全部正确 | 重要会议、正式文档 |
-
-> **注意：** "首次加载"指 app 启动后第一次使用某个模型的 JIT 编译时间，之后同一模型的转录几乎是即时的。
+Whisper 已在 0.8.0 移除。旧的 `"engine": "whisper"` 设置会自动迁移（Whisper Large → Qwen3 1.7B，其他 → 0.6B）。部分以前的 Qwen3 与 Whisper 对比数据在 [更新日志](CHANGELOG.md) 的 0.7.3 里（历史数据）。
 
 ## 配置
 
-设置保存在 `~/.macwhisper/config.json`：
+设置保存在 `~/.macwhisper/config.json`（大多数也在 **Settings…** 里）。部分配置项：
 
 ```json
 {
-  "translate_mode": false,
-  "current_model": "mlx-community/whisper-medium-mlx",
+  "qwen_model": "mlx-community/Qwen3-ASR-0.6B-bf16",
   "live_mode": false,
   "save_audio": false,
-  "log_level": "WARNING"
+  "log_level": "WARNING",
+  "qwen_strip_fillers": true,
+  "qwen_tight_spacing": true,
+  "collapse_repeats": true,
+  "paste_style": "original",
+  "meeting_final_pass": true
 }
 ```
+
+- `qwen_strip_fillers` — 去掉单独的 嗯 / 呃 / um（不会去掉词里的字，比如 额外）。
+- `qwen_tight_spacing` — 中英文之间不加空格（`这个commit的情况`）。
+- `collapse_repeats` — 去掉口吃式重复；有意的重复会保留，只把失控的循环（6 次及以上）缩成一次。
+- `paste_style` — `original`，或 AI 风格：`light`、`medium`、`heavy`、`custom`。
+- `meeting_final_pass` — 停止后按轨道重新转录会议（只在内存中）。运行期间 Push to Talk 暂停。
 
 ## 技术栈
 
