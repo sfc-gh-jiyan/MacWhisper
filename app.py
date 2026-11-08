@@ -106,6 +106,7 @@ from subtitle_export import save_enhanced_history
 from meeting import MeetingSession, MEETINGS_DIR
 from meeting_labels import source_label as _seg_source_label
 import crash_guard
+import private_dirs
 import error_alert
 import qwen_backend
 import qwen_engine
@@ -2544,6 +2545,10 @@ def _check_audio_device():
 
 
 if __name__ == "__main__":
+    # Owner-only data (dictations, transcripts, audio, logs): first, before
+    # any file or directory is created — new files 0600, dirs 0700.
+    private_dirs.set_private_umask()
+
     # Read log_level from config (before app init, since basicConfig must be early)
     _cfg_log_level = "WARNING"
     try:
@@ -2570,6 +2575,8 @@ if __name__ == "__main__":
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=_handlers,
     )
+    # Older versions wrote ~/.macwhisper as 0755/0644; tighten it once.
+    private_dirs.tighten_tree(_DATA_DIR)
 
     # One MacWhisper only (double-click + ./run.sh would fight over hotkeys
     # and the mic). Before the run marker, so a refused launch leaves the

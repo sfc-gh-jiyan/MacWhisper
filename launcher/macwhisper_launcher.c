@@ -81,11 +81,11 @@ static void redirect_output_to_log(void) {
         return;
     char dir[PATH_MAX], log[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s/.macwhisper", home);
-    mkdir(dir, 0755);
+    mkdir(dir, 0700);
     snprintf(dir, sizeof(dir), "%s/.macwhisper/logs", home);
-    mkdir(dir, 0755);
+    mkdir(dir, 0700);
     snprintf(log, sizeof(log), "%s/macwhisper.log", dir);
-    int fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0)
         return;  /* keep the default output rather than fail to start */
     dup2(fd, STDOUT_FILENO);
@@ -109,12 +109,14 @@ int main(int argc, char **argv) {
                     (self_test_file && self_test_file[0]);
 
     (void)argv;
+    /* Owner-only data: the log and anything Python creates are 0600/0700. */
+    umask(077);
     if (MW_CACERT[0] && access(MW_CACERT, R_OK) == 0)
         setenv("SSL_CERT_FILE", MW_CACERT, 1);
     if (chdir(MW_REPO) != 0)
         die("cannot enter the MacWhisper repo (" MW_REPO ")");
     if (self_test && self_test_file && self_test_file[0]) {
-        int fd = open(self_test_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = open(self_test_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) {
             dup2(fd, STDOUT_FILENO);
             dup2(fd, STDERR_FILENO);

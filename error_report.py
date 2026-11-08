@@ -7,6 +7,7 @@ same problem seen many times shows up as one row with a count.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -40,6 +41,40 @@ class ErrorGroup:
     last: str
 
 
+# Log messages that embed dictated text (app.py). The live log keeps the full
+# text for debugging; the shareable report only shows its length.
+# (prefix, whole_tail): whole_tail redacts everything after the prefix,
+# otherwise only the quoted repr() literals in it.
+_USER_TEXT_PREFIXES = (
+    ("Manual corrections: ", True),
+    ("Correction taught by voice: ", False),
+    ("Correction command heard both sides the same: ", False),
+    ("Correction command not understood: ", False),
+)
+_QUOTED_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def _chars(literal: str) -> str:
+    try:
+        n = len(ast.literal_eval(literal))
+    except (ValueError, SyntaxError):
+        n = max(len(literal) - 2, 0)
+    return f"<{n} chars>"
+
+
+def _redact_user_text(msg: str) -> str:
+    """Replace dictated text in a log message with `<N chars>`."""
+    for prefix, whole_tail in _USER_TEXT_PREFIXES:
+        idx = msg.find(prefix)
+        if idx < 0:
+            continue
+        head, tail = msg[: idx + len(prefix)], msg[idx + len(prefix):]
+        if not whole_tail and _QUOTED_RE.search(tail):
+            return head + _QUOTED_RE.sub(lambda m: _chars(m.group(0)), tail)
+        return head + f"<{len(tail)} chars>"
+    return msg
+
+
 def _signature(module: str, msg: str) -> str:
     s = re.sub(r"Thread-\d+", "Thread-N", msg)
     s = re.sub(r"(/[\w.\-~]+)+", "<path>", s)
@@ -71,6 +106,7 @@ def summarize(log_path: str, days: int = 1, now: datetime | None = None) -> list
             ts, module, level, msg = m.groups()
             if not _is_reportable(level, msg):
                 continue
+            msg = _redact_user_text(msg)
             try:
                 if datetime.strptime(ts, _TS_FMT) < cutoff:
                     continue
