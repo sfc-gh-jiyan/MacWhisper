@@ -130,7 +130,7 @@ Push to Talk 需要三项 macOS 权限，Meeting Mode 还需要第四项。都�
 - 从 `/Applications/MacWhisper.app` 启动：打开 **MacWhisper**。启动器内嵌了 Python，所以权限属于这个 App，而不是 Python 或 Terminal。
 - 用 `./run.sh` 启动：需要给你的**终端 App**（Terminal、iTerm、Warp……）授权。
 
-日志会显示是哪个程序在请求：`~/.macwhisper/logs/macwhisper.log` 里有一行 `Permissions (pid …, <program>): accessibility=True input_monitoring=True`。
+想确认结果，可以在 `~/.macwhisper/logs/macwhisper.log` 里找这一行：`Permissions (pid …): accessibility=True input_monitoring=True`。`False` 表示那项权限还没开。（这一行里显示的路径是内嵌的 Python，从 App 启动时也是这样；要打开的是 **MacWhisper**，不是 Python。）
 
 ## 故障排查
 

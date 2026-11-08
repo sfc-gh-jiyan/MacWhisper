@@ -130,7 +130,7 @@ To do it by hand: for Accessibility and Input Monitoring, click **+**, choose `M
 - Started from `/Applications/MacWhisper.app`: turn on **MacWhisper**. The launcher embeds Python, so the permissions belong to the app, not to Python or Terminal.
 - Started with `./run.sh`: your **terminal app** (Terminal, iTerm, Warp, …) needs the permissions instead.
 
-The log shows which program asked: `~/.macwhisper/logs/macwhisper.log` has a line `Permissions (pid …, <program>): accessibility=True input_monitoring=True`.
+To check the result, look for this line in `~/.macwhisper/logs/macwhisper.log`: `Permissions (pid …): accessibility=True input_monitoring=True`. `False` means that permission is still off. (The path shown in that line is the embedded Python, even when started from the app; turn on **MacWhisper**, not Python.)
 
 ## Troubleshooting
 
