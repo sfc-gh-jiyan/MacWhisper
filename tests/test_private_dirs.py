@@ -85,3 +85,14 @@ def test_file_created_after_startup_is_owner_only(tmp_path):
         assert _mode(f) == 0o600
     finally:
         os.umask(old)
+
+
+def test_owner_executable_file_keeps_execute_bit(tmp_path):
+    root, _ = _tree(tmp_path)
+    script = root / "restart.sh"
+    script.write_text("#!/bin/sh\n")
+    os.chmod(script, 0o755)
+    private_dirs.tighten_tree(str(root))
+    assert _mode(script) == 0o700
+    assert os.access(script, os.X_OK)
+    assert _mode(root / "config.json") == 0o600

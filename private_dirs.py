@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 PRIVATE_UMASK = 0o077
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
+_EXEC_FILE_MODE = 0o700  # owner-executable files (e.g. restart.sh) stay runnable
 
 
 def set_private_umask() -> int:
@@ -38,7 +39,8 @@ def _fix(path: str, want: int, counts: dict, key: str) -> None:
 
 
 def tighten_tree(root: str) -> dict:
-    """chmod `root` and its subdirectories to 0700 and regular files to 0600.
+    """chmod `root` and its subdirectories to 0700 and regular files to 0600
+    (0700 if the owner execute bit is set).
 
     Symlinks are skipped and never followed, so nothing outside the tree is
     touched. Errors are counted per entry, never raised. Returns counts of
@@ -57,13 +59,15 @@ def tighten_tree(root: str) -> dict:
         for name in filenames:
             p = os.path.join(dirpath, name)
             try:
-                if not stat.S_ISREG(os.lstat(p).st_mode):
+                st = os.lstat(p)
+                if not stat.S_ISREG(st.st_mode):
                     continue  # symlinks, sockets, fifos
             except OSError as e:
                 counts["errors"] += 1
                 logger.debug("Could not stat %s: %s", p, e)
                 continue
-            _fix(p, _FILE_MODE, counts, "files")
+            want = _EXEC_FILE_MODE if st.st_mode & stat.S_IXUSR else _FILE_MODE
+            _fix(p, want, counts, "files")
     if counts["dirs"] or counts["files"] or counts["errors"]:
         logger.warning("Made %s private: %d dir(s) -> 0700, %d file(s) -> 0600, %d error(s)",
                        root, counts["dirs"], counts["files"], counts["errors"])
