@@ -940,7 +940,8 @@ class TestSegmentCloseWithoutConfirmedWords:
         session = MeetingSession(backend=backend, vad=SilenceAfterSpeechVad(),
                                  audio_source=MockAudioSource(), min_chunk_size=0.3)
         session.start()
-        deadline = time.time() + 6
+        # Generous cap: slow CI runners took >6 s (PR #39); the loop exits as soon as a segment exists.
+        deadline = time.time() + 20
         while time.time() < deadline and not session.segments:
             time.sleep(0.05)
         segments_before_stop = len(session.segments)
