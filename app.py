@@ -363,6 +363,13 @@ def _migrate_old_data():
         print(f"[MIGRATE] Moved logs: {old_logs} -> {LOG_DIR}")
 
 
+MEETING_TRACK_LABELS = {"mic": "Mic", "remote": "Remote"}
+
+
+def _is_dual(session) -> bool:
+    """True only for a real dual-channel session (mocks and old sessions: False)."""
+    return getattr(session, "_dual_channel", False) is True
+
 class TranscriberApp(rumps.App):
 
     # ── Config ────────────────────────────────────────────────
@@ -1326,6 +1333,11 @@ class TranscriberApp(rumps.App):
                 seconds = max(0.0, time.time() - float(session._meeting_start))
             except (AttributeError, TypeError, ValueError):
                 seconds = 0.0
+            if _is_dual(session):   # one final request per Mic / Remote track
+                try:
+                    seconds *= int(session.active_channel_count())
+                except Exception:
+                    logger.exception("Counting the meeting tracks failed")
             # Set before the thread starts: no press can slip in between
             self._meeting_finalizing = (time.monotonic(), seconds)
             self._finalizing_session = session
@@ -1360,16 +1372,30 @@ class TranscriberApp(rumps.App):
         return out, label
 
     def _keep_meeting_audio(self, session, audio=None) -> str | None:
+        """Save the meeting audio for "Retry Last Failed Recording".
+
+        Dual channel: one file per track (meeting_<sid>_mic / _sys); returns
+        the first saved path. `audio` is the mixed track (single) or the
+        channel_audio() list (dual) already read by the caller.
+        """
+        sid = getattr(session, "_session_id", None) or time.strftime("%Y%m%d_%H%M%S")
         try:
-            audio = session.mixed_audio() if audio is None else audio
+            if _is_dual(session):
+                tracks = audio if isinstance(audio, list) else session.channel_audio()
+            else:
+                tracks = [(None, session.mixed_audio() if audio is None else audio)]
         except Exception:
             logger.exception("Reading the meeting audio failed")
             return None
-        if audio is None or len(audio) < SAMPLE_RATE:
-            return None
-        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-        sid = getattr(session, "_session_id", None) or time.strftime("%Y%m%d_%H%M%S")
-        return self._save_failed_audio(pcm, name=f"meeting_{sid}")
+        first = None
+        for source, track in tracks:
+            if track is None or len(track) < SAMPLE_RATE:
+                continue
+            pcm = (np.clip(track, -1.0, 1.0) * 32767).astype(np.int16)
+            suffix = {"mic": "_mic", "remote": "_sys"}.get(source, "")
+            path = self._save_failed_audio(pcm, name=f"meeting_{sid}{suffix}")
+            first = first or path
+        return first
 
     def _meeting_final_pass(self, session):
         """Re-transcribe the whole meeting with Qwen3 from in-memory audio.
@@ -1377,27 +1403,51 @@ class TranscriberApp(rumps.App):
         The live transcript is already saved (and its path copied) before
         this starts, so a failure here loses nothing. The .md is rewritten
         in place: final transcript first, live transcript second. Audio is
-        never written to disk by this pass.
+        never written to disk by this pass. Dual channel: one request per
+        track (Mic, then Remote), written as labelled blocks.
         """
         audio = None
+        blocks: list[str] = []
+        engine = None
         try:
-            audio = session.mixed_audio()
-            duration = len(audio) / SAMPLE_RATE
-            if duration < 1.0:
+            dual = _is_dual(session)
+            if dual:
+                audio = session.channel_audio()
+                channels = [(src, a) for src, a in audio if len(a) / SAMPLE_RATE >= 1.0]
+            else:
+                audio = session.mixed_audio()
+                channels = [(None, audio)] if len(audio) / SAMPLE_RATE >= 1.0 else []
+            if not channels:
                 return
+            duration = sum(len(a) for _, a in channels) / SAMPLE_RATE
             self._set_status("Meeting: final transcript (Qwen3)...")
             logger.warning("Meeting final pass started: %.0fs audio (Qwen3)", duration)
             qwen = self._qwen
             if not qwen.started_ok and not qwen.wait_ready(QWEN_WAIT_S) \
                     and not qwen.start(self.qwen_model):
                 raise QwenUnavailable(qwen.last_error or "Qwen3 did not finish loading")
-            t0 = time.time()
-            text = qwen.transcribe_final(audio, retry=True, hotwords=False)
-            if getattr(self, "collapse_repeats", True):
-                text = qwen_text.collapse_repeats(text)
             label = next((k for k, v in QWEN_MODEL_OPTIONS.items()
                           if v == self._qwen.model_repo), "Qwen3")
             engine = f"{label.split(' (')[0]}, full pass"
+            t0 = time.time()
+            text = ""
+            for source, track in channels:
+                name = MEETING_TRACK_LABELS.get(source)
+                if dual:
+                    logger.warning("Meeting final pass %s: started (%.0fs audio)",
+                                   name, len(track) / SAMPLE_RATE)
+                t1 = time.time()
+                part = qwen.transcribe_final(track, retry=True, hotwords=False)
+                if getattr(self, "collapse_repeats", True):
+                    part = qwen_text.collapse_repeats(part)
+                if not dual:
+                    text = part
+                    break
+                logger.warning("Meeting final pass %s: done (%.0fs audio in %.1fs)",
+                               name, len(track) / SAMPLE_RATE, time.time() - t1)
+                blocks.append(f"**{name}:**\n\n{part}")
+            if dual:
+                text = "\n\n".join(blocks)
             path = session.write_final_transcript(text, engine)
             # AI version afterwards: it can take minutes and must not delay the file
             ai_text, ai_label = self._beautify_meeting(text)
@@ -1410,6 +1460,12 @@ class TranscriberApp(rumps.App):
             self._notify("MacWhisper — Final meeting transcript ready",
                          "Same file, final version on top", path or "")
         except Exception as e:
+            # A track that already finished must not be lost with the one that failed
+            if blocks and engine:
+                try:
+                    session.write_final_transcript("\n\n".join(blocks), engine)
+                except Exception:
+                    logger.exception("Writing the finished meeting tracks failed")
             # Never lose the meeting: the live transcript may have a gap (engine
             # outage), so keep the audio for "Retry Last Failed Recording".
             saved = self._keep_meeting_audio(session, audio) if audio is not None else None

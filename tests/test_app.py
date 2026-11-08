@@ -3424,3 +3424,119 @@ def test_a_failing_permission_check_does_not_open_the_setup_every_launch(monkeyp
     with caplog.at_level(logging.WARNING):
         inst._check_permissions()
     assert queued == [] and "Could not check permissions ['microphone']" in caplog.text
+
+
+# ── Mic / Remote final pass (dual channel) ───────────────────
+
+class _SeqQwen(_FakeQwen):
+    """Returns the texts in order; fails on call number `fail_on` (1-based)."""
+    def __init__(self, texts, fail_on=None):
+        super().__init__()
+        self.texts, self.fail_on = list(texts), fail_on
+
+    def transcribe_final(self, audio, retry=False, hotwords=True, lock_timeout=None):
+        self.calls += 1
+        self.retry, self.hotwords = retry, hotwords
+        if self.calls == self.fail_on:
+            from qwen_backend import QwenUnavailable
+            raise QwenUnavailable("sidecar died")
+        return self.texts[self.calls - 1]
+
+
+class _FakeDualSession(_FakeMeetingSession):
+    _dual_channel = True
+
+    def __init__(self, mic_s=5, sys_s=5):
+        super().__init__()
+        self.writes = []
+        self._ch = [("mic", np.zeros(16000 * mic_s, dtype=np.float32)),
+                    ("remote", np.full(16000 * sys_s, 0.1, dtype=np.float32))]
+
+    def channel_audio(self):
+        return self._ch
+
+    def write_final_transcript(self, text, engine, ai_text=None, ai_style=None):
+        self.writes.append(text)
+        return super().write_final_transcript(text, engine, ai_text, ai_style)
+
+
+def test_final_pass_dual_writes_two_labelled_blocks():
+    q = _SeqQwen(["mic words", "remote words"])
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    s = _FakeDualSession()
+    inst._meeting_final_pass(s)
+    written_text = s.written[0]
+    assert written_text == "**Mic:**\n\nmic words\n\n**Remote:**\n\nremote words"
+    assert written_text.startswith("**Mic:**") and "**Remote:**" in written_text
+    assert q.calls == 2 and s.released
+
+
+def test_final_pass_dual_skips_empty_channel():
+    q = _SeqQwen(["remote words"])
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    s = _FakeDualSession(mic_s=0)
+    inst._meeting_final_pass(s)
+    assert q.calls == 1 and s.written[0] == "**Remote:**\n\nremote words"
+
+
+def test_final_pass_second_channel_fails_first_block_kept(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    q = _SeqQwen(["mic words"], fail_on=2)
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    s = _FakeDualSession()
+    inst._meeting_final_pass(s)
+    assert s.writes == ["**Mic:**\n\nmic words"]
+    assert sorted(os.listdir(tmp_path)) == ["meeting_20261024_090000_mic.wav",
+                                            "meeting_20261024_090000_sys.wav"]
+    assert inst._meeting_finalizing is None and s.released
+
+
+def test_keep_meeting_audio_dual_saves_two_files(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    inst = _engine_app()
+    path = inst._keep_meeting_audio(_FakeDualSession())
+    assert path and path.endswith("meeting_20261024_090000_mic.wav")
+    assert (tmp_path / "meeting_20261024_090000_sys.wav").exists()
+
+
+def test_final_pass_single_channel_unchanged():
+    q = _FakeQwen(text="single text")
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    s = _FakeMeetingSession()
+    inst._meeting_final_pass(s)
+    assert s.written[0] == "single text" and q.calls == 1
+
+
+def test_finalizing_estimate_counts_both_channels():
+    import app
+    inst = _meeting_app(in_meeting=True)
+    inst._qwen = _FakeQwen()
+    inst._idle_icon = "🎙"
+    inst.item_meeting = MagicMock()
+    inst._notify = MagicMock()
+    session = inst._meeting_session
+    session.stop.return_value = "text"
+    session.transcript_path = "/tmp/x.md"
+    session.segments = []
+    session._meeting_start = time.time() - 90
+    session._dual_channel = True
+    session.active_channel_count.return_value = 2
+    seen = {}
+    inst._meeting_final_pass = lambda s: seen.setdefault("flag", inst._meeting_finalizing)
+
+    class SyncThread:
+        def __init__(self, target, args=(), **kw):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+    with patch.object(app.pyperclip, "copy"), patch.object(app.threading, "Thread", SyncThread):
+        inst._stop_meeting()
+    assert 179 <= seen["flag"][1] <= 181
+    session.channel_audio.assert_not_called()

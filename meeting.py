@@ -987,6 +987,27 @@ class MeetingSession:
             mix[:len(t)] += t
         return np.clip(mix, -1.0, 1.0)
 
+    def channel_audio(self) -> list[tuple[str | None, np.ndarray]]:
+        """Audio for the final pass, one entry per track (float32).
+
+        Dual channel: [("mic", ...), ("remote", ...)]; single: [(None, mixed)].
+        """
+        if not self._dual_channel:
+            return [(None, self.mixed_audio())]
+        with self._frames_lock:
+            mic = list(self._mic_frames)
+            sys_ = list(self._sys_frames)
+        return [(source, np.concatenate(f, axis=0).squeeze().astype(np.float32) / 32768.0
+                 if f else np.zeros(0, dtype=np.float32))
+                for source, f in (("mic", mic), ("remote", sys_))]
+
+    def active_channel_count(self) -> int:
+        """Tracks with audio (no copy): the final pass makes one request each."""
+        if not self._dual_channel:
+            return 1
+        with self._frames_lock:
+            return max(1, int(bool(self._mic_frames)) + int(bool(self._sys_frames)))
+
     def release_audio(self) -> None:
         """Drop in-memory audio once the final pass is done."""
         with self._frames_lock:

@@ -1299,3 +1299,25 @@ class TestCatchUpChunks:
         assert len(s._segments) == 1 and s._segments[0].start_time == 50.0
         assert s._engine_down and s._outage_offset == 65.0
         assert len(s._processor.audio_buffer) == 25 * 16000   # nothing dropped
+
+
+def test_channel_audio_dual_and_single():
+    import numpy as np
+    from meeting import MeetingSession
+    s = MeetingSession.__new__(MeetingSession)
+    import threading
+    s._frames_lock = threading.Lock()
+    s._mic_frames = [np.full((16000, 1), 16384, dtype=np.int16)]
+    s._sys_frames = [np.full((8000, 1), -16384, dtype=np.int16)]
+    s._dual_channel = True
+    out = s.channel_audio()
+    assert [k for k, _ in out] == ["mic", "remote"]
+    assert out[0][1].dtype == np.float32 and len(out[1][1]) == 8000
+    assert abs(out[0][1][0] - 0.5) < 1e-6
+    assert s.active_channel_count() == 2
+    s._sys_frames = []
+    assert s.active_channel_count() == 1
+    s._dual_channel = False
+    out = s.channel_audio()
+    assert len(out) == 1 and out[0][0] is None and len(out[0][1]) == 16000
+    assert s.active_channel_count() == 1
