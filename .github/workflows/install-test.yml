@@ -1,0 +1,66 @@
+name: Install test
+
+# Clean `bash install.sh` on a fresh Apple Silicon runner, then verify the result.
+on:
+  pull_request:
+    paths:
+      - install.sh
+      - scripts/**
+      - requirements*.txt
+      - Makefile
+      - swift/**
+      - launcher/**
+      - .github/workflows/install-test.yml
+      - tests/check_install.sh
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - scripts/**
+      - requirements*.txt
+      - Makefile
+      - swift/**
+      - launcher/**
+      - .github/workflows/install-test.yml
+      - tests/check_install.sh
+  schedule:
+    - cron: "0 6 * * 1"   # Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  install:
+    name: Clean install
+    runs-on: macos-15  # Apple Silicon
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # As a user has it: Homebrew Python 3.12 (embeddable libpython3.12.dylib,
+      # needed by scripts/build_app.sh) + uv (scripts/setup_qwen.sh prefers it).
+      - name: Python 3.12 + uv (Homebrew)
+        run: |
+          brew install python@3.12 uv
+          PYBIN="$(brew --prefix python@3.12)/libexec/bin"
+          echo "$PYBIN" >> "$GITHUB_PATH"
+          "$PYBIN/python3" --version
+          uv --version
+
+      - name: bash install.sh
+        run: |
+          set -o pipefail
+          python3 --version
+          bash install.sh 2>&1 | tee "$RUNNER_TEMP/install.log"
+
+      - name: Check install
+        run: bash tests/check_install.sh 2>&1 | tee "$RUNNER_TEMP/check.log"; exit "${PIPESTATUS[0]}"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-test-logs
+          path: |
+            ~/.macwhisper/logs/
+            ${{ runner.temp }}/install.log
+            ${{ runner.temp }}/check.log
+          if-no-files-found: ignore

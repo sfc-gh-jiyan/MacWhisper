@@ -751,6 +751,16 @@ def test_no_whisper_code_left_in_app():
         assert gone not in source, gone
 
 
+def test_launcher_self_test_does_not_import_whisper():
+    """The .app self-test runs on every install; importing the removed
+    mlx_whisper made every fresh install fail (CI install test, 2026-11-08)."""
+    import app
+    root = os.path.dirname(app.__file__)
+    source = open(os.path.join(root, "launcher", "macwhisper_launcher.c")).read()
+    assert "mlx_whisper" not in source
+    assert "import rumps" in source
+
+
 def test_overlay_uses_dual_color():
     """Verify overlay module is used for dual-color rendering."""
     import app

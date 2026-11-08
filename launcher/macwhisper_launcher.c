@@ -51,7 +51,7 @@ static const char *SELF_TEST_CODE =
     "print('cwd=' + os.getcwd())\n"
     "print('MallocNanoZone=' + os.environ.get('MallocNanoZone', ''))\n"
     "print('SSL_CERT_FILE=' + os.environ.get('SSL_CERT_FILE', ''))\n"
-    "import rumps, mlx_whisper, objc\n"
+    "import rumps, objc, numpy, sounddevice, pynput\n"
     "print('imports=ok')\n";
 
 static void die(const char *what) {
