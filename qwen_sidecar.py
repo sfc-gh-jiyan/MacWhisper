@@ -105,7 +105,8 @@ def make_run(model):
 
 def load_model_fn(model_repo: str):
     from mlx_audio.stt.utils import load
-    run = make_run(load(model_repo))
+    from model_revisions import revision_for
+    run = make_run(load(model_repo, revision=revision_for(model_repo)))
     run(np.zeros(SAMPLE_RATE, dtype=np.float32), DEFAULT_LANGUAGE)  # warm Metal kernels
     return run
 

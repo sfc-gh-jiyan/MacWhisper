@@ -185,6 +185,8 @@ Push to Talk 需要三项 macOS 权限，Meeting Mode 还需要第四项。都�
 | **Qwen3 0.6B (Fast, zh+en)** | `mlx-community/Qwen3-ASR-0.6B-bf16` | 默认 |
 | **Qwen3 1.7B (Best, zh+en)** | `mlx-community/Qwen3-ASR-1.7B-bf16` | 更准，较慢 |
 
+**固定版本。** 上面的模型和 Qwen3-4B LLM 都按 `model_revisions.py` 里固定的 Hugging Face commit 加载，上游改动不会悄悄生效。你自己指定的模型（`MACWHISPER_QWEN_MODEL` 或 `qwen_model`）加载最新文件并记录一条警告。要更新固定版本，把 `~/.cache/huggingface/hub/models--<org>--<name>/refs/main` 里的新 commit 复制到 `MODEL_REVISIONS`。
+
 用 **⌃⇧M** 或菜单切换。Qwen3 在独立进程中运行（`.venv-qwen`）；可选的 AI 润色和词表学习使用另一个本地 LLM（`.venv-llm`）。
 
 Whisper 已在 0.8.0 移除。旧的 `"engine": "whisper"` 设置会自动迁移（Whisper Large → Qwen3 1.7B，其他 → 0.6B）。部分以前的 Qwen3 与 Whisper 对比数据在 [更新日志](CHANGELOG.md) 的 0.7.3 里（历史数据）。

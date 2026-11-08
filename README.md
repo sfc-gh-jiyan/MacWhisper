@@ -185,6 +185,8 @@ All shortcuts are defaults and can be changed in Settings: click a shortcut, pre
 | **Qwen3 0.6B (Fast, zh+en)** | `mlx-community/Qwen3-ASR-0.6B-bf16` | Default |
 | **Qwen3 1.7B (Best, zh+en)** | `mlx-community/Qwen3-ASR-1.7B-bf16` | More accurate, slower |
 
+**Pinned versions.** Each model above, and the Qwen3-4B LLM, loads a fixed Hugging Face commit listed in `model_revisions.py`, so an upstream change never reaches you silently. A model you set yourself (`MACWHISPER_QWEN_MODEL` or `qwen_model`) loads the latest files and logs a warning. To update a pin, copy the new commit from `~/.cache/huggingface/hub/models--<org>--<name>/refs/main` into `MODEL_REVISIONS`.
+
 Switch with **⌃⇧M** or the menu. Qwen3 runs in its own process (`.venv-qwen`); the optional AI style and vocabulary learning use a separate local LLM (`.venv-llm`).
 
 Whisper was removed in 0.8.0. An old `"engine": "whisper"` setting is migrated automatically (Whisper Large → Qwen3 1.7B, otherwise 0.6B). Some earlier Qwen3 vs Whisper measurements are in the [changelog](CHANGELOG.md) under 0.7.3 (historical).

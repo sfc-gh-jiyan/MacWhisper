@@ -61,7 +61,10 @@ def load_complete_fn(model_repo: str):
     from mlx_lm import generate, load
     from mlx_lm.sample_utils import make_sampler
 
-    model, tokenizer = load(model_repo)
+    from model_revisions import revision_for
+
+    model, tokenizer = load(model_repo, revision=revision_for(model_repo),
+                            trust_remote_code=False)
     sampler = make_sampler(temp=0.0)
 
     def run(system: str, prompt: str, max_tokens: int) -> str:
