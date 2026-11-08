@@ -1462,8 +1462,10 @@ class TranscriberApp(rumps.App):
         except Exception as e:
             # A track that already finished must not be lost with the one that failed
             if blocks and engine:
+                failed = MEETING_TRACK_LABELS.get(channels[len(blocks)][0], "a track")
+                partial = engine.replace("full pass", f"partial: {failed} failed")
                 try:
-                    session.write_final_transcript("\n\n".join(blocks), engine)
+                    session.write_final_transcript("\n\n".join(blocks), partial)
                 except Exception:
                     logger.exception("Writing the finished meeting tracks failed")
             # Never lose the meeting: the live transcript may have a gap (engine

@@ -1091,33 +1091,6 @@ class TestOverlayLabels:
             track.live_confirmed, track.live_unconfirmed = c, u
         return session
 
-    def test_live_lines(self):
-        """live_lines covers both / prior only / confirmed only / neither."""
-        segs = [
-            MeetingSegment(text="mic old", start_time=0.0, end_time=1.0, source="mic"),
-            MeetingSegment(text="mic last", start_time=1.0, end_time=2.0, source="mic"),
-            MeetingSegment(text="remote last", start_time=2.0, end_time=3.0, source="remote"),
-        ]
-        # both (mic) / prior only (remote)
-        session = self._session_with(["mic", "remote"], segs,
-                                     [("mic now", "mic gray"), ("", "")])
-        assert session.live_lines() == [
-            ("Mic", "mic last\nmic now", "mic gray"),
-            ("Remote", "remote last", ""),
-        ]
-        # confirmed only (mic) / neither (remote)
-        session = self._session_with(["mic", "remote"], [],
-                                     [("mic now", ""), ("", "remote gray")])
-        assert session.live_lines() == [
-            ("Mic", "mic now", ""),
-            ("Remote", "", "remote gray"),
-        ]
-        # single channel: unlabelled
-        session = self._session_with(
-            [None], [MeetingSegment(text="seg", start_time=0.0, end_time=1.0)],
-            [("now", "gray")])
-        assert session.live_lines() == [(None, "seg\nnow", "gray")]
-
     def test_overlay_text_for_unlabelled_track_has_no_none_prefix(self):
         """A track without a label never shows 'None: ' in the overlay."""
         session = self._session_with([None], [], [("hi", "")])

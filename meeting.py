@@ -432,6 +432,7 @@ class MeetingSession:
         track.reset_segment(time.time())
         # a later outage keeps this offset (_engine_down guard): date it from the new buffer
         track.outage_offset = max(0.0, track.buffer_start - self._meeting_start)
+        track.live_confirmed = track.live_unconfirmed = ""
         return True
 
     def _track_names(self) -> str:
@@ -447,18 +448,6 @@ class MeetingSession:
                 raise
             self._switch_to_fallback(e)
             return None
-
-    def _may_close_on_silence(self, silence_ms: int) -> bool:
-        """Let the live processor veto a silence close (see ChannelTrack)."""
-        return self._track0().may_close_on_silence(silence_ms)
-
-    def _has_pending_segment(self) -> bool:
-        """Text OR untranscribed audio in the current segment."""
-        return self._track0().has_pending()
-
-    def _segment_has_text(self) -> bool:
-        """True if the current segment has confirmed OR unconfirmed words."""
-        return self._track0().has_text()
 
     def stop(self, wait_s: float = 5.0) -> str:
         """Stop meeting and return full transcript text.
@@ -494,6 +483,7 @@ class MeetingSession:
                     if track.processor:
                         track.processor.reset()
                     track.processor = None
+                track.live_confirmed = track.live_unconfirmed = ""
 
         # Build full transcript
         full_text = self._build_transcript()
@@ -625,6 +615,9 @@ class MeetingSession:
 
     def _process_new_audio(self, mic_new, sys_new) -> None:
         """One loop iteration on new audio (caller holds _proc_lock)."""
+        # stop() may have timed out and released the processors: nothing to feed
+        if self._state != "recording":
+            return
         if self._engine_back.is_set() and getattr(self, "_fallback_used", False):
             self._switch_back_to_engine()
         # Build chunks from each source
@@ -722,7 +715,7 @@ class MeetingSession:
 
         confirmed, unconfirmed = result
 
-        # Store live text on this track (used by live_lines and dual overlay)
+        # Store live text on this track (used by the dual overlay)
         track.live_confirmed = confirmed
         track.live_unconfirmed = unconfirmed
 
@@ -764,28 +757,6 @@ class MeetingSession:
             ov_unconfirmed = _labelled(active_track.source, unconfirmed)
 
         return ov_confirmed, ov_unconfirmed
-
-    def live_lines(self) -> list[tuple[str | None, str, str]]:
-        """Per-track live state: (label, confirmed, unconfirmed).
-
-        confirmed = last committed segment text + current processor confirmed text.
-        """
-        result = []
-        for track in self._tracks:
-            label = source_label(track.source)
-            last_seg = next(
-                (s for s in reversed(self._segments) if s.source == track.source),
-                None,
-            )
-            prior = last_seg.text if last_seg else ""
-            if prior and track.live_confirmed:
-                combined = prior + "\n" + track.live_confirmed
-            elif prior:
-                combined = prior
-            else:
-                combined = track.live_confirmed
-            result.append((label, combined, track.live_unconfirmed))
-        return result
 
 
     def _commit_segment(self, track: ChannelTrack, text: str) -> None:
@@ -883,7 +854,7 @@ class MeetingSession:
 
         duration = 0
         if self._segments:
-            duration = self._segments[-1].end_time
+            duration = max(s.end_time for s in self._segments)
         minutes = int(duration // 60)
         seconds = int(duration % 60)
         lines.append(f"- **Duration**: {minutes}m {seconds}s")

@@ -951,7 +951,7 @@ class TestSegmentCloseWithoutConfirmedWords:
     def test_has_text_helper(self):
         session = MeetingSession(backend=MockBackend(), vad=None,
                                  audio_source=MockAudioSource())
-        assert session._segment_has_text() is False
+        assert session._track0().has_text() is False
 
 
 class TestQwenLiveInMeeting:
@@ -1151,7 +1151,7 @@ class TestShortFragmentWaits:
 
         session = MeetingSession(backend=MockBackend(), vad=None, audio_source=MockAudioSource())
         session._processor = Proc()
-        assert session._may_close_on_silence(900) is False
+        assert session._track0().may_close_on_silence(900) is False
         assert session._processor.asked == [900]
 
 

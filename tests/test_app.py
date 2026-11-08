@@ -3540,3 +3540,19 @@ def test_finalizing_estimate_counts_both_channels():
         inst._stop_meeting()
     assert 179 <= seen["flag"][1] <= 181
     session.channel_audio.assert_not_called()
+
+
+def test_final_pass_partial_engine_label_names_failed_track(tmp_path, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "FAILED_DIR", str(tmp_path))
+    q = _SeqQwen(["mic words"], fail_on=2)
+    inst = _engine_app(qwen=q)
+    inst._notify = MagicMock()
+    s = _FakeDualSession()
+    engines = []
+    orig = s.write_final_transcript
+    s.write_final_transcript = lambda text, engine, *a, **k: (engines.append(engine),
+                                                              orig(text, engine, *a, **k))[1]
+    inst._meeting_final_pass(s)
+    assert engines and "partial" in engines[-1] and "Remote failed" in engines[-1]
+    assert "full pass" not in engines[-1]

@@ -79,4 +79,6 @@ class ChannelTrack:
         if self.vad:
             self.vad.reset()
         self.segment_start = None
+        # Committed text is in the segments now; stale live text would show it twice
+        self.live_confirmed = self.live_unconfirmed = ""
         self.buffer_start = now           # the trimmed buffer holds audio from here on
