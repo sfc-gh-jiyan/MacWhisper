@@ -130,7 +130,7 @@ def test_custom_rules_language_does_not_pick_the_output_language():
 
 
 def test_language_note_lists_the_english_words_to_keep():
-    note = bf.language_note("我们需要一个markdown file去回复他的comment")
+    note = bf.language_note("我们需要一个markdown file去回答她的comment")
     assert "markdown file" in note and "comment" in note and "Write Chinese" in note
     assert "English" in bf.language_note("I have a question about PHP.")
     assert "Chinese" in bf.language_note("我们开会吧")

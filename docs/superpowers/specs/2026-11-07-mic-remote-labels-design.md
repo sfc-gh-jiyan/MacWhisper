@@ -1,16 +1,16 @@
 # Meeting Mode: label every line Mic or Remote
 
-Date: 2026-11-07 · Status: draft for Jackie's review
+Date: 2026-11-07 · Status: draft for the owner's review
 
 ## Intent
 
-Jackie records customer calls (phone apps, customer-hosted meetings with no
+The user records customer calls (phone apps, customer-hosted meetings with no
 Zoom transcript) and reads the transcript afterwards to remember details. Today
 the transcript is one undifferentiated stream, so she cannot tell what she said
 from what the customer said.
 
 Qwen3-ASR returns text only; it has no speaker information. But Meeting Mode
-already captures two separate sources: the microphone (Jackie: she nearly
+already captures two separate sources: the microphone (the user: she nearly
 always speaks through it) and system audio (everyone on the far end, via
 ScreenCaptureKit). Labelling by source is reliable and needs no speaker
 recognition model.
@@ -43,7 +43,7 @@ recognition model.
 | **B (chosen)** | Transcribe mic and system audio as two independent tracks; merge by time | Nothing lost in crosstalk, labels are exact; more Qwen work when both talk |
 | C | B, plus a diarization model on the Remote track after the meeting | Can tell customers apart; model quality on mixed Chinese/English unverified |
 
-Jackie picked **B** and the labels **Mic / Remote** (2026-11-07). C stays
+The user picked **B** and the labels **Mic / Remote** (2026-11-07). C stays
 open: installed `mlx-audio` 0.5.9 ships `moss_transcribe_diarize`,
 `vibevoice_asr` and an ECAPA speaker-embedding model, none tried yet.
 
@@ -54,7 +54,7 @@ open: installed `mlx-audio` 0.5.9 ships `moss_transcribe_diarize`,
 Markdown, one paragraph per segment, ordered by start time:
 
 ```
-**[00:12] Mic:** 我们先看一下这个 query profile
+**[00:12] Mic:** 我们先看一下这个 test file
 **[00:18] Remote:** OK, which warehouse is this?
 ```
 
@@ -91,7 +91,7 @@ tracks transcribe normally; duplicates are removed **by text, after commit**:
 a Mic segment whose time range overlaps a Remote segment and whose text is
 mostly the same (normalized similarity >= `ECHO_SIMILARITY`, start at 0.8) is
 dropped. Logged (both texts, score) so the threshold can be tuned. An
-audio-level rule was rejected: with headphones it would delete Jackie's soft
+audio-level rule was rejected: with headphones it would delete the user's soft
 speech during crosstalk (lost content). *(Builder-check call.)*
 
 Raw audio is never altered: `_mic.wav` and `_sys.wav` stay exactly as
@@ -111,7 +111,7 @@ Mic and Remote lines are ordered by this time. *(Builder-check call.)*
 Shows the latest line of each track, labelled, newest at the bottom:
 
 ```
-Mic: 我们先看一下这个 query profile
+Mic: 我们先看一下这个 test file
 Remote: OK, which warehouse is
 ```
 
@@ -121,7 +121,7 @@ The existing outage path (buffer audio, retry the sidecar, catch up) runs per
 track; one restart attempt serves both. `had_engine_outage` is set if either
 track lost the engine.
 
-### Final pass (off for Jackie, on by default)
+### Final pass (off for the user, on by default)
 
 Today it mixes both channels into one request. Dual channel: transcribe the
 mic and system recordings as two requests, then label each result. Because a
@@ -131,7 +131,7 @@ time-ordered live transcript, which stays in the file. Single channel:
 unchanged.
 
 Two whole-meeting requests take about twice as long, so Push to Talk is paused
-about twice as long. Accepted: Jackie has the final pass off; it only runs
+about twice as long. Accepted: the user has the final pass off; it only runs
 forced after an engine outage. `FINAL_PASS_S_PER_AUDIO_S`-based estimates use
 the total audio of both tracks. *(Builder-check call.)*
 

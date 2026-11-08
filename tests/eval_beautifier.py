@@ -1,4 +1,4 @@
-"""Measure the AI beautifier on the user's real dictations (no app changes).
+"""Measure the AI beautifier on saved dictations (no app changes).
 
     venv/bin/python tests/eval_beautifier.py            # 30 dictations x 4 levels
     venv/bin/python tests/eval_beautifier.py --n 6      # quick run
@@ -78,7 +78,7 @@ def main() -> int:
 
 
 def render(results) -> str:
-    out = ["# AI 美化实测（你的真实听写）", "",
+    out = ["# AI 美化实测（已保存的听写）", "",
            f"{len(results)} 条听写，每条四档各跑一次。自定义档用的示例规则：「{SAMPLE_CUSTOM}」", "",
            "| 档位 | 平均秒数 | 最慢 | 超过 5 秒的条数 | 出错 |", "|---|---|---|---|---|"]
     for lv in LEVELS:

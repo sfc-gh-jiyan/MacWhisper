@@ -51,7 +51,7 @@ Qwen3-ASR is now the only engine. This release also adds self-correction, an opt
 - **Push to Talk window stuck after releasing the key.** The key is now read from the HID flag bits (verified on device).
 - A quick double press of the Push to Talk key left an overlay stuck on screen.
 - **A hung microphone close no longer freezes Push to Talk:** it times out after 2 s, writes a thread dump to the log and shows a notice.
-- **Intentional repeats are kept** ("naughty, naughty, naughty" is no longer deleted). Only runaway decoder loops (6 or more repeats) are trimmed to one copy.
+- **Intentional repeats are kept** ("silly, silly, silly" is no longer deleted). Only runaway decoder loops (6 or more repeats) are trimmed to one copy.
 - **Qwen vocabulary-list echoes:** holding Push to Talk in silence no longer pastes or previews the vocabulary list or a lone vocabulary word.
 - Review and Add Correction guard against reversed or harmful corrections.
 - **Qwen3 meeting timeouts:** generation is capped, silent segments are skipped, and Qwen3 restarts during the meeting with backoff.

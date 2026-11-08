@@ -41,7 +41,7 @@ _SPACE_CJK_CJK = re.compile(rf"(?<=[{_CJK}{_CJK_PUNCT}])\s+(?=[{_CJK}{_CJK_PUNCT
 _EXTRA_PHRASES = {"谢谢大家", "谢谢观看", "感谢观看"}
 
 
-# ── Stutter repeats ("我我我们", "I I", "被占用，被占用") ──
+# ── Stutter repeats ("我我我们", "I I", "被借走，被借走") ──
 # Only repeats that sit right next to each other. Chinese has many normal
 # reduplications (看看, 找找, 整整, 慢慢, 大段大段, 什么什么), so 1- and 2-character
 # repeats are collapsed only for words that are never doubled on purpose.
@@ -55,7 +55,7 @@ _NUMERALS = set("零一二三四五六七八九十百千万两")
 _SEP = r"[，,、 ]"
 _CLAUSE_END = rf"(?=[{_PUNCT}\s]|$)"
 # Back to back: always a stutter. With a comma between: only when the clause
-# ends after the repeat ("被占用，被占用，"), not "一个账户，一个账户对应…".
+# ends after the repeat ("被借走，被借走，"), not "一个座位，一个座位对应…".
 _REPEAT_PHRASE = re.compile(rf"([{_CJK}]{{3,8}})(?:\1)+")
 _REPEAT_PHRASE_SEP = re.compile(rf"([{_CJK}]{{3,8}})(?:{_SEP}\1)+{_CLAUSE_END}")
 _REPEAT_WORD = re.compile(rf"({'|'.join(_STUTTER_WORDS)})(?:{_SEP}?\1)+")
@@ -73,7 +73,7 @@ def _keep_first_en(m: re.Match) -> str:
 def _keep_first_cjk(m: re.Match) -> str:
     phrase = m.group(1)
     if sum(ch in _NUMERALS for ch in phrase) >= 2:
-        return m.group(0)                      # 十月十九、十月二十 is a list, not a stutter
+        return m.group(0)                      # 五月十九、五月二十 is a list, not a stutter
     return phrase
 
 
@@ -103,7 +103,7 @@ def is_qwen_hallucination(text: str) -> bool:
     return any(sub in text for sub in _HALLUCINATION_SUBSTRINGS)
 
 
-# People repeat 2-4 times on purpose ("naughty, naughty, naughty", "no no no");
+# People repeat 2-4 times on purpose ("silly, silly, silly", "no no no");
 # a looping decoder repeats dozens of times (2026-10-29: 我们 x ~225).
 LOOP_MIN_REPEATS = 6
 SHORT_UNIT_MIN_REPEATS = 12   # 1-2 chars: 哈哈哈哈哈哈 / 对对对对对对 are speech
@@ -115,7 +115,7 @@ def trim_runaway_loop(text: str) -> str:
     """Cut a tail repeated LOOP_MIN_REPEATS+ times down to one copy.
 
     Replaces Whisper's strip_trailing_repetition for Qwen3: that rule deleted
-    any tail repeated 3+ times, so "Naughty, naughty, naughty." became ""
+    any tail repeated 3+ times, so "Silly, silly, silly." became ""
     (2026-11-07). Matching ignores case, spaces and punctuation, like it did.
     """
     stripped = text.rstrip()

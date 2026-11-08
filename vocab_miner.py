@@ -118,7 +118,7 @@ def _words(s: str) -> list[str]:
 def _is_rewrite(heard: str, correct: str) -> bool:
     """Grammar fixes, translations, stutter removal, spacing — not vocabulary."""
     if _CJK.search(heard) and re.search(r"[A-Za-z]", heard):
-        return True                                   # mixed-script phrase ("fold的这个东西")
+        return True                                   # mixed-script phrase ("box的这个东西")
     if len(_words(heard)) > MAX_LATIN_WORDS or len(_words(correct)) > MAX_LATIN_WORDS + 1:
         return True
     if len(_CJK.findall(heard)) > MAX_CJK_CHARS:

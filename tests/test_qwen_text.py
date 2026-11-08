@@ -1,24 +1,24 @@
-"""Tests for Qwen3-ASR output post-processing (examples from real outputs)."""
+"""Tests for Qwen3-ASR output post-processing (examples modelled on real outputs)."""
 
 import qwen_text as qt
 
 
 def test_tight_spacing_between_cjk_and_latin():
-    assert qt.tighten_spacing("你帮我查下现在的这个 commit 的情况") == "你帮我查下现在的这个commit的情况"
-    assert qt.tighten_spacing("这个 trust center 有没有") == "这个trust center有没有"
-    assert qt.tighten_spacing("It's beautiful. 我很喜欢") == "It's beautiful.我很喜欢"
+    assert qt.tighten_spacing("你帮我看下今天的这个 menu 的价格") == "你帮我看下今天的这个menu的价格"
+    assert qt.tighten_spacing("这个 coffee shop 有没有") == "这个coffee shop有没有"
+    assert qt.tighten_spacing("It's sunny. 我很开心") == "It's sunny.我很开心"
 
 
 def test_spacing_keeps_english_word_spaces():
-    s = "Wait for a second, this does not make any sense."
+    s = "Hold on a moment, this recipe needs more salt."
     assert qt.tighten_spacing(s) == s
 
 
 def test_strip_standalone_fillers():
-    assert qt.strip_fillers("OK，我们再来录一段。嗯，This is the first day.") == \
-        "OK，我们再来录一段。This is the first day."
-    assert qt.strip_fillers("我打算用，嗯，这个这个太多了") == "我打算用，这个这个太多了"
-    assert qt.strip_fillers("Like um, we not only search") == "Like we not only search"
+    assert qt.strip_fillers("OK，我们再来唱一遍。嗯，This is the second song.") == \
+        "OK，我们再来唱一遍。This is the second song."
+    assert qt.strip_fillers("我打算买，嗯，这个这个太贵了") == "我打算买，这个这个太贵了"
+    assert qt.strip_fillers("Like um, we not only cook") == "Like we not only cook"
     assert qt.strip_fillers("呃，你好") == "你好"
 
 
@@ -34,9 +34,9 @@ def test_filler_only_output_becomes_empty():
 
 
 def test_long_repeated_english_is_not_discarded():
-    """Real 67 s clip: Whisper's word_repeat rule wiped a correct transcript."""
-    text = ("For the Jira search, we just stay focused on the Jira search. We want to "
-            "improve the Jira search results to get exactly what what they want.")
+    """Long clip (modelled on a real one): Whisper's word_repeat rule wiped a correct transcript."""
+    text = ("For the garden plan, we just stay focused on the garden plan. We want to "
+            "improve the garden plan so the kids get exactly what what they like.")
     assert qt.postprocess(text) == text
     # Kept whole; only the adjacent stutter "what what" is collapsed (roadmap D)
     assert qt.postprocess(text, collapse=True) == text.replace("what what", "what")
@@ -52,52 +52,52 @@ def test_traditional_to_simplified():
 
 
 def test_options_can_be_disabled():
-    raw = "嗯，这个 commit 的情况"
+    raw = "嗯，这个 menu 的价格"
     assert qt.postprocess(raw, strip_filler_words=False, tight=False) == raw
 
 
-# ── Stutter repeats (roadmap D, from the user's real dictations 2026-10) ──
+# ── Stutter repeats (roadmap D, modelled on real dictations) ──
 
 import pytest  # noqa: E402
 
 MUST_CHANGE = [
-    ("你先别着急做，我我我们再思考一下。", "你先别着急做，我们再思考一下。"),
-    ("没有主任的Jira还是发给Review会会会花。", "没有主任的Jira还是发给Review会花。"),
-    ("然后仔细的研究一下它它的history", "然后仔细的研究一下它的history"),
-    ("但是我们的我们的priority还是work on the customer case。",
-     "但是我们的priority还是work on the customer case。"),
-    ("我现在基本上都用的是这个这个app。", "我现在基本上都用的是这个app。"),
-    ("我的八四零零端口经常会被占用，被占用，我也不知道", "我的八四零零端口经常会被占用，我也不知道"),
-    ("这个东西你可以你可以试一下", "这个东西你可以试一下"),
-    ("Okay, next, I I saw the customer list.", "Okay, next, I saw the customer list."),
-    ("I felt the the PR.", "I felt the PR."),
-    ("We we need it. You you know.", "We need it. You know."),
-    ("Let let me check", "Let me check"),
-    ("然后就是就是这个问题", "然后就是这个问题"),
-    ("这这这个或者那那个", "这个或者那个"),
-    ("start a a design", "start a design"),
+    ("你先别急着改，我我我们先讨论一下。", "你先别急着改，我们先讨论一下。"),
+    ("周末的报告还是交给老师会会会好。", "周末的报告还是交给老师会好。"),
+    ("然后认真的看一下它它的color", "然后认真的看一下它的color"),
+    ("但是我们的我们的plan还是go to the city park。",
+     "但是我们的plan还是go to the city park。"),
+    ("我平时基本上都喝的是这个这个茶。", "我平时基本上都喝的是这个茶。"),
+    ("我的自行车经常会被借走，被借走，我也不知道", "我的自行车经常会被借走，我也不知道"),
+    ("这个蛋糕你可以你可以尝一下", "这个蛋糕你可以尝一下"),
+    ("Okay, next, I I read the shopping list.", "Okay, next, I read the shopping list."),
+    ("I fed the the cat.", "I fed the cat."),
+    ("We we tried it. You you see.", "We tried it. You see."),
+    ("Let let me think", "Let me think"),
+    ("然后就是就是那个想法", "然后就是那个想法"),
+    ("这这这个还是那那个", "这个还是那个"),
+    ("write a a poem", "write a poem"),
 ]
 
 MUST_KEEP = [
-    "你能找找是什么问题吗？",
-    "看看到底是什么问题导致的这个结果？",
-    "把它怎么合并和整整改。",
-    "慢慢来，好好想想，谢谢。",
-    "然后大段大段的这个detail",
-    "什么什么的都可以",
-    "你说得对不对？对对，就是这样。",
-    "He had had enough. I said that that was fine.",
-    "the Jira search returned it, and the Jira search is slow",
-    "三三两两的人",
-    "我们每天天天都在写",
-    "的的确确是这样，是是非非说不清，和和气气",
-    "你想想看",
-    # false positives found replaying 1288 real dictations (2026-10-24)
-    "我想动这个A P P。",
-    "这个十月十九、十月二十、十月二十一",
-    "一个email一定对应一个账户，一个账户对应一个email",
-    "this is very very important, really really good",
-    "我的意思，我的意思是，不需要",   # comma + clause goes on: too risky (see 一个账户)
+    "你能找找钥匙在哪里吗？",
+    "看看到底是什么原因导致的这个变化？",
+    "把它怎么分类和整整改。",
+    "慢慢来，好好休息，谢谢。",
+    "然后大段大段的这个example",
+    "水果什么什么的都可以",
+    "你觉得好不好？对对，就是这样。",
+    "She had had lunch. He knew that that was true.",
+    "the weather report said rain, and the weather report is often wrong",
+    "三三两两的鸟",
+    "我们每天天天都在跑步",
+    "的的确确是这样，是是非非很难讲，和和气气",
+    "你再想想看",
+    # false-positive patterns found replaying real dictations (2026-10-24)
+    "我想打开这个A P P。",
+    "这个五月十九、五月二十、五月二十一",
+    "一个学生一定对应一个座位，一个座位对应一个学生",
+    "this is very very simple, really really nice",
+    "我的想法，我的想法是，不着急",   # comma + clause goes on: too risky (see 一个座位)
 ]
 
 
@@ -119,13 +119,13 @@ def test_postprocess_collapses_only_when_asked():
 
 # ── Intentional repeats vs. runaway loops (2026-11-07) ──
 # Whisper's strip_trailing_repetition deleted any tail repeated 3+ times, so
-# "Naughty, naughty, naughty." was pasted as "" and "Hailey is naughty,
-# naughty, naughty." as "Hailey is". People repeat 2-4 times on purpose;
+# "Silly, silly, silly." was pasted as "" and "The puppy is silly,
+# silly, silly." as "The puppy is". People repeat 2-4 times on purpose;
 # a looping model repeats dozens of times.
 
 @pytest.mark.parametrize("text", [
-    "Naughty, naughty, naughty.",
-    "Hailey is naughty, naughty, naughty.",
+    "Silly, silly, silly.",
+    "The puppy is silly, silly, silly.",
     "Bye bye bye.",
     "No, no, no.",
     "我们走吧走吧走吧。",
@@ -140,9 +140,9 @@ def test_intentional_repeats_are_kept(text):
 
 def test_runaway_loop_keeps_one_copy():
     """2026-10-29 meeting: the live decoder looped on 我们 ~225 times."""
-    text = "will be like required to? " + "我们" * 120
+    text = "what time is it now? " + "我们" * 120
     out = qt.postprocess(text, strip_filler_words=False, tight=False)
-    assert out.startswith("will be like required to?")
+    assert out.startswith("what time is it now?")
     assert out.count("我们") == 1
 
 
