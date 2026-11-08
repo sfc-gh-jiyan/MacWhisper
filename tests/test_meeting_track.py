@@ -327,10 +327,17 @@ def test_echo_mic_segment_dropped_remote_kept(fake_clock, caplog):
                       remote_text="OK which warehouse is this")
     for t in range(1, 6):
         _tick(s, fake_clock, t0 + t, mic="speech", remote="speech")
-    with caplog.at_level("INFO", logger="meeting"):
+    # WARNING: the app's default log level; a dropped line must reach the log file
+    with caplog.at_level("WARNING", logger="meeting"):
         _tick(s, fake_clock, t0 + 6, mic="close", remote="close")
     assert [g.source for g in s.segments] == ["remote"]
     assert "Echo dropped (Mic)" in caplog.text
+
+
+def test_channel_mode_logged_at_default_level(fake_clock, caplog):
+    with caplog.at_level("WARNING", logger="meeting"):
+        _dual_session(fake_clock)
+    assert "Meeting started: dual channel (Mic + Remote)" in caplog.text
 
 
 def test_echo_dropped_when_mic_commits_after_remote(fake_clock):
