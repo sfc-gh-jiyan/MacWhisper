@@ -52,7 +52,15 @@ else
 fi
 
 echo "[2/6] Installing dependencies (this may take a few minutes)..."
-"$SCRIPT_DIR/venv/bin/pip" install --progress-bar on -r "$SCRIPT_DIR/requirements.txt"
+# Upgrade pip first (older pip releases have security advisories), then install
+# the exact versions in requirements.lock. If the lock cannot be installed on
+# this machine (e.g. no wheel for this Python), fall back to requirements.txt.
+"$SCRIPT_DIR/venv/bin/pip" install --progress-bar on --upgrade pip
+if ! "$SCRIPT_DIR/venv/bin/pip" install --progress-bar on -r "$SCRIPT_DIR/requirements.lock"; then
+    echo "  ⚠  Could not install the locked versions (requirements.lock) on this machine."
+    echo "     Falling back to requirements.txt (latest allowed versions, not audited)."
+    "$SCRIPT_DIR/venv/bin/pip" install --progress-bar on -r "$SCRIPT_DIR/requirements.txt"
+fi
 
 # ── Step 2: Create .app bundle ────────────────────────────
 
